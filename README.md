@@ -27,8 +27,6 @@ Both the Builder Tool and the installers it produces are standalone Windows desk
 
 ### Screenshots
 
-*(Fill these in with real screenshots — see `docs/screenshots/`)*
-
 | Builder Tool — Main Screen | EULA Screen |
 |---|---|
 | ![Builder main screen](docs/screenshots/builder-main.png) | ![EULA screen](docs/screenshots/eula.png) |
@@ -36,7 +34,6 @@ Both the Builder Tool and the installers it produces are standalone Windows desk
 | Installer — Drag to Install | Build Progress |
 |---|---|
 | ![Drag to install](docs/screenshots/installer-drag.png) | ![Build progress](docs/screenshots/build-progress.png) |
-
 
 ### Features
 
@@ -46,17 +43,19 @@ Both the Builder Tool and the installers it produces are standalone Windows desk
 - Environment check on launch — warns if `pyinstaller` / `python` / `pywebview` aren't found on the machine building the installer, with install commands
 - Runnable both as a raw `.py` script and as a compiled `.exe` (see [Requirements](#requirements) below)
 - Real-time build progress with staged, non-linear animation (not a fake linear bar)
+- Resizable, frameless window with a custom-implemented drag/resize (frameless windows lose native resize handles by default)
+- Built-in Help button with the full manual embedded in-app, not just an external doc
 
 **The installer it produces**
 - macOS DMG-style drag-to-install window, custom-drawn window drag (no native-drag jump bug), DPI-aware rendering
 - EULA screen (skipped if not configured)
-- Existing-installation detection → silent upgrade flow
+- Existing-installation detection with **actual version comparison** (not just presence) — offers an upgrade only if the new version is genuinely newer, and warns instead if you're installing the same or an older version
 - Disk space check, running-process check, single-instance lock
 - Real copy progress + **post-copy integrity verification (CRC32 checksum, not just file size)**
 - **Automatic rollback on failure** — a failed install cleans up after itself, no half-installed leftovers
 - Desktop / Start Menu shortcuts, file associations, PATH registration
 - Registry entries for "Apps & Features": `DisplayName`, `Publisher`, `DisplayVersion`, `InstallLocation`, `EstimatedSize`, `InstallDate`, `UninstallString`, `QuietUninstallString`
-- **Silent / CLI install mode** for enterprise deployment: `Setup_XXX.exe /S /D=C:\Apps\MyApp /NODESKTOPSHORTCUT`, exit code reflects success/failure
+- **Silent / CLI install mode** for enterprise deployment: `Setup_XXX.exe /S /D=C:\Apps\MyApp /NODESKTOPSHORTCUT`. The installer is built `--noconsole`, so it has no console to print to even when run from `cmd` — check the result via the process **exit code** (`echo %errorlevel%` right after running, or `$LASTEXITCODE` in PowerShell; `0` = success), and see `%TEMP%\<app name>_silent_install_log.txt` for details
 - Manifest-based uninstaller — only removes what it installed, preserves user-generated files in the install folder; falls back to full-folder cleanup only when no manifest is found
 
 ### Requirements
@@ -124,8 +123,6 @@ MIT — see [`LICENSE`](LICENSE).
 
 ### 截圖
 
-*（請放上實機截圖，路徑放在 `docs/screenshots/` 資料夾底下）*
-
 | 打包工具主畫面 | EULA 同意頁 |
 |---|---|
 | ![打包工具主畫面](docs/screenshots/builder-main.png) | ![EULA](docs/screenshots/eula.png) |
@@ -133,8 +130,6 @@ MIT — see [`LICENSE`](LICENSE).
 | 安裝端拖曳安裝畫面 | 編譯進度 |
 |---|---|
 | ![拖曳安裝](docs/screenshots/installer-drag.png) | ![編譯進度](docs/screenshots/build-progress.png) |
-
-
 
 ### 功能
 
@@ -144,17 +139,19 @@ MIT — see [`LICENSE`](LICENSE).
 - 開啟時自動環境檢查——沒裝 `pyinstaller` / `python` / `pywebview` 會直接跳提示附安裝指令
 - **`.py` 直接執行跟編譯成 `.exe` 都能用**（見下方〈環境需求〉）
 - 即時編譯進度，分階段的漸進動畫（不是假的線性進度條）
+- 無邊框視窗可自由調整大小（無邊框視窗預設沒有原生縮放邊界，這是自己刻的拖曳縮放）
+- 內建「使用說明」按鈕，完整手冊直接整合在工具裡，不用另外找文件
 
 **輸出的安裝檔**
 - macOS DMG 風格拖曳安裝視窗，自訂拖曳邏輯（不用原生拖曳，沒有跳動 bug），DPI 感知渲染
 - EULA 同意頁（沒設定就自動跳過）
-- 偵測已安裝版本 → 靜默更新覆蓋流程
+- 偵測已安裝版本時會**真的比對版本新舊**（不是只看有沒有裝過）——只有新版本才會問是否更新，版本相同或更舊會另外提示警告
 - 磁碟空間檢查、執行中偵測、單一實例鎖
 - 真實複製進度 + **複製後完整性驗證（CRC32 checksum，不只是比檔案大小）**
 - **失敗自動回滾**——安裝失敗會自動清乾淨，不留下裝到一半的殘骸
 - 桌面/開始功能表捷徑、檔案關聯、加入 PATH
 - 「新增或移除程式」清單的完整登錄表欄位：`DisplayName`、`Publisher`、`DisplayVersion`、`InstallLocation`、`EstimatedSize`、`InstallDate`、`UninstallString`、`QuietUninstallString`
-- **靜默 / 命令列安裝模式**，給企業批次部署用：`Setup_XXX.exe /S /D=C:\Apps\MyApp /NODESKTOPSHORTCUT`，exit code 直接反映成功或失敗
+- **靜默 / 命令列安裝模式**，給企業批次部署用：`Setup_XXX.exe /S /D=C:\Apps\MyApp /NODESKTOPSHORTCUT`。安裝檔是用 `--noconsole` 編譯的，即使從 `cmd` 執行也沒有主控台可以印字——用 process 的 **exit code** 檢查結果就好（執行完緊接著在 cmd 打 `echo %errorlevel%`，或 PowerShell 的 `$LASTEXITCODE`，`0` 代表成功），詳細訊息會寫進 `%TEMP%\<應用程式名稱>_silent_install_log.txt`
 - 清單式解除安裝——只刪自己裝的東西，保留使用者在安裝目錄裡自己產生的檔案；找不到清單才會退回整個資料夾清除
 
 ### 環境需求
