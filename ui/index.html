@@ -1,0 +1,432 @@
+<!--
+    index.html — 安裝程式主介面（macOS DMG 風格拖曳安裝）
+
+    修正紀錄：
+    - 原本整個檔案沒有任何 pywebview-drag-region class，視窗完全無法拖動。
+      後來補上 .drag-region 並套用 pywebview-drag-region，但發現這個內建機制
+      拖曳開始瞬間會往左上方跳一下才跟上游標，100% 縮放下也會發生，
+      判斷是機制本身的問題。改成完全自己算滑鼠位移量、呼叫 window.move()
+      搬動視窗（見下方 setupCustomDrag() 與 installer_core.py 的
+      start_drag/drag_move/end_drag），徹底繞開這個問題。
+    - 左上角關閉按鈕 z-index 高於拖曳區，仍可正常點擊，不受影響。
+    - .workspace 原本用 align-items: center 對齊三欄（app 圖示／箭頭／資料夾圖示），
+      但三欄底下的文字行數不一樣（資料夾那欄多一行路徑文字），導致「整欄置中」
+      跟「圖示置中」變成兩件事，圖示因此對不齊。改成 align-items: flex-start，
+      讓三欄都從同一條頂線起排，圖示天生落在同一條水平線上，不受文字行數影響。
+    - 整體內容視覺重心偏上：實測上下留白其實接近相等，但左上角關閉按鈕/拖曳區
+      讓上方感覺比較「滿」，下方純空白顯得更空，兩邊觀感不對等。main-view /
+      eula-view 一開始加了 margin-top: 32px 把內容往下推，是憑觀感調的數值。
+      後來查了 Apple 實際「拖曳圖示安裝」DMG 視窗的慣例座標（例如 600x400 的
+      視窗，圖示 Y 座標落在 190，幾乎貼著正中心、只微幅偏上約 2.5%），發現
+      圖示应该幾乎置中、甚至比中心略高，跟 32px 往下推的方向並不一致。
+      改成 margin-top: 8px，改為有實際案例依據的小幅偏移，不是憑感覺的大調整。
+      如果視覺上還是覺得不平衡，這兩個 margin-top 是最直接能再微調的地方。
+    - 「建立桌面捷徑」勾選項原本跟圖示放在同一個 main-view 裡，導致整個內容
+      （圖示+勾選項）被當成一整包置中，圖示因此天生偏在這一整包的上半部，
+      讓人覺得圖示「飄」在上面。現在把它搬出 main-view，改成獨立的 .bottom-bar，
+      用 position: fixed; bottom: 20px 釘死在視窗底部（對應 Apple HIG 的
+      Bottom Bar 慣例、以及 20pt 底邊界留白），不再參與圖示區塊的置中計算，
+      兩者的顯示/隱藏用 setMainViewVisible() 同步（EULA 頁顯示時兩個都要藏）。
+
+    新增紀錄（安裝精靈標準流程補齊）：
+    - EULA 頁：pywebview.api.get_eula_text() 若回傳非空字串，安裝前先顯示同意頁面。
+    - 覆蓋安裝偵測：頁面載入時呼叫 check_existing_install()，偵測到舊版本會跳出
+      「更新覆蓋 / 取消」選擇，選更新會先靜默呼叫舊版本的 uninstall.exe。
+    - 相依元件警告：呼叫 get_dependency_warnings()，非阻擋式提示缺少的執行環境。
+    - 真實進度條：安裝過程由後端呼叫 window.updateInstallProgress(percent, message)
+      即時更新，不再是死文字。
+    - 桌面捷徑小勾選：畫面下方新增一個不搶視覺的勾選框，值會傳給
+      trigger_installation(create_desktop_shortcut)。
+    - 安裝完成彈窗新增「立即執行程式」勾選，完成按鈕會依勾選狀態呼叫 launch_app()。
+-->
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>DMG Installer</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0; padding: 0; background-color: #f5f5f7;
+            width: 100vw; height: 100vh;
+            display: flex; justify-content: center; align-items: center;
+            overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            user-select: none;
+        }
+        /* 頂部一整條透明拖曳區，讓使用者可以按住空白處移動視窗 */
+        .drag-region {
+            position: fixed; top: 0; left: 0; width: 100%; height: 40px;
+            z-index: 9998;
+        }
+        .custom-close-btn {
+            position: fixed; top: 16px; left: 16px; width: 24px; height: 24px;
+            display: flex; align-items: center; justify-content: center;
+            cursor: pointer; border-radius: 50%; background-color: transparent; color: #8e8e93;
+            transition: background-color 0.2s, color 0.2s; z-index: 9999;
+        }
+        .custom-close-btn:hover { background-color: rgba(0, 0, 0, 0.06); color: #1d1d1f; }
+        .css-close-icon { position: relative; width: 10px; height: 10px; }
+        .css-close-icon::before, .css-close-icon::after {
+            content: ''; position: absolute; top: 50%; left: 0; width: 10px; height: 1.5px;
+            background-color: currentColor; border-radius: 1px;
+        }
+        .css-close-icon::before { transform: translateY(-50%) rotate(45deg); }
+        .css-close-icon::after { transform: translateY(-50%) rotate(-45deg); }
+
+        .main-view { display: flex; flex-direction: column; align-items: center; margin-top: 8px; }
+
+        .workspace { display: flex; align-items: flex-start; justify-content: space-between; width: 420px; margin-bottom: 8px; }
+        .icon-box { display: flex; flex-direction: column; align-items: center; width: 160px; text-align: center; }
+        .icon-wrapper { width: 90px; height: 90px; display: flex; justify-content: center; align-items: center; cursor: grab; transition: transform 0.2s; }
+        .icon-wrapper img { width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+        .icon-wrapper:active { cursor: grabbing; transform: scale(0.95); }
+        #drop-target .icon-wrapper { cursor: pointer; }
+
+        .arrow-box { height: 90px; display: flex; align-items: center; }
+        .arrow-svg { width: 28px; height: 28px; }
+
+        .label { margin-top: 12px; font-size: 13px; font-weight: 500; color: #1d1d1f; width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        #path-preview { margin-top: 4px; font-size: 11px; color: #86868b; width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; }
+
+        .drag-over .icon-wrapper { transform: scale(1.08); filter: drop-shadow(0 4px 12px rgba(0, 125, 250, 0.2)); }
+
+        /* 桌面捷徑小勾選：刻意做得不搶視覺 */
+        /* 釘死在視窗底部的工具列，不參與 main-view 的垂直置中；
+           bottom: 20px 對應 Apple HIG 視窗內容離左右下邊界的標準 20pt 留白慣例 */
+        .bottom-bar { position: fixed; bottom: 20px; left: 0; width: 100%; display: flex; justify-content: center; z-index: 50; }
+        .desktop-shortcut-row { display: flex; align-items: center; gap: 6px; }
+        .desktop-shortcut-row input[type="checkbox"] { width: 13px; height: 13px; cursor: pointer; }
+        .desktop-shortcut-row label { font-size: 11px; color: #86868b; cursor: pointer; user-select: none; }
+
+        /* 進度條 */
+        .install-progress-wrap { width: 320px; margin-top: 18px; display: none; }
+        .install-progress-text { font-size: 11px; color: #86868b; text-align: center; margin-bottom: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .install-progress-track { width: 100%; height: 4px; background: #e5e5ea; border-radius: 2px; overflow: hidden; }
+        .install-progress-fill { width: 0%; height: 100%; background: #0071e3; transition: width 0.2s ease; }
+
+        /* 通用質感彈窗樣式 */
+        .nice-modal-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(255, 255, 255, 0.9); backdrop-filter: blur(5px);
+            display: none; justify-content: center; align-items: center; z-index: 10000;
+            opacity: 0; transition: opacity 0.3s ease; padding: 24px;
+        }
+        .nice-modal-overlay.active { display: flex; opacity: 1; }
+        .nice-modal-box {
+            background: white; padding: 24px 32px; border-radius: 16px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.08); text-align: center;
+            transform: scale(0.9); transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+            border: 1px solid #e5e5ea; max-width: 420px; max-height: 80vh; overflow-y: auto;
+        }
+        .nice-modal-overlay.active .nice-modal-box { transform: scale(1); }
+        .nice-icon {
+            width: 44px; height: 44px; background: #34C759; border-radius: 50%;
+            display: flex; justify-content: center; align-items: center; margin: 0 auto 12px auto; color: white;
+        }
+        .nice-icon.error { background: #FF3B30; }
+        .nice-icon.warn { background: #FF9500; }
+        .nice-title { font-size: 17px; font-weight: 600; color: #1d1d1f; margin-bottom: 6px; }
+        .nice-message { font-size: 13px; color: #86868b; margin-bottom: 20px; text-align: left; line-height: 1.6; }
+        .nice-btn {
+            background: #0071e3; color: white; border: none; padding: 8px 24px;
+            border-radius: 20px; font-size: 13px; font-weight: 500; cursor: pointer;
+            transition: background 0.2s; outline: none; margin: 0 4px;
+        }
+        .nice-btn:hover { background: #0077ED; }
+        .nice-btn.secondary { background: #e5e5ea; color: #1d1d1f; }
+        .nice-btn.secondary:hover { background: #d8d8dd; }
+
+        .launch-row { display: flex; align-items: center; justify-content: center; gap: 6px; margin: 4px 0 16px 0; }
+        .launch-row input[type="checkbox"] { width: 14px; height: 14px; cursor: pointer; }
+        .launch-row label { font-size: 12px; color: #1d1d1f; cursor: pointer; user-select: none; }
+
+        /* EULA 頁 */
+        .eula-view { display: none; flex-direction: column; width: 480px; max-height: 85vh; margin-top: 8px; }
+        .eula-view.active { display: flex; }
+        .eula-title { font-size: 16px; font-weight: 600; color: #1d1d1f; margin-bottom: 10px; text-align: center; }
+        .eula-text-box { flex: 1; overflow-y: auto; background: white; border: 1px solid #e5e5ea; border-radius: 10px; padding: 16px; font-size: 12px; color: #3a3a3c; line-height: 1.7; white-space: pre-wrap; max-height: 320px; }
+        .eula-actions { display: flex; justify-content: center; gap: 10px; margin-top: 16px; }
+    </style>
+</head>
+<body>
+
+    <div class="drag-region" id="dragRegion"></div>
+
+    <div class="custom-close-btn" onclick="closeWindow();" title="關閉">
+        <div class="css-close-icon"></div>
+    </div>
+
+    <!-- EULA 同意頁：eula_text 非空時才會顯示 -->
+    <div class="eula-view" id="eulaView">
+        <div class="eula-title" id="eulaTitle">使用者授權合約</div>
+        <div class="eula-text-box" id="eulaTextBox"></div>
+        <div class="eula-actions">
+            <button class="nice-btn secondary" onclick="declineEula()">不同意</button>
+            <button class="nice-btn" onclick="acceptEula()">同意並繼續</button>
+        </div>
+    </div>
+
+    <!-- 主安裝畫面 -->
+    <div class="main-view" id="mainView">
+        <div class="workspace">
+            <div class="icon-box">
+                <div class="icon-wrapper" id="drag-item" draggable="true">
+                    <img src="app_icon.png" alt="App">
+                </div>
+                <div class="label" id="app_name_label">載入中...</div>
+            </div>
+
+            <div class="arrow-box">
+                <svg class="arrow-svg" viewBox="0 0 24 24">
+                    <path d="M5 12h14M12 5l7 7-7 7" stroke="#a1a1a6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+                </svg>
+            </div>
+
+            <div class="icon-box" id="drop-target">
+                <div class="icon-wrapper">
+                    <img src="folder_icon.png" alt="Folder">
+                </div>
+                <div class="label">安裝目的地</div>
+                <div id="path-preview">載入中...</div>
+            </div>
+        </div>
+
+        <div class="install-progress-wrap" id="installProgressWrap">
+            <div class="install-progress-text" id="installProgressText">正在準備...</div>
+            <div class="install-progress-track"><div class="install-progress-fill" id="installProgressFill"></div></div>
+        </div>
+    </div>
+
+    <!-- 獨立釘在視窗底部的工具列，不參與 main-view 的垂直置中，
+         這樣圖示區塊可以抓自己真正的視覺中心，不會被這個勾選項拖著一起算整體置中。
+         對應 Apple HIG 的 Bottom Bar 慣例：底部功能列是釘在視窗邊框上的固定元素。 -->
+    <div class="bottom-bar" id="bottomBar">
+        <div class="desktop-shortcut-row">
+            <input type="checkbox" id="desktopShortcutCheck" checked>
+            <label for="desktopShortcutCheck">建立桌面捷徑</label>
+        </div>
+    </div>
+
+    <!-- 覆蓋安裝偵測 -->
+    <div class="nice-modal-overlay" id="upgradeModal">
+        <div class="nice-modal-box">
+            <div class="nice-icon warn"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L14.7 3.86a2 2 0 0 0-3.4 0z"></path></svg></div>
+            <div class="nice-title">偵測到已安裝的版本</div>
+            <div class="nice-message" id="upgradeMessage"></div>
+            <button class="nice-btn secondary" onclick="cancelUpgrade()">取消</button>
+            <button class="nice-btn" onclick="confirmUpgrade()">更新覆蓋安裝</button>
+        </div>
+    </div>
+
+    <!-- 相依元件警告（非阻擋） -->
+    <div class="nice-modal-overlay" id="depModal">
+        <div class="nice-modal-box">
+            <div class="nice-icon warn"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L14.7 3.86a2 2 0 0 0-3.4 0z"></path></svg></div>
+            <div class="nice-title">建議先安裝以下元件</div>
+            <div class="nice-message" id="depMessage"></div>
+            <button class="nice-btn secondary" onclick="closeDepModal()">仍要繼續安裝</button>
+        </div>
+    </div>
+
+    <!-- 安裝結果彈窗 -->
+    <div class="nice-modal-overlay" id="custom-modal">
+        <div class="nice-modal-box">
+            <div class="nice-icon" id="modal-icon">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            </div>
+            <div class="nice-title" id="modal-title">安裝成功</div>
+            <div class="nice-message" id="modal-message" style="text-align:center;"></div>
+            <div class="launch-row" id="launchRow">
+                <input type="checkbox" id="launchAfterInstall" checked>
+                <label for="launchAfterInstall">安裝完成後立即執行程式</label>
+            </div>
+            <button class="nice-btn" onclick="closeModal()">完成</button>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('contextmenu', (e) => e.preventDefault());
+        function closeWindow() { if (window.pywebview && window.pywebview.api && window.pywebview.api.close_window) { pywebview.api.close_window(); } }
+
+        // 自訂視窗拖曳：不依賴 pywebview 內建的 pywebview-drag-region（該機制拖曳開始瞬間
+        // 會跳一下，100% 縮放下也會發生，判斷是機制本身的問題），改成自己算滑鼠位移量。
+        // 按下當下記錄一次基準點，之後每一幀只送「相對位移量」給後端搬動視窗，
+        // 用 requestAnimationFrame 節流，避免 mousemove 觸發太頻繁造成 IPC 塞車。
+        (function setupCustomDrag() {
+            const dragRegion = document.getElementById('dragRegion');
+            let isDragging = false;
+            let pendingPos = null;
+
+            dragRegion.addEventListener('mousedown', (e) => {
+                isDragging = true;
+                pywebview.api.start_drag(e.screenX, e.screenY);
+            });
+            document.addEventListener('mousemove', (e) => {
+                if (!isDragging) return;
+                pendingPos = [e.screenX, e.screenY];
+            });
+            document.addEventListener('mouseup', () => {
+                if (isDragging) { isDragging = false; pendingPos = null; pywebview.api.end_drag(); }
+            });
+            function dragLoop() {
+                if (isDragging && pendingPos) {
+                    pywebview.api.drag_move(pendingPos[0], pendingPos[1]);
+                    pendingPos = null;
+                }
+                requestAnimationFrame(dragLoop);
+            }
+            requestAnimationFrame(dragLoop);
+        })();
+
+        function showModal(title, message, isError = false, showLaunchOption = false) {
+            const modal = document.getElementById('custom-modal');
+            const icon = document.getElementById('modal-icon');
+            document.getElementById('modal-title').innerText = title;
+            const msgEl = document.getElementById('modal-message');
+            msgEl.innerText = message;
+            msgEl.style.display = message ? 'block' : 'none';
+
+            if (isError) {
+                icon.className = 'nice-icon error';
+                icon.innerHTML = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>';
+            } else {
+                icon.className = 'nice-icon';
+                icon.innerHTML = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+            }
+            document.getElementById('launchRow').style.display = showLaunchOption ? 'flex' : 'none';
+            modal.classList.add('active');
+        }
+
+        let installSucceeded = false;
+
+        async function closeModal() {
+            document.getElementById('custom-modal').classList.remove('active');
+            if (installSucceeded && document.getElementById('launchAfterInstall').checked) {
+                await pywebview.api.launch_app();
+            }
+            if (installSucceeded) {
+                closeWindow();
+            }
+        }
+
+        // mainView 跟 bottomBar（底部工具列）要一起顯示/隱藏：
+        // EULA 頁顯示的時候，底部那個「建立桌面捷徑」勾選項也不該露出來。
+        function setMainViewVisible(visible) {
+            document.getElementById('mainView').style.display = visible ? 'flex' : 'none';
+            document.getElementById('bottomBar').style.display = visible ? 'flex' : 'none';
+        }
+
+        // ---------------- EULA ----------------
+        function declineEula() { closeWindow(); }
+        function acceptEula() {
+            document.getElementById('eulaView').classList.remove('active');
+            setMainViewVisible(true);
+            afterEula();
+        }
+
+        // ---------------- 覆蓋安裝偵測 ----------------
+        let pendingExistingInstall = null;
+        function cancelUpgrade() { document.getElementById('upgradeModal').classList.remove('active'); closeWindow(); }
+        async function confirmUpgrade() {
+            document.getElementById('upgradeModal').classList.remove('active');
+            document.getElementById('installProgressWrap').style.display = 'block';
+            document.getElementById('installProgressText').innerText = '正在移除舊版本...';
+            const result = await pywebview.api.run_upgrade_uninstall();
+            document.getElementById('installProgressWrap').style.display = 'none';
+            if (result.status === 'error') {
+                showModal('移除舊版本失敗', result.message, true, false);
+                return;
+            }
+            afterUpgradeCheck();
+        }
+
+        // ---------------- 相依元件警告 ----------------
+        function closeDepModal() { document.getElementById('depModal').classList.remove('active'); }
+
+        const dragItem = document.getElementById('drag-item');
+        const dropTarget = document.getElementById('drop-target');
+        const pathPreview = document.getElementById('path-preview');
+        const appLabel = document.getElementById('app_name_label');
+
+        window.addEventListener('pywebviewready', async () => {
+            const defaultPath = await pywebview.api.get_default_path();
+            const appName = await pywebview.api.get_app_name();
+            pathPreview.innerText = defaultPath;
+            pathPreview.setAttribute('title', defaultPath);
+            appLabel.innerText = appName;
+            appLabel.setAttribute('title', appName);
+
+            const eulaText = await pywebview.api.get_eula_text();
+            if (eulaText && eulaText.trim().length > 0) {
+                document.getElementById('eulaTextBox').innerText = eulaText;
+                setMainViewVisible(false);
+                document.getElementById('eulaView').classList.add('active');
+            } else {
+                setMainViewVisible(true);
+                afterEula();
+            }
+        });
+
+        async function afterEula() {
+            const existing = await pywebview.api.check_existing_install();
+            if (existing && existing.exists) {
+                document.getElementById('upgradeMessage').innerText =
+                    `偵測到已安裝版本 ${existing.version}，選擇「更新覆蓋安裝」會先移除舊版本再安裝新版本，選擇「取消」則結束安裝程式。`;
+                document.getElementById('upgradeModal').classList.add('active');
+            } else {
+                afterUpgradeCheck();
+            }
+        }
+
+        async function afterUpgradeCheck() {
+            const warnings = await pywebview.api.get_dependency_warnings();
+            if (warnings && warnings.length > 0) {
+                document.getElementById('depMessage').innerHTML = warnings
+                    .map(w => `• ${w.name}（<a href="#" onclick="pywebview.api.open_url('${w.url}'); return false;">前往下載</a>）`)
+                    .join('<br>');
+                document.getElementById('depModal').classList.add('active');
+            }
+        }
+
+        dropTarget.addEventListener('click', async () => {
+            const newPath = await pywebview.api.select_folder();
+            if (newPath) { pathPreview.innerText = newPath; pathPreview.setAttribute('title', newPath); }
+        });
+
+        dragItem.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/plain', 'install-trigger'); });
+        dropTarget.addEventListener('dragover', (e) => { e.preventDefault(); dropTarget.classList.add('drag-over'); });
+        dropTarget.addEventListener('dragleave', () => { dropTarget.classList.remove('drag-over'); });
+
+        window.updateInstallProgress = function (percent, message) {
+            document.getElementById('installProgressWrap').style.display = 'block';
+            document.getElementById('installProgressText').innerText = message;
+            document.getElementById('installProgressFill').style.width = percent + '%';
+        };
+
+        dropTarget.addEventListener('drop', async (e) => {
+            e.preventDefault();
+            dropTarget.classList.remove('drag-over');
+            if (e.dataTransfer.getData('text/plain') === 'install-trigger') {
+                const createDesktopShortcut = document.getElementById('desktopShortcutCheck').checked;
+                document.getElementById('installProgressWrap').style.display = 'block';
+                document.getElementById('installProgressText').innerText = '正在初始化安裝...';
+                document.getElementById('installProgressFill').style.width = '0%';
+                pathPreview.innerText = '正在安裝...';
+
+                const result = await pywebview.api.trigger_installation(createDesktopShortcut);
+
+                if (result.status === 'success') {
+                    installSucceeded = true;
+                    showModal('安裝成功', '', false, true);
+                    pathPreview.innerText = '安裝完成！';
+                } else {
+                    installSucceeded = false;
+                    showModal('安裝失敗', result.message, true, false);
+                    pathPreview.innerText = await pywebview.api.get_default_path();
+                }
+                document.getElementById('installProgressWrap').style.display = 'none';
+            }
+        });
+    </script>
+</body>
+</html>

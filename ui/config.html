@@ -1,0 +1,484 @@
+<!--
+    config.html — 配置精靈介面
+
+    修正紀錄：
+    - 標題列原本用的 class 是 pywebview-drag，pywebview 實際辨識的是
+      pywebview-drag-region，少了 -region 導致拖曳完全無效。已修正 class 名稱。
+    - window.updateProgress / window.packComplete 現在接收的是後端用
+      json.dumps 產生的合法 JS 字串字面值，取代手動 escape。
+    - 進度條動畫：原本後端回報多少前端就直接畫多少，階段之間（尤其編譯主安裝檔
+      那段常常要等數十秒）長時間靜止不動，變成「跳一下、停住、再跳一下」。
+      改成前端自己用 requestAnimationFrame 維護一個平滑動畫：追上後端回報的
+      真實進度前用追趕速度靠近，追上之後如果還沒完成就緩慢自行往前爬，
+      最高爬到 99%，只有真的收到完成訊號才會補到 100%，失敗時動畫停在原地。
+    - pywebview-drag-region 這個內建機制拖曳開始瞬間會往左上方跳一下才跟上游標，
+      100% 縮放下也會發生，判斷是機制本身的問題，不是縮放比例造成的。
+      改成完全自己算滑鼠位移量、呼叫 window.move() 搬動視窗（見下方 setupCustomDrag()
+      與 gui_config.py 的 start_drag/drag_move/end_drag），徹底繞開這個問題。
+
+    新增紀錄：
+    - 選完應用程式資料夾後會呼叫 list_exe_files() 列出裡面的 .exe，
+      讓使用者選出「主要執行檔」（捷徑/立即執行/執行中偵測都要用到）。
+    - 新增 EULA 文字框（留空 = 安裝端跳過同意頁）、相依元件偵測勾選、
+      檔案關聯（勾選 + 副檔名輸入）、加入 PATH 勾選。
+    - 標題列新增問號說明按鈕，點擊顯示本工具的使用說明彈窗。
+    - 新增開啟時的環境檢查：呼叫 check_environment() 確認系統上有沒有
+      pyinstaller、python、pywebview（編譯安裝檔實際會用到的外部環境，
+      跟這支工具本身開不開得起來是兩回事，缺這些工具本身仍然正常開啟）。
+      缺項目會跳提示視窗附安裝指令，並鎖住「開始編譯安裝檔」按鈕。
+-->
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>配置精靈</title>
+    <style>
+        :root {
+            --bg-main: #ffffff; --bg-card: #f4f4f5; --text-main: #09090b; --text-muted: #71717a;
+            --border-color: #e4e4e7; --input-bg: #ffffff; --btn-browse-bg: #09090b; --btn-browse-text: #ffffff;
+            --btn-submit-bg: #09090b; --btn-submit-text: #ffffff; --overlay-bg: rgba(255, 255, 255, 0.98); --modal-shadow: rgba(0, 0, 0, 0.08);
+        }
+        body.dark {
+            --bg-main: #09090b; --bg-card: #121214; --text-main: #fafafa; --text-muted: #a1a1aa;
+            --border-color: #27272a; --input-bg: #121214; --btn-browse-bg: #fafafa; --btn-browse-text: #09090b;
+            --btn-submit-bg: #fafafa; --btn-submit-text: #09090b; --overlay-bg: rgba(9, 9, 11, 0.98); --modal-shadow: rgba(0, 0, 0, 0.5);
+        }
+        * { box-sizing: border-box; }
+        body { margin: 0; padding: 0; background-color: var(--bg-main); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; user-select: none; color: var(--text-main); overflow-x: hidden; transition: background-color 0.2s, color 0.2s; }
+
+        /* ➔ 工具視窗的標題列：直接套用原生拖曳類別，乾淨俐落 */
+        .title-bar {
+            width: 100%; height: 44px; background-color: var(--bg-main);
+            display: flex; align-items: center; padding: 0 16px;
+            position: fixed; top: 0; left: 0; z-index: 999;
+            border-bottom: 1px solid var(--border-color);
+            transition: background-color 0.2s, border-color 0.2s;
+        }
+        .window-controls { display: flex; gap: 8px; margin-right: 14px; }
+        .control-btn { width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; border-radius: 6px; cursor: pointer; color: var(--text-muted); transition: background-color 0.2s, color 0.2s; }
+        .close-btn:hover { background-color: #FF5252; color: #ffffff; }
+        .minimize-btn:hover { background-color: #FFB300; color: #ffffff; }
+        .title-text { font-size: 13px; font-weight: 500; color: var(--text-muted); letter-spacing: -0.01em; }
+        .theme-toggle { font-size: 12px; color: var(--text-muted); cursor: pointer; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color); background-color: var(--input-bg); transition: all 0.2s; }
+        .theme-toggle:hover { color: var(--text-main); border-color: var(--text-muted); }
+
+        .main-container { padding: 74px 32px 32px 32px; max-width: 600px; margin: 0 auto; }
+        h2 { margin: 0 0 24px 0; font-size: 22px; font-weight: 600; color: var(--text-main); letter-spacing: -0.02em; }
+        .form-group { margin-bottom: 20px; }
+        label { display: block; font-size: 12px; font-weight: 500; margin-bottom: 8px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+        input[type="text"], textarea, select { width: 100%; padding: 12px 14px; border: 1px solid var(--border-color); border-radius: 8px; background-color: var(--input-bg); font-size: 14px; color: var(--text-main); font-family: inherit; transition: border-color 0.2s, background-color 0.2s, color 0.2s; }
+        input[type="text"]:focus, textarea:focus, select:focus { outline: none; border-color: var(--text-muted); }
+        textarea { resize: vertical; min-height: 80px; }
+        .checkbox-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+        .checkbox-row input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; }
+        .checkbox-row label { margin-bottom: 0; text-transform: none; font-size: 13px; letter-spacing: 0; cursor: pointer; }
+        .help-btn { width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; border-radius: 50%; border: 1.5px solid var(--text-muted); color: var(--text-muted); cursor: pointer; font-size: 13px; font-weight: 600; margin-left: auto; margin-right: 10px; transition: all 0.2s; flex-shrink: 0; }
+        .help-btn:hover { color: var(--text-main); border-color: var(--text-main); }
+        .help-modal-box { text-align: left; max-width: 460px; max-height: 70vh; overflow-y: auto; }
+        .help-modal-box .modal-message { text-align: left; }
+        .help-modal-box h4 { font-size: 13px; margin: 16px 0 6px 0; color: var(--text-main); }
+        .help-modal-box h4:first-of-type { margin-top: 0; }
+        .file-selector { display: flex; gap: 12px; align-items: center; background-color: var(--input-bg); padding: 8px; border: 1px dashed var(--border-color); border-radius: 8px; transition: background-color 0.2s, border-color 0.2s; }
+        .btn-browse { padding: 8px 14px; background-color: var(--btn-browse-bg); border: none; border-radius: 6px; color: var(--btn-browse-text); cursor: pointer; font-size: 13px; font-weight: 500; transition: opacity 0.2s; white-space: nowrap; }
+        .btn-browse:hover { opacity: 0.9; }
+        .path-display { font-size: 13px; color: var(--text-muted); word-break: break-all; padding-right: 8px; }
+        .btn-submit { width: 100%; padding: 14px; background-color: var(--btn-submit-bg); color: var(--btn-submit-text); border: none; border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer; margin-top: 12px; transition: opacity 0.2s, background-color 0.2s, color 0.2s; }
+        .btn-submit:hover { opacity: 0.9; }
+        .note { font-size: 11px; color: var(--text-muted); margin-top: 6px; display: block; }
+        .progress-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: var(--overlay-bg); backdrop-filter: blur(8px); display: none; flex-direction: column; justify-content: center; align-items: center; z-index: 1000; padding: 40px; }
+        .progress-box { width: 100%; max-width: 400px; text-align: center; display: flex; flex-direction: column; align-items: center; }
+        .progress-status { font-size: 15px; font-weight: 500; color: var(--text-main); margin-bottom: 8px; }
+        .progress-percentage { font-size: 12px; color: var(--text-muted); margin-bottom: 20px; }
+        .progress-track { width: 100%; height: 4px; background-color: var(--border-color); border-radius: 2px; overflow: hidden; margin-bottom: 24px; }
+        .progress-fill { width: 0%; height: 100%; background-color: var(--text-main); transition: width 0.3s ease; }
+        .btn-close-overlay { margin: 0 auto; padding: 10px 24px; background-color: var(--btn-submit-bg); color: var(--btn-submit-text); border: none; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500; display: none; }
+        .btn-close-overlay:hover { opacity: 0.9; }
+        .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0, 0, 0, 0.3); backdrop-filter: blur(4px); display: none; justify-content: center; align-items: center; z-index: 2000; opacity: 0; transition: opacity 0.2s ease; }
+        .modal-box { background-color: var(--bg-main); border: 1px solid var(--border-color); border-radius: 14px; padding: 24px; width: 85%; max-width: 360px; text-align: center; box-shadow: 0 20px 25px -5px var(--modal-shadow); transform: scale(0.9); transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1); }
+        .modal-overlay.active { display: flex; opacity: 1; }
+        .modal-overlay.active .modal-box { transform: scale(1); }
+        .modal-icon { display: flex; justify-content: center; margin-bottom: 12px; }
+        .modal-title { font-size: 16px; font-weight: 600; margin-bottom: 8px; color: var(--text-main); }
+        .modal-message { font-size: 13px; color: var(--text-muted); margin-bottom: 20px; line-height: 1.5; text-align: left; }
+        .btn-modal-close { width: 100%; padding: 10px; background-color: var(--btn-submit-bg); color: var(--btn-submit-text); border: none; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500; transition: opacity 0.2s; }
+        .btn-modal-close:hover { opacity: 0.9; }
+    </style>
+</head>
+<body>
+
+    <!-- 不再依賴 pywebview 內建的 pywebview-drag-region（該機制會在拖曳開始瞬間跳一下，
+         100% 縮放下也會發生，判斷是 pywebview 這個機制本身的問題，改成自己算滑鼠位移量拖曳，見下方 script -->
+    <div class="title-bar" id="titleBar">
+        <div class="window-controls">
+            <div class="control-btn close-btn" onclick="executeClose();">
+                <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M1.5 1.5l9 9M10.5 1.5l-9 9"/>
+                </svg>
+            </div>
+            <div class="control-btn minimize-btn" onclick="executeMinimize();">
+                <span style="display: block; width: 11px; height: 2px; background-color: currentColor; border-radius: 1px;"></span>
+            </div>
+        </div>
+        <div class="title-text">安裝軟體生成器</div>
+        <div class="help-btn" onclick="showHelpModal();" title="使用說明">?</div>
+        <div class="theme-toggle" onclick="toggleTheme();"><span id="theme-btn-text">深色模式</span></div>
+    </div>
+
+    <!-- 其餘表單內容保持不變 -->
+    <div class="main-container">
+        <h2>配置您的安裝程式資訊</h2>
+        <div class="form-group"><label>應用程式名稱</label><input type="text" id="app_name" placeholder="例如: MyCustomApp"></div>
+        <div class="form-group">
+            <label>安裝資料夾名稱</label>
+            <input type="text" id="folder_name" placeholder="留空則沿用上方的應用程式名稱" oninput="checkFolderNameSafety()">
+            <span class="note" id="folder_name_note">安裝路徑（例如 C:\Program Files\這裡）會用這個名稱，跟上面的應用程式名稱是分開的兩件事——應用程式名稱可以是中文，用來顯示給使用者看；如果應用程式名稱是中文，建議在這裡另外填一個純英數字的名稱，避免路徑中出現中文字在少數環境下造成讀寫問題。</span>
+        </div>
+        <div class="form-group"><label>應用程式版本號</label><input type="text" id="version" placeholder="example: 1.0.0"></div>
+        <div class="form-group"><label>軟體發行者 / 開發商</label><input type="text" id="publisher" placeholder="例如: CustomPublisher"></div>
+        <div class="form-group"><label>最終輸出的安裝檔名稱 (.exe)</label><input type="text" id="exe_name" placeholder="例如: Setup_MyCustomApp"></div>
+        <div class="form-group"><label>應用程式內容資料夾 (不得為空)</label><div class="file-selector"><button class="btn-browse" onclick="browseFolder()">選擇資料夾</button><span class="path-display" id="app_dir_path">未選擇資料夾</span></div></div>
+        <div class="form-group">
+            <label>主要執行檔</label>
+            <select id="main_exe"><option value="">請先選擇應用程式資料夾</option></select>
+            <span class="note">用於建立捷徑、偵測執行中狀態、安裝完成後立即執行等功能。</span>
+        </div>
+        <div class="form-group"><label>應用程式圖標 (必須為 PNG 格式)</label><div class="file-selector"><button class="btn-browse" onclick="browsePng()">選擇 PNG 圖示</button><span class="path-display" id="png_icon_path">未選擇檔案</span></div><span class="note">用於安裝視窗內顯示的精細圖標。</span></div>
+        <div class="form-group"><label>執行檔封面圖示 (必須為 ICO 格式)</label><div class="file-selector"><button class="btn-browse" onclick="browseIco()">選擇 ICO 檔案</button><span class="path-display" id="ico_icon_path">未選擇檔案</span></div><span class="note">用於安裝檔在 Windows 檔案總管中顯示的外觀。</span></div>
+
+        <div class="form-group">
+            <label>使用者授權合約 (EULA，選填)</label>
+            <textarea id="eula_text" placeholder="留空則安裝時不顯示同意頁面。若填寫，使用者安裝前必須點擊「同意」才能繼續。"></textarea>
+        </div>
+
+        <div class="form-group">
+            <label>相依元件偵測 (選填)</label>
+            <div class="checkbox-row"><input type="checkbox" id="dep_vcredist"><label for="dep_vcredist">Visual C++ Redistributable (x64)</label></div>
+            <div class="checkbox-row"><input type="checkbox" id="dep_dotnet"><label for="dep_dotnet">.NET Desktop Runtime</label></div>
+            <span class="note">安裝時僅會偵測系統是否已安裝，缺少時提示使用者前往官方頁面下載，不會自動安裝。</span>
+        </div>
+
+        <div class="form-group">
+            <div class="checkbox-row"><input type="checkbox" id="need_file_assoc" onchange="document.getElementById('file_assoc_input').style.display = this.checked ? 'block' : 'none'"><label for="need_file_assoc">需要註冊檔案關聯</label></div>
+            <input type="text" id="file_assoc_input" placeholder="輸入副檔名，以逗號分隔，例如: .xyz, .abc" style="display: none; margin-top: 6px;">
+        </div>
+
+        <div class="form-group">
+            <div class="checkbox-row"><input type="checkbox" id="add_to_path"><label for="add_to_path">安裝後將程式路徑加入環境變數 PATH</label></div>
+        </div>
+
+        <button class="btn-submit" onclick="submitForm()">開始編譯安裝檔</button>
+    </div>
+
+    <div class="modal-overlay" id="helpModal">
+        <div class="modal-box help-modal-box">
+            <div class="modal-title">使用說明</div>
+            <div class="modal-message">
+                <h4>基本流程</h4>
+                依序填寫應用程式名稱、版本、發行者、安裝檔名，選擇要打包的應用程式資料夾（裡面放你的軟體本體），
+                再從下拉選單選出主要執行檔，最後選擇 PNG 與 ICO 圖示即可開始編譯。
+                <h4>主要執行檔是什麼？</h4>
+                指使用者安裝完成後，實際會被執行的那個 .exe。這個資訊會用來建立捷徑、
+                偵測程式是否正在執行中、以及安裝完成後「立即執行」功能。
+                <h4>安裝資料夾名稱是什麼？</h4>
+                跟應用程式名稱是分開的兩件事：應用程式名稱是顯示給使用者看的，可以是中文；
+                安裝資料夾名稱決定實際安裝路徑長什麼樣子，留空會沿用應用程式名稱。
+                如果應用程式名稱是中文，建議另外填一個純英數字的資料夾名稱。
+                <h4>EULA 留空會怎樣？</h4>
+                留空的話，使用者安裝時不會看到同意頁面，直接進入安裝畫面。
+                <h4>相依元件偵測 / 檔案關聯 / PATH 有什麼限制？</h4>
+                相依元件目前只做偵測與提示下載連結，不會自動安裝該元件。
+                檔案關聯與 PATH 設定需要以系統管理員權限執行安裝程式才會生效（本工具產生的安裝檔預設就會要求管理員權限）。
+                <h4>常見問題</h4>
+                若編譯過程中顯示找不到 ui 資料夾，代表 ui/index.html 沒有跟這個工具放在一起；
+                若編譯失敗，請確認 PyInstaller 已正確安裝在執行環境中。
+            </div>
+            <button class="btn-modal-close" onclick="closeHelpModal()">關閉</button>
+        </div>
+    </div>
+
+    <div class="progress-overlay" id="progressOverlay">
+        <div class="progress-box">
+            <div class="progress-status" id="progressStatus">正在準備環境...</div>
+            <div class="progress-percentage" id="progressPercentage">0%</div>
+            <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+            <button class="btn-close-overlay" id="btnCloseOverlay" onclick="hideOverlay()">確定</button>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="errorModal">
+        <div class="modal-box">
+            <div class="modal-icon"><svg viewBox="0 0 24 24" width="24" height="24" stroke="#FF5252" stroke-width="2.5" fill="none"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg></div>
+            <div class="modal-title">注意</div>
+            <div class="modal-message" id="errorMessage">請檢查欄位。</div>
+            <button class="btn-modal-close" onclick="closeErrorModal()">好的</button>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="envModal">
+        <div class="modal-box help-modal-box">
+            <div class="modal-icon"><svg viewBox="0 0 24 24" width="24" height="24" stroke="#FF9500" stroke-width="2.5" fill="none"><path d="M12 9v4M12 17h.01M10.3 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L14.7 3.86a2 2 0 0 0-3.4 0z"></path></svg></div>
+            <div class="modal-title">缺少編譯安裝檔所需的環境</div>
+            <div class="modal-message">
+                這個工具本身已經正常開啟，不受影響；但「開始編譯安裝檔」這個動作，
+                需要另外呼叫系統上的 PyInstaller 去實際編譯出安裝檔，缺少下列項目的話會編譯失敗：
+                <div id="envChecklist" style="margin: 12px 0;"></div>
+                <div style="font-size: 12px; margin-top: 8px;">安裝指令（在命令提示字元執行）：</div>
+                <div style="background: var(--input-bg); border: 1px solid var(--border-color); border-radius: 6px; padding: 10px 12px; font-family: monospace; font-size: 12px; margin-top: 6px; user-select: text;">pip install pyinstaller pywebview pywin32</div>
+                <div style="font-size: 11px; margin-top: 8px; color: var(--text-muted);">如果連 Python 都還沒裝，請先前往官網下載安裝，安裝時記得勾選「Add python.exe to PATH」。</div>
+            </div>
+            <button class="btn-modal-close" onclick="pywebview.api.open_url('https://www.python.org/downloads/')" style="margin-bottom: 8px; background: var(--input-bg); color: var(--text-main); border: 1px solid var(--border-color);">前往 Python 官網下載</button>
+            <button class="btn-modal-close" onclick="closeEnvModal()">我知道了</button>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('contextmenu', (e) => e.preventDefault());
+        function executeClose() { pywebview.api.close_window(); }
+
+        // 自訂視窗拖曳：不依賴 pywebview 內建的 pywebview-drag-region（該機制拖曳開始瞬間
+        // 會跳一下，100% 縮放下也會發生，判斷是機制本身的問題，改成自己算滑鼠位移量）。
+        // 按下當下記錄一次基準點，之後每一幀只送「相對位移量」給後端搬動視窗，
+        // 用 requestAnimationFrame 節流，避免 mousemove 觸發太頻繁造成 IPC 塞車。
+        (function setupCustomDrag() {
+            const titleBar = document.getElementById('titleBar');
+            let isDragging = false;
+            let pendingPos = null;
+
+            titleBar.addEventListener('mousedown', (e) => {
+                if (e.target.closest('.window-controls') || e.target.closest('.help-btn') || e.target.closest('.theme-toggle')) return;
+                isDragging = true;
+                pywebview.api.start_drag(e.screenX, e.screenY);
+            });
+            document.addEventListener('mousemove', (e) => {
+                if (!isDragging) return;
+                pendingPos = [e.screenX, e.screenY];
+            });
+            document.addEventListener('mouseup', () => {
+                if (isDragging) { isDragging = false; pendingPos = null; pywebview.api.end_drag(); }
+            });
+            function dragLoop() {
+                if (isDragging && pendingPos) {
+                    pywebview.api.drag_move(pendingPos[0], pendingPos[1]);
+                    pendingPos = null;
+                }
+                requestAnimationFrame(dragLoop);
+            }
+            requestAnimationFrame(dragLoop);
+        })();
+
+        function executeMinimize() {
+            document.body.style.transition = 'transform 0.18s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.18s ease';
+            document.body.style.transform = 'scale(0.96) translateY(20px)'; document.body.style.opacity = '0';
+            setTimeout(() => { pywebview.api.minimize_window(); setTimeout(() => { document.body.style.transform = 'scale(1) translateY(0)'; document.body.style.opacity = '1'; }, 350); }, 160);
+        }
+        function showErrorModal(htmlMessage) { const modal = document.getElementById('errorModal'); document.getElementById('errorMessage').innerHTML = htmlMessage; modal.classList.add('active'); }
+        function closeErrorModal() { document.getElementById('errorModal').classList.remove('active'); }
+        function showHelpModal() { document.getElementById('helpModal').classList.add('active'); }
+        function closeHelpModal() { document.getElementById('helpModal').classList.remove('active'); }
+        function closeEnvModal() { document.getElementById('envModal').classList.remove('active'); }
+
+        function checkFolderNameSafety() {
+            const val = document.getElementById('folder_name').value;
+            const note = document.getElementById('folder_name_note');
+            const hasNonAscii = /[^\x00-\x7F]/.test(val);
+            if (hasNonAscii) {
+                note.style.color = '#FF9500';
+                note.innerText = '⚠ 偵測到非英數字元，路徑中含有中文字在少數環境（舊版工具、部分中文編碼設定）下仍可能出問題，建議改用純英數字。';
+            } else {
+                note.style.color = '';
+                note.innerText = '安裝路徑（例如 C:\\Program Files\\這裡）會用這個名稱，跟上面的應用程式名稱是分開的兩件事——應用程式名稱可以是中文，用來顯示給使用者看；如果應用程式名稱是中文，建議在這裡另外填一個純英數字的名稱，避免路徑中出現中文字在少數環境下造成讀寫問題。';
+            }
+        }
+
+        function checkRow(ok, label) {
+            const color = ok ? '#34C759' : '#FF3B30';
+            const mark = ok ? '✓' : '✗';
+            return `<div style="color:${color}; font-size:13px; margin-bottom:4px;">${mark} ${label}</div>`;
+        }
+
+        async function checkEnvironmentOnLoad() {
+            let env;
+            try {
+                env = await pywebview.api.check_environment();
+            } catch (e) {
+                return; // API 還沒 ready 或呼叫失敗就先跳過，不影響工具本身使用
+            }
+
+            let html = '';
+            html += checkRow(env.python_found, 'Python 直譯器');
+            html += checkRow(env.pyinstaller_found, 'PyInstaller');
+            if (env.python_found) html += checkRow(env.webview_found, 'pywebview（Python 套件）');
+            if (env.python_found) html += checkRow(env.pywin32_found, 'pywin32（選用，缺少只影響捷徑功能）');
+            document.getElementById('envChecklist').innerHTML = html;
+
+            if (!env.ready) {
+                document.getElementById('envModal').classList.add('active');
+                const submitBtn = document.querySelector('.btn-submit');
+                submitBtn.disabled = true;
+                submitBtn.style.opacity = '0.5';
+                submitBtn.style.cursor = 'not-allowed';
+                submitBtn.title = '缺少必要的編譯環境，請先安裝後重新開啟本工具';
+            }
+        }
+        window.addEventListener('pywebviewready', checkEnvironmentOnLoad);
+        function toggleTheme() { const body = document.body; const themeText = document.getElementById('theme-btn-text'); if (body.classList.contains('dark')) { body.classList.remove('dark'); themeText.innerText = "深色模式"; } else { body.classList.add('dark'); themeText.innerText = "淺色模式"; } }
+        async function browseFolder() {
+            const path = await pywebview.api.select_app_dir();
+            if (path) {
+                document.getElementById('app_dir_path').innerText = path;
+                const exeList = await pywebview.api.list_exe_files();
+                const select = document.getElementById('main_exe');
+                select.innerHTML = '';
+                if (exeList.length === 0) {
+                    select.innerHTML = '<option value="">此資料夾內找不到 .exe 檔案</option>';
+                } else {
+                    select.innerHTML = '<option value="">請選擇...</option>' + exeList.map(p => `<option value="${p}">${p}</option>`).join('');
+                }
+            }
+        }
+        async function browsePng() { const path = await pywebview.api.select_png_icon(); if(path) document.getElementById('png_icon_path').innerText = path; }
+        async function browseIco() { const path = await pywebview.api.select_ico_icon(); if(path) document.getElementById('ico_icon_path').innerText = path; }
+        async function submitForm() {
+            const data = {
+                app_name: document.getElementById('app_name').value,
+                folder_name: document.getElementById('folder_name').value,
+                version: document.getElementById('version').value,
+                publisher: document.getElementById('publisher').value,
+                exe_name: document.getElementById('exe_name').value,
+                main_exe: document.getElementById('main_exe').value,
+                eula_text: document.getElementById('eula_text').value,
+                dependencies: [
+                    ...(document.getElementById('dep_vcredist').checked ? ['vcredist_x64'] : []),
+                    ...(document.getElementById('dep_dotnet').checked ? ['dotnet_desktop'] : []),
+                ],
+                file_associations: document.getElementById('need_file_assoc').checked ? document.getElementById('file_assoc_input').value : '',
+                add_to_path: document.getElementById('add_to_path').checked,
+            };
+            const result = await pywebview.api.start_pack(data);
+            if (result.status === 'error') { showErrorModal(result.message); } 
+            else if (result.status === 'processing') {
+                document.getElementById('progressOverlay').style.display = 'flex';
+                document.getElementById('btnCloseOverlay').style.display = 'none';
+                resetProgressAnimation();
+                window.updateProgress(0, "正在初始化打包程序...");
+            }
+        }
+
+        // ---------------- 進度條動畫 ----------------
+        // 後端（builder.py）只會在幾個固定階段回報真實進度（例如 5、10、30、70、95、100），
+        // 階段之間可能要等上數十秒。原本前端收到多少就直接畫多少，
+        // 中間長時間靜止不動，看起來像「跳一下、停住、再跳一下」。
+        // 改成：currentTarget 記錄後端回報過的最新真實進度（只會往前，不會後退），
+        // displayedPercent 是畫面上實際顯示的數字，用 requestAnimationFrame 每一幀
+        // 平滑地朝 currentTarget 靠近；追上 currentTarget 之後，如果還沒完成，
+        // 就自己緩慢往前爬，但最高只爬到 99%，絕對不會自己跳到 100%——
+        // 只有真的收到完成訊號（currentTarget 被設為 100）才會補到 100%。
+        //
+        // 「自己往前爬」這段改用分階段上限（creepCap）+ 時間常數（creepTimeConstant）
+        // 的漸進趨近公式：displayed = cap - (cap - 起始值) * e^(-經過秒數 / 時間常數)。
+        // 這條曲線不會像固定衰減那樣「暴衝一波後掉速卡死在上限附近很久」，
+        // 而是全程持續、平滑地朝 cap 靠近，越接近 cap 移動幅度越小，但不會停死。
+        // builder.py 依照每個階段實際預期要花多久，各自帶了不同的 cap / time_constant：
+        // 解除安裝助手階段上限 35%，安裝檔階段（實際最耗時）上限 99%、時間常數也拉長。
+        let currentTarget = 0;
+        let displayedPercent = 0;
+        let progressAnimating = false;
+        let progressStopped = false;
+        let creepCap = 99;
+        let creepTimeConstant = 15;
+        let creepStartValue = 0;
+        let creepStartTime = null;
+
+        function resetProgressAnimation() {
+            currentTarget = 0;
+            displayedPercent = 0;
+            progressStopped = false;
+            creepCap = 99;
+            creepTimeConstant = 15;
+            creepStartValue = 0;
+            creepStartTime = null;
+            // 直接同步歸零 DOM，不要等下一次 progressTick 才更新——
+            // 這個函式現在是在視窗已經隱藏（display:none）的狀態下呼叫，
+            // 同步歸零可以確保下次視窗再顯示出來時，一開始就是乾淨的 0%，
+            // 不會殘留上一輪跑到一半的寬度讓 CSS transition 有機會播放。
+            document.getElementById('progressPercentage').innerText = '0%';
+            document.getElementById('progressFill').style.width = '0%';
+        }
+
+        function progressTick(now) {
+            if (progressStopped) { progressAnimating = false; return; }
+
+            if (currentTarget >= 100) {
+                // 真的完成了，加速追到 100，不要停在 99%
+                displayedPercent += Math.max(0.6, (100 - displayedPercent) * 0.18);
+                if (displayedPercent >= 99.95) displayedPercent = 100;
+                creepStartTime = null;
+            } else if (displayedPercent < currentTarget) {
+                // 還沒追上目前已知的真實進度：用「跟目標的差距」決定速度，
+                // 差距越大追得越快、越接近目標越慢，本身就是一段自然的減速曲線
+                const gap = currentTarget - displayedPercent;
+                displayedPercent = Math.min(displayedPercent + Math.max(0.15, gap * 0.06), currentTarget);
+                creepStartTime = null; // 還在追趕階段，還沒進入自行往前爬
+            } else {
+                // 已經追上目前已知的真實進度，但實際還沒到下一步：自己往前爬，
+                // 朝這個階段的上限（creepCap）用時間常數 creepTimeConstant 漸進趨近，
+                // 全程持續移動、越接近上限移動幅度越小，不會暴衝後卡死。
+                if (creepStartTime === null) {
+                    creepStartTime = now;
+                    creepStartValue = displayedPercent;
+                }
+                const elapsedSec = (now - creepStartTime) / 1000;
+                const cap = Math.min(creepCap, 99);
+                displayedPercent = cap - (cap - creepStartValue) * Math.exp(-elapsedSec / creepTimeConstant);
+                if (displayedPercent > cap) displayedPercent = cap;
+            }
+
+            document.getElementById('progressPercentage').innerText = Math.round(displayedPercent) + '%';
+            document.getElementById('progressFill').style.width = displayedPercent + '%';
+
+            if (displayedPercent < 100) {
+                requestAnimationFrame(progressTick);
+            } else {
+                progressAnimating = false;
+            }
+        }
+
+        window.updateProgress = function (percent, message, cap, timeConstant) {
+            let cleanMessage = message.replace(/反安裝程式/g, "解除安裝助手").replace(/正在編譯最終主安裝執行檔/g, "正在編譯安裝檔");
+            document.getElementById('progressStatus').innerText = cleanMessage;
+            progressStopped = false;
+            if (percent > currentTarget) {
+                currentTarget = percent; // 目標只會往前推進，不會後退
+                creepCap = (typeof cap === 'number' && cap > 0) ? cap : 99;
+                creepTimeConstant = (typeof timeConstant === 'number' && timeConstant > 0) ? timeConstant : 15;
+                creepStartTime = null; // 進入新階段，重新開始算這個階段自己爬升的時間基準
+            }
+            if (!progressAnimating) {
+                progressAnimating = true;
+                requestAnimationFrame(progressTick);
+            }
+        }
+
+        window.packComplete = function (status, message) {
+            let cleanMessage = message.replace(/反安裝程式/g, "解除安裝助手");
+            document.getElementById('progressStatus').innerText = cleanMessage;
+            if (status === 'success') {
+                currentTarget = 100; // 讓動畫自己追到 100（此時通常已經很接近了，會很快追上）
+                creepCap = 100;
+                if (!progressAnimating) { progressAnimating = true; requestAnimationFrame(progressTick); }
+            } else {
+                // 失敗了：動畫停在目前位置，不要再繼續往前爬
+                progressStopped = true;
+            }
+            document.getElementById('btnCloseOverlay').style.display = 'block';
+        }
+        function hideOverlay() {
+            document.getElementById('progressOverlay').style.display = 'none';
+            // 重置動作放在這裡（關閉視窗的當下），而不是下次按「開始編譯」的時候：
+            // 這樣重置發生在視窗已經隱藏的狀態下，使用者看不到進度條從上一輪的
+            // 100% 被 CSS transition 播放一段滑回 0% 的倒退動畫。
+            resetProgressAnimation();
+        }
+    </script>
+</body>
+</html>
