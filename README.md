@@ -27,7 +27,6 @@ Both the Builder Tool and the installers it produces are standalone Windows desk
 
 ### Screenshots
 
-*(Fill these in with real screenshots — see `docs/screenshots/`)*
 
 | Builder Tool — Main Screen | Environment Check |
 |---|---|
@@ -127,7 +126,6 @@ MIT — see [`LICENSE`](LICENSE).
 
 ### 截圖
 
-*（請放上實機截圖，路徑放在 `docs/screenshots/` 資料夾底下）*
 
 | 打包工具主畫面 | 環境檢查 |
 |---|---|
