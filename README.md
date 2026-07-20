@@ -27,18 +27,16 @@ Both the Builder Tool and the installers it produces are standalone Windows desk
 
 ### Screenshots
 
+*(Fill these in with real screenshots — see `docs/screenshots/`)*
 
-| Builder Tool — Main Screen | Environment Check |
+| Builder Tool — Main Screen | EULA Screen |
 |---|---|
-| ![Builder main screen](docs/screenshots/builder-main.png) | ![Environment check](docs/screenshots/env-check.png) |
+| ![Builder main screen](docs/screenshots/builder-main.png) | ![EULA screen](docs/screenshots/eula.png) |
 
-| Installer — Drag to Install | EULA Screen |
+| Installer — Drag to Install | Build Progress |
 |---|---|
-| ![Drag to install](docs/screenshots/installer-drag.png) | ![EULA screen](docs/screenshots/eula.png) |
+| ![Drag to install](docs/screenshots/installer-drag.png) | ![Build progress](docs/screenshots/build-progress.png) |
 
-| Build Progress |
-|---|
-| ![Build progress](docs/screenshots/build-progress.png) |
 
 ### Features
 
@@ -126,18 +124,17 @@ MIT — see [`LICENSE`](LICENSE).
 
 ### 截圖
 
+*（請放上實機截圖，路徑放在 `docs/screenshots/` 資料夾底下）*
 
-| 打包工具主畫面 | 環境檢查 |
+| 打包工具主畫面 | EULA 同意頁 |
 |---|---|
-| ![打包工具主畫面](docs/screenshots/builder-main.png) | ![環境檢查](docs/screenshots/env-check.png) |
+| ![打包工具主畫面](docs/screenshots/builder-main.png) | ![EULA](docs/screenshots/eula.png) |
 
-| 安裝端拖曳安裝畫面 | EULA 同意頁 |
+| 安裝端拖曳安裝畫面 | 編譯進度 |
 |---|---|
-| ![拖曳安裝](docs/screenshots/installer-drag.png) | ![EULA](docs/screenshots/eula.png) |
+| ![拖曳安裝](docs/screenshots/installer-drag.png) | ![編譯進度](docs/screenshots/build-progress.png) |
 
-| 編譯進度 |
-|---|
-| ![編譯進度](docs/screenshots/build-progress.png) |
+
 
 ### 功能
 
