@@ -39,6 +39,12 @@ import builder
 import threading
 
 
+# 跟 __main__ 裡 webview.create_window() 的 min_size 保持一致，
+# 自訂縮放邏輯（resize_move）用同一組數字做下限，避免縮到比原本設計的最小可用尺寸還小。
+MIN_WINDOW_WIDTH = 650
+MIN_WINDOW_HEIGHT = 720
+
+
 def get_resource_path(relative_path):
     """獲取資源絕對路徑，相容 .py 直接執行與 PyInstaller onefile 打包後的環境。
 
@@ -164,6 +170,7 @@ class ConfigAPI:
         self.ico_path = ""
         self._window = None
         self._drag_origin = None
+        self._resize_origin = None
 
     def set_window(self, window):
         """安全地綁定視窗實體"""
@@ -190,6 +197,37 @@ class ConfigAPI:
     def end_drag(self):
         """拖曳結束：清掉基準點。"""
         self._drag_origin = None
+
+    def start_resize(self, edge, cursor_x, cursor_y):
+        """自訂縮放開始：記錄按下當下的滑鼠座標與視窗當下大小。
+
+        create_window() 雖然設了 resizable=True，但視窗同時是 frameless=True
+        （無邊框），無邊框視窗沒有系統原生的邊界可以拖曳縮放，resizable=True
+        形同虛設。跟拖曳視窗一樣，自己刻縮放邏輯：前端在視窗邊緣做幾條看不見的
+        感應區，按下時呼叫這裡記錄基準點，之後用位移量算新的視窗大小。
+        edge 是 'right' / 'bottom' / 'right-bottom' 其中之一，決定要動寬度、
+        高度，還是兩個一起動。
+        """
+        if self._window:
+            self._resize_origin = (edge, cursor_x, cursor_y, self._window.width, self._window.height)
+
+    def resize_move(self, cursor_x, cursor_y):
+        """縮放中：用滑鼠位移量算新的視窗大小，並套用最小尺寸限制。"""
+        if not self._window or not self._resize_origin:
+            return
+        edge, start_cx, start_cy, start_w, start_h = self._resize_origin
+        dx = cursor_x - start_cx
+        dy = cursor_y - start_cy
+        new_w, new_h = start_w, start_h
+        if "right" in edge:
+            new_w = max(MIN_WINDOW_WIDTH, start_w + dx)
+        if "bottom" in edge:
+            new_h = max(MIN_WINDOW_HEIGHT, start_h + dy)
+        self._window.resize(int(new_w), int(new_h))
+
+    def end_resize(self):
+        """縮放結束：清掉基準點。"""
+        self._resize_origin = None
 
     def check_environment(self):
         """供前端在畫面載入時呼叫，檢查編譯安裝檔所需的外部環境是否齊全。"""
@@ -394,7 +432,7 @@ if __name__ == '__main__':
         width=680,
         height=760,
         resizable=True,
-        min_size=(650, 720),
+        min_size=(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT),
         frameless=True,
         easy_drag=False,
     )

@@ -46,6 +46,13 @@
         * { box-sizing: border-box; }
         body { margin: 0; padding: 0; background-color: var(--bg-main); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; user-select: none; color: var(--text-main); overflow-x: hidden; transition: background-color 0.2s, color 0.2s; }
 
+        /* 自訂縮放感應區：貼齊視窗邊界，寬度/高度只有幾 px，滑鼠移到上面游標會變成
+           縮放樣式，實際縮放邏輯由 JS 的 setupCustomResize() 處理 */
+        .resize-handle { position: fixed; z-index: 1000; }
+        .resize-right { top: 0; right: 0; width: 6px; height: 100%; cursor: ew-resize; }
+        .resize-bottom { bottom: 0; left: 0; width: 100%; height: 6px; cursor: ns-resize; }
+        .resize-corner { bottom: 0; right: 0; width: 14px; height: 14px; cursor: nwse-resize; }
+
         /* ➔ 工具視窗的標題列：直接套用原生拖曳類別，乾淨俐落 */
         .title-bar {
             width: 100%; height: 44px; background-color: var(--bg-main);
@@ -78,6 +85,7 @@
         .help-modal-box .modal-message { text-align: left; }
         .help-modal-box h4 { font-size: 13px; margin: 16px 0 6px 0; color: var(--text-main); }
         .help-modal-box h4:first-of-type { margin-top: 0; }
+        .help-modal-box code { background: var(--input-bg); border: 1px solid var(--border-color); border-radius: 4px; padding: 1px 5px; font-family: monospace; font-size: 11px; }
         .file-selector { display: flex; gap: 12px; align-items: center; background-color: var(--input-bg); padding: 8px; border: 1px dashed var(--border-color); border-radius: 8px; transition: background-color 0.2s, border-color 0.2s; }
         .btn-browse { padding: 8px 14px; background-color: var(--btn-browse-bg); border: none; border-radius: 6px; color: var(--btn-browse-text); cursor: pointer; font-size: 13px; font-weight: 500; transition: opacity 0.2s; white-space: nowrap; }
         .btn-browse:hover { opacity: 0.9; }
@@ -105,6 +113,12 @@
     </style>
 </head>
 <body>
+
+    <!-- 自訂縮放感應區：frameless=True 的無邊框視窗沒有系統原生的縮放邊界，
+         resizable=True 形同虛設，這三條是自己刻的縮放感應區，見下方 script 的 setupCustomResize() -->
+    <div class="resize-handle resize-right" id="resizeRight"></div>
+    <div class="resize-handle resize-bottom" id="resizeBottom"></div>
+    <div class="resize-handle resize-corner" id="resizeCorner"></div>
 
     <!-- 不再依賴 pywebview 內建的 pywebview-drag-region（該機制會在拖曳開始瞬間跳一下，
          100% 縮放下也會發生，判斷是 pywebview 這個機制本身的問題，改成自己算滑鼠位移量拖曳，見下方 script -->
@@ -173,23 +187,65 @@
         <div class="modal-box help-modal-box">
             <div class="modal-title">使用說明</div>
             <div class="modal-message">
+                <h4>這個工具在做什麼</h4>
+                總共會產出三顆獨立的 exe：<b>這個工具本身</b>（你現在看到的畫面，用來設定並編譯安裝檔）、
+                <b>編譯出來的安裝檔</b>（給終端使用者雙擊安裝軟體的 macOS 風格拖曳視窗）、
+                以及<b>解除安裝程式</b>（安裝時自動放進安裝目錄）。三者職責分開，
+                本工具執行「開始編譯安裝檔」時，會另外呼叫系統上的 PyInstaller 現場編譯出後兩者。
+
+                <h4>環境需求</h4>
+                操作這個工具的電腦要先安裝：<code>pip install pyinstaller pywebview pywin32</code>。
+                前兩者是必要的，開啟本工具時會自動檢查、缺少會跳提示；pywin32 選用，只影響捷徑功能。
+                本工具不論是直接用 <code>python gui_config.py</code> 執行，還是打包成 exe 使用，
+                都需要這台電腦具備上述環境才能真的編譯出安裝檔。
+
                 <h4>基本流程</h4>
-                依序填寫應用程式名稱、版本、發行者、安裝檔名，選擇要打包的應用程式資料夾（裡面放你的軟體本體），
-                再從下拉選單選出主要執行檔，最後選擇 PNG 與 ICO 圖示即可開始編譯。
+                依序填寫應用程式名稱、安裝資料夾名稱、版本、發行者、安裝檔名，選擇要打包的應用程式資料夾
+                （裡面放你的軟體本體），再從下拉選單選出主要執行檔，最後選擇 PNG 與 ICO 圖示即可開始編譯。
+
                 <h4>主要執行檔是什麼？</h4>
                 指使用者安裝完成後，實際會被執行的那個 .exe。這個資訊會用來建立捷徑、
                 偵測程式是否正在執行中、以及安裝完成後「立即執行」功能。
+
                 <h4>安裝資料夾名稱是什麼？</h4>
                 跟應用程式名稱是分開的兩件事：應用程式名稱是顯示給使用者看的，可以是中文；
                 安裝資料夾名稱決定實際安裝路徑長什麼樣子，留空會沿用應用程式名稱。
-                如果應用程式名稱是中文，建議另外填一個純英數字的資料夾名稱。
+                如果應用程式名稱是中文，建議另外填一個純英數字的資料夾名稱，避免路徑含中文在少數環境下出問題。
+
                 <h4>EULA 留空會怎樣？</h4>
                 留空的話，使用者安裝時不會看到同意頁面，直接進入安裝畫面。
+
                 <h4>相依元件偵測 / 檔案關聯 / PATH 有什麼限制？</h4>
                 相依元件目前只做偵測與提示下載連結，不會自動安裝該元件。
                 檔案關聯與 PATH 設定需要以系統管理員權限執行安裝程式才會生效（本工具產生的安裝檔預設就會要求管理員權限）。
+
+                <h4>安裝端實際會做的事</h4>
+                單一實例鎖、EULA（有設定的話）、覆蓋安裝偵測（偵測到已安裝版本會比較版本新舊，
+                版本較新才會問是否更新，版本相同或較舊會提示使用者）、相依元件提示、磁碟空間檢查、
+                執行中偵測、真實複製進度、複製後 checksum 完整性驗證、失敗自動回滾、
+                登錄表寫入、捷徑、檔案關聯、PATH、安裝清單與安裝紀錄。
+
+                <h4>靜默 / 命令列安裝</h4>
+                編譯出來的安裝檔支援命令列參數，給企業批次部署用：
+                <br><code>Setup_XXX.exe /S</code>（靜默安裝，不開視窗）
+                <br><code>Setup_XXX.exe /S /D=D:\Apps\MyApp</code>（指定安裝路徑）
+                <br><code>Setup_XXX.exe /S /NODESKTOPSHORTCUT</code>（不建立桌面捷徑）
+                <br>執行結果反映在 exit code（0 = 成功），這個數字不會顯示在畫面上，
+                要用 <code>echo %errorlevel%</code> 檢查；同時也會寫一份 log 檔留底。
+
+                <h4>解除安裝行為</h4>
+                只刪自己安裝時放進去的檔案（照安裝清單），不會動到使用者事後自己在安裝目錄
+                產生的檔案；清單內的檔案刪完後，資料夾如果真的清空了才會整個移除，
+                有其他剩餘內容就只刪解除安裝程式本身，資料夾保留。
+
+                <h4>已知限制</h4>
+                目前沒有數位簽章（第一次執行大概率會被 SmartScreen 攔）；
+                相依元件只做偵測不會自動安裝；沒有多語言介面；
+                極少數沒更新過的 Windows 10 可能需要另外安裝 WebView2 Runtime。
+
                 <h4>常見問題</h4>
                 若編譯過程中顯示找不到 ui 資料夾，代表 ui/index.html 沒有跟這個工具放在一起；
+                若打包時卡在「存取被拒」，通常是上一次編譯出來的 exe 還在執行中或被防毒軟體鎖住；
                 若編譯失敗，請確認 PyInstaller 已正確安裝在執行環境中。
             </div>
             <button class="btn-modal-close" onclick="closeHelpModal()">關閉</button>
@@ -251,6 +307,15 @@
             });
             document.addEventListener('mousemove', (e) => {
                 if (!isDragging) return;
+                // 防呆：如果左鍵其實已經放開了（e.buttons 不含左鍵），代表 mouseup 事件
+                // 被漏接了（常見於拖到螢幕邊緣時放開滑鼠，游標當下已經不在視窗內），
+                // 強制結束拖曳，不要繼續等一個可能永遠不會來的 mouseup。
+                if ((e.buttons & 1) === 0) {
+                    isDragging = false;
+                    pendingPos = null;
+                    pywebview.api.end_drag();
+                    return;
+                }
                 pendingPos = [e.screenX, e.screenY];
             });
             document.addEventListener('mouseup', () => {
@@ -264,6 +329,47 @@
                 requestAnimationFrame(dragLoop);
             }
             requestAnimationFrame(dragLoop);
+        })();
+
+        // 自訂視窗縮放：跟自訂拖曳同一套節奏，用 rAF 節流、用 e.buttons 防呆
+        // 避免 mouseup 被漏接導致縮放狀態卡死。
+        (function setupCustomResize() {
+            let resizing = false;
+            let pendingPos = null;
+
+            function bindHandle(id, edge) {
+                const handle = document.getElementById(id);
+                handle.addEventListener('mousedown', (e) => {
+                    resizing = true;
+                    pywebview.api.start_resize(edge, e.screenX, e.screenY);
+                    e.preventDefault();
+                });
+            }
+            bindHandle('resizeRight', 'right');
+            bindHandle('resizeBottom', 'bottom');
+            bindHandle('resizeCorner', 'right-bottom');
+
+            document.addEventListener('mousemove', (e) => {
+                if (!resizing) return;
+                if ((e.buttons & 1) === 0) {
+                    resizing = false;
+                    pendingPos = null;
+                    pywebview.api.end_resize();
+                    return;
+                }
+                pendingPos = [e.screenX, e.screenY];
+            });
+            document.addEventListener('mouseup', () => {
+                if (resizing) { resizing = false; pendingPos = null; pywebview.api.end_resize(); }
+            });
+            function resizeLoop() {
+                if (resizing && pendingPos) {
+                    pywebview.api.resize_move(pendingPos[0], pendingPos[1]);
+                    pendingPos = null;
+                }
+                requestAnimationFrame(resizeLoop);
+            }
+            requestAnimationFrame(resizeLoop);
         })();
 
         function executeMinimize() {

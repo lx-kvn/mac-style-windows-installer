@@ -211,10 +211,10 @@
     <div class="nice-modal-overlay" id="upgradeModal">
         <div class="nice-modal-box">
             <div class="nice-icon warn"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L14.7 3.86a2 2 0 0 0-3.4 0z"></path></svg></div>
-            <div class="nice-title">偵測到已安裝的版本</div>
+            <div class="nice-title" id="upgradeTitle">偵測到已安裝的版本</div>
             <div class="nice-message" id="upgradeMessage"></div>
             <button class="nice-btn secondary" onclick="cancelUpgrade()">取消</button>
-            <button class="nice-btn" onclick="confirmUpgrade()">更新覆蓋安裝</button>
+            <button class="nice-btn" id="confirmUpgradeBtn" onclick="confirmUpgrade()">更新覆蓋安裝</button>
         </div>
     </div>
 
@@ -263,6 +263,14 @@
             });
             document.addEventListener('mousemove', (e) => {
                 if (!isDragging) return;
+                // 防呆：左鍵其實已經放開了就強制結束拖曳，避免 mouseup 被漏接
+                // （常見於拖到螢幕邊緣放開滑鼠）導致視窗卡在跟著滑鼠跑。
+                if ((e.buttons & 1) === 0) {
+                    isDragging = false;
+                    pendingPos = null;
+                    pywebview.api.end_drag();
+                    return;
+                }
                 pendingPos = [e.screenX, e.screenY];
             });
             document.addEventListener('mouseup', () => {
@@ -370,8 +378,25 @@
         async function afterEula() {
             const existing = await pywebview.api.check_existing_install();
             if (existing && existing.exists) {
-                document.getElementById('upgradeMessage').innerText =
-                    `偵測到已安裝版本 ${existing.version}，選擇「更新覆蓋安裝」會先移除舊版本再安裝新版本，選擇「取消」則結束安裝程式。`;
+                const titleEl = document.getElementById('upgradeTitle');
+                const msgEl = document.getElementById('upgradeMessage');
+                const btnEl = document.getElementById('confirmUpgradeBtn');
+
+                if (existing.is_newer) {
+                    // 這次要裝的版本比已安裝的新：正常的「有更新」流程
+                    titleEl.innerText = '偵測到已安裝的版本';
+                    msgEl.innerText =
+                        `偵測到已安裝版本 ${existing.version}，目前要安裝的版本是 ${existing.new_version}。` +
+                        `選擇「更新覆蓋安裝」會先移除舊版本再安裝新版本，選擇「取消」則結束安裝程式。`;
+                    btnEl.innerText = '更新覆蓋安裝';
+                } else {
+                    // 這次要裝的版本跟已安裝的一樣新、或更舊：明確提示使用者，不要照舊講「有更新」
+                    titleEl.innerText = '目前安裝的版本較新或相同';
+                    msgEl.innerText =
+                        `已安裝的版本是 ${existing.version}，這次要安裝的版本是 ${existing.new_version}，` +
+                        `並不比目前已安裝的版本新。選擇「仍要繼續安裝」會用這次的版本覆蓋現有安裝，選擇「取消」則結束安裝程式。`;
+                    btnEl.innerText = '仍要繼續安裝';
+                }
                 document.getElementById('upgradeModal').classList.add('active');
             } else {
                 afterUpgradeCheck();

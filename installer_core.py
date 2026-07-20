@@ -106,6 +106,31 @@ def _is_process_running(exe_name):
         return False
 
 
+def _parse_version(v):
+    """把版本字串拆成數字 tuple，例如 "1.10.2" -> (1, 10, 2)，
+    這樣才能正確比較「1.10.0 > 1.2.0」，單純字串比較會誤判成 1.10.0 < 1.2.0。
+    非數字的部分（例如 "1.0.0-beta"）只取數字部分，忽略後綴。
+    """
+    parts = []
+    for p in str(v).split('.'):
+        digits = ''.join(ch for ch in p if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
+
+
+def _compare_versions(v1, v2):
+    """回傳 1 表示 v1 > v2，0 表示相等，-1 表示 v1 < v2"""
+    t1, t2 = _parse_version(v1), _parse_version(v2)
+    length = max(len(t1), len(t2))
+    t1 = t1 + (0,) * (length - len(t1))
+    t2 = t2 + (0,) * (length - len(t2))
+    if t1 > t2:
+        return 1
+    if t1 < t2:
+        return -1
+    return 0
+
+
 def _acquire_single_instance_lock(app_name):
     """建立具名 Mutex，回傳 True 表示成功取得鎖（沒有其他安裝程式實例在跑）"""
     mutex_name = f"Global\\{app_name}_installer_mutex"
@@ -214,14 +239,28 @@ class InstallerAPI:
             return False
 
     def check_existing_install(self):
-        """檢查是否已安裝過同名應用程式（讀取解除安裝登錄表）"""
+        """檢查是否已安裝過同名應用程式（讀取解除安裝登錄表），並比較版本新舊。
+
+        原本只檢查「有沒有裝過」，現在加上版本比對：is_newer 為 True 代表這次要裝的
+        版本比已安裝的新（該問「是否更新」）；is_same_or_older 為 True 代表這次要裝的
+        版本跟已安裝的一樣新或更舊（該提示使用者「目前安裝的版本比較新/一樣新」，
+        而不是照舊講「有更新可以裝」這種容易誤導的話）。
+        """
         import winreg
         reg_path = f"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{self.app_name}"
         try:
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path) as key:
                 install_loc, _ = winreg.QueryValueEx(key, "InstallLocation")
-                version, _ = winreg.QueryValueEx(key, "DisplayVersion")
-                return {"exists": True, "install_path": install_loc, "version": version}
+                old_version, _ = winreg.QueryValueEx(key, "DisplayVersion")
+                comparison = _compare_versions(self.version, old_version)
+                return {
+                    "exists": True,
+                    "install_path": install_loc,
+                    "version": old_version,
+                    "new_version": self.version,
+                    "is_newer": comparison > 0,
+                    "is_same_or_older": comparison <= 0,
+                }
         except Exception:
             return {"exists": False}
 
@@ -622,42 +661,64 @@ def _parse_cli_args():
 def run_silent_install(install_dir=None, create_desktop_shortcut=True):
     """command-line 靜默安裝：完全不開視窗，給企業批次部署（登入腳本、MDM、
     群組原則）用。回傳值直接當這支 exe 的 process exit code：
-    0 = 成功，非 0 = 失敗，部署腳本可以直接檢查 errorlevel 判斷結果。
+    0 = 成功，非 0 = 失敗，部署腳本可以直接檢查 errorlevel（cmd）或
+    $LASTEXITCODE（PowerShell）判斷結果。exit code 是背景的數字訊號，
+    不會自己顯示在畫面上，要在執行完後緊接著查（例如 cmd 打 echo %errorlevel%）。
 
     靜默模式的既定行為（都是業界慣例）：
       - 不顯示 EULA 同意頁，執行 /S 視同已經同意（跟大多數靜默安裝工具一致）。
       - 偵測到舊版本會自動靜默更新覆蓋，不會跳出選擇視窗。
-      - 相依元件缺少只會印出警告訊息、不會阻擋安裝（畢竟沒有視窗可以顯示提示）。
-      - 所有訊息輸出到標準輸出，另外也會有 install_log.txt 留在安裝目錄。
+      - 相依元件缺少只會記錄警告、不會阻擋安裝（畢竟沒有視窗可以顯示提示）。
+
+    修正紀錄：這支 exe 是用 --noconsole 編譯的（GUI 拖曳安裝模式需要這樣），
+    即使用命令列帶 /S 執行，也沒有任何主控台視窗可以顯示文字——原本這裡用
+    print() 輸出訊息，實際上等於印給空氣看，不會出現在呼叫端的 cmd 視窗裡，
+    是設計疏漏，不是「還沒做」。現在改成把所有訊息收集起來，最後統一寫進
+    一份 log 檔（%TEMP% 底下），這才是部署腳本或人工事後真正查得到細節的管道；
+    exit code 本身不受這個問題影響，一直都是正確的。
     """
+    log_lines = [f"=== {datetime.now().isoformat()} 靜默安裝 ==="]
+
+    def log(msg):
+        log_lines.append(msg)
+
+    def write_log_and_return(app_name, exit_code):
+        try:
+            log_path = os.path.join(os.environ.get("TEMP", "."), f"{app_name}_silent_install_log.txt")
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(log_lines))
+        except Exception:
+            pass
+        return exit_code
+
     api = InstallerAPI()
     if install_dir:
         api.selected_path = install_dir
 
     got_lock, _mutex_handle = _acquire_single_instance_lock(api.app_name)
     if not got_lock:
-        print(f"[錯誤] {api.app_name} 安裝程式已經在執行中。")
-        return 1
+        log(f"[錯誤] {api.app_name} 安裝程式已經在執行中。")
+        return write_log_and_return(api.app_name, 1)
 
     existing = api.check_existing_install()
     if existing.get("exists"):
-        print(f"[資訊] 偵測到已安裝版本 {existing.get('version')}，正在靜默更新覆蓋...")
+        log(f"[資訊] 偵測到已安裝版本 {existing.get('version')}，這次安裝版本 {api.version}，正在靜默更新覆蓋...")
         upgrade_result = api.run_upgrade_uninstall()
         if upgrade_result.get("status") == "error":
-            print(f"[錯誤] 移除舊版本失敗: {upgrade_result.get('message')}")
-            return 1
+            log(f"[錯誤] 移除舊版本失敗: {upgrade_result.get('message')}")
+            return write_log_and_return(api.app_name, 1)
 
     warnings = api.get_dependency_warnings()
     for w in warnings:
-        print(f"[警告] 建議先安裝：{w.get('name')}（{w.get('url')}）")
+        log(f"[警告] 建議先安裝：{w.get('name')}（{w.get('url')}）")
 
     result = api.trigger_installation(create_desktop_shortcut=create_desktop_shortcut)
     if result.get("status") == "success":
-        print(f"[成功] {result.get('message')}")
-        return 0
+        log(f"[成功] {result.get('message')}")
+        return write_log_and_return(api.app_name, 0)
     else:
-        print(f"[錯誤] {result.get('message')}")
-        return 1
+        log(f"[錯誤] {result.get('message')}")
+        return write_log_and_return(api.app_name, 1)
 
 
 if __name__ == '__main__':
