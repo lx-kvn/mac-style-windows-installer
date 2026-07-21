@@ -1,4 +1,4 @@
-# dmg-style-installer-builder
+# mac-style-windows-installer
 
 **A tool that packages any Windows application into a macOS-DMG-style drag-to-install experience.**
 **把任何 Windows 應用程式打包成 macOS DMG 風格拖曳安裝體驗的工具。**
