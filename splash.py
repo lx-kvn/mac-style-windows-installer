@@ -62,16 +62,19 @@ def _resolve_helper_script():
 
     .py 直接執行：splash_helper.py 跟 splash.py 放在同一層，直接用。
     frozen exe：splash_helper.py 被內嵌在 exe 裡（build_config_tool.py 打包時
-    加了 --add-data=splash_helper.py;.），第一次用到時解壓一份到系統暫存目錄，
-    之後重複使用同一份，不用每次都重新解壓。
+    加了 --add-data=splash_helper.py;.），每次執行都覆蓋寫一份到系統暫存目錄。
+
+    修正紀錄：原本「只在 TEMP 沒有這個檔案時才複製」，代表升級到新版
+    InstallerBuilder.exe 之後，TEMP 裡卡著的舊版 splash_helper.py 永遠不會被換掉，
+    會一直執行到過期的版本。這個檔案很小，一律覆蓋的 I/O 成本可以忽略，
+    不值得為了省這點效能冒著執行到舊程式碼的風險。
     """
     if not hasattr(sys, "_MEIPASS"):
         return _get_resource_path("splash_helper.py")
 
     dest = os.path.join(tempfile.gettempdir(), "installer_builder_splash_helper.py")
     try:
-        if not os.path.exists(dest):
-            shutil.copy2(_get_resource_path("splash_helper.py"), dest)
+        shutil.copy2(_get_resource_path("splash_helper.py"), dest)
         return dest
     except Exception:
         return None

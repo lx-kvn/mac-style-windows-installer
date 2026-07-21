@@ -300,10 +300,22 @@
             let isDragging = false;
             let pendingPos = null;
 
+            function dragLoop() {
+                // isDragging 一旦變 false 就不再排下一幀，迴圈自然停止，
+                // 不像原本那樣不管有沒有在拖曳都永遠跑著。
+                if (!isDragging) return;
+                if (pendingPos) {
+                    pywebview.api.drag_move(pendingPos[0], pendingPos[1]);
+                    pendingPos = null;
+                }
+                requestAnimationFrame(dragLoop);
+            }
+
             titleBar.addEventListener('mousedown', (e) => {
                 if (e.target.closest('.window-controls') || e.target.closest('.help-btn') || e.target.closest('.theme-toggle')) return;
                 isDragging = true;
                 pywebview.api.start_drag(e.screenX, e.screenY);
+                requestAnimationFrame(dragLoop);
             });
             document.addEventListener('mousemove', (e) => {
                 if (!isDragging) return;
@@ -321,14 +333,6 @@
             document.addEventListener('mouseup', () => {
                 if (isDragging) { isDragging = false; pendingPos = null; pywebview.api.end_drag(); }
             });
-            function dragLoop() {
-                if (isDragging && pendingPos) {
-                    pywebview.api.drag_move(pendingPos[0], pendingPos[1]);
-                    pendingPos = null;
-                }
-                requestAnimationFrame(dragLoop);
-            }
-            requestAnimationFrame(dragLoop);
         })();
 
         // 自訂視窗縮放：跟自訂拖曳同一套節奏，用 rAF 節流、用 e.buttons 防呆
@@ -337,12 +341,22 @@
             let resizing = false;
             let pendingPos = null;
 
+            function resizeLoop() {
+                if (!resizing) return;
+                if (pendingPos) {
+                    pywebview.api.resize_move(pendingPos[0], pendingPos[1]);
+                    pendingPos = null;
+                }
+                requestAnimationFrame(resizeLoop);
+            }
+
             function bindHandle(id, edge) {
                 const handle = document.getElementById(id);
                 handle.addEventListener('mousedown', (e) => {
                     resizing = true;
                     pywebview.api.start_resize(edge, e.screenX, e.screenY);
                     e.preventDefault();
+                    requestAnimationFrame(resizeLoop);
                 });
             }
             bindHandle('resizeRight', 'right');
@@ -362,14 +376,6 @@
             document.addEventListener('mouseup', () => {
                 if (resizing) { resizing = false; pendingPos = null; pywebview.api.end_resize(); }
             });
-            function resizeLoop() {
-                if (resizing && pendingPos) {
-                    pywebview.api.resize_move(pendingPos[0], pendingPos[1]);
-                    pendingPos = null;
-                }
-                requestAnimationFrame(resizeLoop);
-            }
-            requestAnimationFrame(resizeLoop);
         })();
 
         function executeMinimize() {

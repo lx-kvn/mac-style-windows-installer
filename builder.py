@@ -156,6 +156,15 @@ def build_all(
         f"--add-data={config_path};.",
         f"--add-data={built_uninstall};.",
         f"--icon={ico_path}",
+        # installer_core.py import webview，同樣會被 PyInstaller 靜態分析保守地
+        # 整包塞進 pywebview 支援但 Windows 用不到的替代 GUI 後端，排除掉可以
+        # 省下相當可觀的體積——而且這個影響的是每一個實際下載安裝檔的終端使用者，
+        # 比 InstallerBuilder.exe 自己的體積更值得優先處理。
+        "--exclude-module=PyQt5",
+        "--exclude-module=PyQt6",
+        "--exclude-module=PySide2",
+        "--exclude-module=PySide6",
+        "--exclude-module=gi",
         "installer_core.py",
     ]
 

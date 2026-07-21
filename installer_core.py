@@ -541,10 +541,12 @@ class InstallerAPI:
             uninstall_src = get_resource_path("uninstall.exe")
             if os.path.exists(uninstall_src):
                 shutil.copy2(uninstall_src, os.path.join(self.selected_path, "uninstall.exe"))
+                copied_rel_paths.append("uninstall.exe")
 
             config_src = get_resource_path("installer_config.json")
             if os.path.exists(config_src):
                 shutil.copy2(config_src, os.path.join(self.selected_path, "installer_config.json"))
+                copied_rel_paths.append("installer_config.json")
 
             # 登錄表 + 捷徑 + 檔案關聯 + PATH
             self._report_progress(90, "正在註冊系統項目...")
@@ -567,10 +569,7 @@ class InstallerAPI:
                 "publisher": self.publisher,
                 "main_exe": self.main_exe,
                 "install_path": self.selected_path,
-                "files": copied_rel_paths + [
-                    "uninstall.exe", "installer_config.json",
-                    "install_manifest.json", "install_log.txt",
-                ],
+                "files": copied_rel_paths + ["install_manifest.json", "install_log.txt"],
                 "desktop_shortcut": bool(create_desktop_shortcut),
                 "start_menu_shortcut": True,
                 "file_associations": self.file_associations,

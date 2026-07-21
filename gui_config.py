@@ -99,22 +99,32 @@ def check_build_environment():
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
     if python_path:
+        # 效能考量：原本這裡分兩次呼叫 subprocess（各自測 import webview / import win32com），
+        # 每次都要重新啟動一個完整的 Python 直譯器，這個開銷不小，而且工具每次開啟
+        # 都要重付一次。合併成一個子行程、一次測完兩件事，直接砍半這筆固定成本。
+        probe_script = (
+            "import sys\n"
+            "try:\n"
+            "    import webview\n"
+            "    print('WEBVIEW_OK')\n"
+            "except Exception:\n"
+            "    pass\n"
+            "try:\n"
+            "    import win32com.client\n"
+            "    print('PYWIN32_OK')\n"
+            "except Exception:\n"
+            "    pass\n"
+        )
         try:
             proc = subprocess.run(
-                [python_path, "-c", "import webview"],
-                capture_output=True, timeout=15, creationflags=creationflags,
+                [python_path, "-c", probe_script],
+                capture_output=True, timeout=15, creationflags=creationflags, text=True,
             )
-            result["webview_found"] = proc.returncode == 0
+            output = proc.stdout or ""
+            result["webview_found"] = "WEBVIEW_OK" in output
+            result["pywin32_found"] = "PYWIN32_OK" in output
         except Exception:
             result["webview_found"] = False
-
-        try:
-            proc = subprocess.run(
-                [python_path, "-c", "import win32com.client"],
-                capture_output=True, timeout=15, creationflags=creationflags,
-            )
-            result["pywin32_found"] = proc.returncode == 0
-        except Exception:
             result["pywin32_found"] = False
 
     result["ready"] = result["pyinstaller_found"] and result["python_found"] and result["webview_found"]
@@ -129,9 +139,18 @@ def ensure_workspace_files(workspace_dir):
     跟原始碼放在一起，workspace_dir 就是原始碼目錄，不用處理。
     複製失敗（例如工作目錄沒有寫入權限）會回傳錯誤訊息字串；一切正常回傳 None。
 
-    修正紀錄：原本只複製 ui/index.html 一個檔案，漏掉 index.html 裡實際引用到的
-    folder_icon.png，導致編譯出來的安裝檔右側資料夾圖示消失。現在改成把內嵌的
-    整個 ui 資料夾內容都複製過去，之後 index.html 不管引用到哪個靜態資源都不會漏。
+    修正紀錄：
+      - 原本只複製 ui/index.html 一個檔案，漏掉 index.html 裡實際引用到的
+        folder_icon.png，導致編譯出來的安裝檔右側資料夾圖示消失。現在改成把內嵌的
+        整個 ui 資料夾內容都複製過去，之後 index.html 不管引用到哪個靜態資源都不會漏。
+      - 【重要】installer_core.py / uninstall.py / ui/index.html 原本用「只在工作目錄
+        缺少這個檔案時才複製」，代表如果重複用同一個工作目錄打包新版 InstallerBuilder.exe
+        （例如修了 bug 之後重新打包），工作目錄裡卡著的舊版本永遠不會被換掉——不管
+        重新編譯幾次新的 exe，實際被拿去用的都還是最早那次留下的過期程式碼，任何
+        後續修正都不會真的生效，卻不會有任何錯誤訊息提示。現在改成這幾個內部實作
+        檔案一律覆蓋更新，隨時跟目前這顆 exe 內嵌的版本保持同步；至於 ui/ 裡其他
+        使用者可能自訂過的靜態資源（例如 folder_icon.png），維持「只在缺少時才補」，
+        不會覆蓋掉使用者自己換上去的圖示。
     """
     if not hasattr(sys, "_MEIPASS"):
         return None
@@ -143,15 +162,21 @@ def ensure_workspace_files(workspace_dir):
 
         for name in required_scripts:
             dest = os.path.join(workspace_dir, name)
-            if not os.path.exists(dest):
-                shutil.copy2(get_resource_path(name), dest)
+            shutil.copy2(get_resource_path(name), dest)
 
         embedded_ui_dir = get_resource_path("ui")
         if os.path.isdir(embedded_ui_dir):
             for name in os.listdir(embedded_ui_dir):
                 src = os.path.join(embedded_ui_dir, name)
                 dest = os.path.join(workspace_dir, "ui", name)
-                if os.path.isfile(src) and not os.path.exists(dest):
+                if not os.path.isfile(src):
+                    continue
+                if name == "index.html":
+                    # 安裝端介面實作，同樣不是使用者自訂項目，要跟著同步更新
+                    shutil.copy2(src, dest)
+                elif not os.path.exists(dest):
+                    # 其他靜態資源使用者可能自己換過（例如 folder_icon.png），
+                    # 只在缺少時才補上，不要覆蓋使用者的客製化。
                     shutil.copy2(src, dest)
 
         return None

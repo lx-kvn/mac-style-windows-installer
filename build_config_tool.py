@@ -265,6 +265,15 @@ class BuilderGUI:
                 "--add-data=installer_core.py;.",
                 "--add-data=uninstall.py;.",
                 "--add-data=splash_helper.py;.",
+                # pywebview 支援多種 GUI 後端，PyInstaller 靜態分析是保守做法，
+                # 只要程式碼「有可能」用到某個後端就整包塞進去。Windows 上
+                # pywebview 實際只會用 EdgeChromium（靠 pythonnet 接 WebView2），
+                # PyQt5/PySide 這些替代後端一行都用不到，排除掉可以省下相當可觀的體積。
+                "--exclude-module=PyQt5",
+                "--exclude-module=PyQt6",
+                "--exclude-module=PySide2",
+                "--exclude-module=PySide6",
+                "--exclude-module=gi",
             ]
             if self.icon_path:
                 cmd.append(f"--icon={self.icon_path}")

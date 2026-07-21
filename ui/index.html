@@ -257,9 +257,19 @@
             let isDragging = false;
             let pendingPos = null;
 
+            function dragLoop() {
+                if (!isDragging) return;
+                if (pendingPos) {
+                    pywebview.api.drag_move(pendingPos[0], pendingPos[1]);
+                    pendingPos = null;
+                }
+                requestAnimationFrame(dragLoop);
+            }
+
             dragRegion.addEventListener('mousedown', (e) => {
                 isDragging = true;
                 pywebview.api.start_drag(e.screenX, e.screenY);
+                requestAnimationFrame(dragLoop);
             });
             document.addEventListener('mousemove', (e) => {
                 if (!isDragging) return;
@@ -276,14 +286,6 @@
             document.addEventListener('mouseup', () => {
                 if (isDragging) { isDragging = false; pendingPos = null; pywebview.api.end_drag(); }
             });
-            function dragLoop() {
-                if (isDragging && pendingPos) {
-                    pywebview.api.drag_move(pendingPos[0], pendingPos[1]);
-                    pendingPos = null;
-                }
-                requestAnimationFrame(dragLoop);
-            }
-            requestAnimationFrame(dragLoop);
         })();
 
         function showModal(title, message, isError = false, showLaunchOption = false) {
