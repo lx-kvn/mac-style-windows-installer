@@ -193,6 +193,7 @@ class ConfigAPI:
         self.app_dir = ""
         self.png_path = ""
         self.ico_path = ""
+        self.doc_icon_path = ""
         self._window = None
         self._drag_origin = None
         self._resize_origin = None
@@ -300,6 +301,25 @@ class ConfigAPI:
             return self.ico_path
         return ""
 
+    def select_doc_icon(self):
+        """選擇檔案關聯用的專屬文件圖示（選填，不選就沿用主程式圖示）"""
+        window = webview.active_window()
+        res = window.create_file_dialog(webview.OPEN_DIALOG, file_types=['ICO Icon (*.ico)'])
+        if res:
+            self.doc_icon_path = res[0]
+            return self.doc_icon_path
+        return ""
+
+    def clear_doc_icon(self):
+        """取消勾選「自訂文件圖示」時呼叫，把後端記住的路徑也一併清空。
+
+        原本只有前端畫面重置（勾選框、顯示文字），self.doc_icon_path 這個
+        後端變數不會跟著清掉——機率很低，但如果同一次工具開啟期間使用者
+        選過圖示又取消、後續操作路徑比較繞，理論上可能撿到舊路徑。
+        補上這個方法，讓前後端狀態確實一致。
+        """
+        self.doc_icon_path = ""
+
     def list_exe_files(self):
         """掃描目前選定的 app_dir，回傳裡面所有 .exe 的相對路徑，供前端下拉選單選擇主執行檔"""
         if not self.app_dir or not os.path.exists(self.app_dir):
@@ -338,6 +358,7 @@ class ConfigAPI:
         eula_text = data.get("eula_text", "").strip()
         dependencies = data.get("dependencies", []) or []
         file_assoc_raw = data.get("file_associations", "").strip()
+        use_custom_doc_icon = bool(data.get("use_custom_doc_icon", False))
         add_to_path = bool(data.get("add_to_path", False))
 
         if not app_name or not version or not publisher or not exe_name:
@@ -360,6 +381,12 @@ class ConfigAPI:
 
         if not os.path.exists(os.path.join(self.app_dir, main_exe)):
             return {"status": "error", "message": "欄位驗證失敗：<br>選擇的主要執行檔不存在於應用程式資料夾中，請重新選擇。"}
+
+        doc_icon_path = ""
+        if use_custom_doc_icon:
+            if not self.doc_icon_path or not self.doc_icon_path.lower().endswith('.ico'):
+                return {"status": "error", "message": "欄位驗證失敗：<br>已勾選自訂文件圖示，請選擇一顆 ICO 檔案，或取消勾選改沿用應用程式圖示。"}
+            doc_icon_path = self.doc_icon_path
 
         try:
             folder_contents = os.listdir(self.app_dir)
@@ -387,6 +414,7 @@ class ConfigAPI:
         pack_data = dict(data)
         pack_data["folder_name"] = folder_name
         pack_data["file_associations"] = file_associations
+        pack_data["doc_icon_path"] = doc_icon_path
         pack_data["dependencies"] = dependencies
         pack_data["eula_text"] = eula_text
         pack_data["main_exe"] = main_exe
@@ -423,6 +451,7 @@ class ConfigAPI:
                 eula_text=data.get("eula_text", ""),
                 dependencies=data.get("dependencies", []),
                 file_associations=data.get("file_associations", []),
+                doc_icon_path=data.get("doc_icon_path", ""),
                 add_to_path=data.get("add_to_path", False),
                 workspace_dir=workspace_dir,
                 progress_callback=progress_handler,

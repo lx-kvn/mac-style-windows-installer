@@ -36,7 +36,7 @@ CONFIG_FILE_NAME = "installer_config.json"
 
 def build_all(
     app_dir, exe_name, app_name, folder_name, version, publisher, png_path, ico_path,
-    main_exe, eula_text="", dependencies=None, file_associations=None,
+    main_exe, eula_text="", dependencies=None, file_associations=None, doc_icon_path="",
     add_to_path=False, workspace_dir=".", progress_callback=None,
 ):
     """流水線：產生配置 -> 編譯反安裝檔 -> 編譯主安裝檔
@@ -105,6 +105,7 @@ def build_all(
         "eula_text": eula_text,
         "dependencies": dependencies,
         "file_associations": file_associations,
+        "doc_icon": "doc_icon.ico" if doc_icon_path else "",
         "add_to_path": bool(add_to_path),
     }
     config_path = os.path.join(workspace_dir, CONFIG_FILE_NAME)
@@ -165,8 +166,16 @@ def build_all(
         "--exclude-module=PySide2",
         "--exclude-module=PySide6",
         "--exclude-module=gi",
-        "installer_core.py",
     ]
+    if doc_icon_path:
+        # --add-data 不會重新命名檔案，會保留使用者選的原始檔名，
+        # 所以跟現有的 PNG 圖示（temp_icon）一樣，先複製一份固定檔名
+        # doc_icon.ico 到工作目錄，installer_config.json 的 "doc_icon" 欄位
+        # 才能一律查這個固定名字，不用管使用者原本選的檔案叫什麼。
+        temp_doc_icon = os.path.join(workspace_dir, "doc_icon.ico")
+        shutil.copy(doc_icon_path, temp_doc_icon)
+        cmd.append(f"--add-data={temp_doc_icon};.")
+    cmd.append("installer_core.py")
 
     res_installer = subprocess.run(
         cmd, cwd=workspace_dir, creationflags=creationflags,
@@ -179,6 +188,9 @@ def build_all(
         os.remove(config_path)
     if os.path.exists(temp_icon):
         os.remove(temp_icon)
+    temp_doc_icon = os.path.join(workspace_dir, "doc_icon.ico")
+    if os.path.exists(temp_doc_icon):
+        os.remove(temp_doc_icon)
 
     if res_installer.returncode != 0:
         tail = ((res_installer.stdout or "") + "\n" + (res_installer.stderr or ""))[-1500:]

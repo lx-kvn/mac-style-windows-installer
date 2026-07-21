@@ -89,8 +89,12 @@ def remove_shortcut(app_name, desktop=False):
 def remove_file_associations(extensions):
     for ext in extensions:
         prog_id = f"AppFile{ext.replace('.', '')}"
+        # DefaultIcon 是這輪新增的子機碼（跟 shell 平行），winreg.DeleteKey 要求
+        # 目標本身沒有子機碼才能刪除，所以要在刪 {prog_id} 本體之前先把它清掉，
+        # 不然最後一步會因為底下還有 DefaultIcon 而刪不掉，留下殘留機碼。
         for reg_path in (f"Software\\Classes\\{ext}", f"Software\\Classes\\{prog_id}\\shell\\open\\command",
                           f"Software\\Classes\\{prog_id}\\shell\\open", f"Software\\Classes\\{prog_id}\\shell",
+                          f"Software\\Classes\\{prog_id}\\DefaultIcon",
                           f"Software\\Classes\\{prog_id}"):
             try:
                 winreg.DeleteKey(winreg.HKEY_LOCAL_MACHINE, reg_path)

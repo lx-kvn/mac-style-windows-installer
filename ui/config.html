@@ -172,8 +172,16 @@
         </div>
 
         <div class="form-group">
-            <div class="checkbox-row"><input type="checkbox" id="need_file_assoc" onchange="document.getElementById('file_assoc_input').style.display = this.checked ? 'block' : 'none'"><label for="need_file_assoc">需要註冊檔案關聯</label></div>
+            <div class="checkbox-row"><input type="checkbox" id="need_file_assoc" onchange="toggleFileAssocFields(this.checked)"><label for="need_file_assoc">需要註冊檔案關聯</label></div>
             <input type="text" id="file_assoc_input" placeholder="輸入副檔名，以逗號分隔，例如: .xyz, .abc" style="display: none; margin-top: 6px;">
+            <div id="doc_icon_section" style="display: none; margin-top: 10px;">
+                <div class="checkbox-row"><input type="checkbox" id="custom_doc_icon" onchange="onToggleCustomDocIcon(this.checked)"><label for="custom_doc_icon">自訂這個副檔名的文件圖示</label></div>
+                <div class="file-selector" id="doc_icon_row" style="display: none; margin-top: 6px;">
+                    <button class="btn-browse" onclick="browseDocIcon()">選擇 ICO 檔案</button>
+                    <span class="path-display" id="doc_icon_path">未選擇檔案</span>
+                </div>
+                <span class="note">不勾選的話，文件圖示會直接沿用應用程式本身的圖示。</span>
+            </div>
         </div>
 
         <div class="form-group">
@@ -218,6 +226,8 @@
                 <h4>相依元件偵測 / 檔案關聯 / PATH 有什麼限制？</h4>
                 相依元件目前只做偵測與提示下載連結，不會自動安裝該元件。
                 檔案關聯與 PATH 設定需要以系統管理員權限執行安裝程式才會生效（本工具產生的安裝檔預設就會要求管理員權限）。
+                勾選檔案關聯後，可以另外勾選「自訂這個副檔名的文件圖示」指定一顆專屬 ICO；
+                不勾選的話，文件圖示會直接沿用應用程式本身的圖示。
 
                 <h4>安裝端實際會做的事</h4>
                 單一實例鎖、EULA（有設定的話）、覆蓋安裝偵測（偵測到已安裝版本會比較版本新舊，
@@ -450,6 +460,28 @@
         }
         async function browsePng() { const path = await pywebview.api.select_png_icon(); if(path) document.getElementById('png_icon_path').innerText = path; }
         async function browseIco() { const path = await pywebview.api.select_ico_icon(); if(path) document.getElementById('ico_icon_path').innerText = path; }
+
+        function toggleFileAssocFields(checked) {
+            document.getElementById('file_assoc_input').style.display = checked ? 'block' : 'none';
+            document.getElementById('doc_icon_section').style.display = checked ? 'block' : 'none';
+            if (!checked) {
+                // 取消勾選檔案關聯時，連帶把自訂文件圖示的狀態也重置掉，
+                // 避免使用者取消關聯後，殘留的圖示設定還被送出去
+                document.getElementById('custom_doc_icon').checked = false;
+                onToggleCustomDocIcon(false);
+            }
+        }
+
+        function onToggleCustomDocIcon(checked) {
+            document.getElementById('doc_icon_row').style.display = checked ? 'flex' : 'none';
+            if (!checked) {
+                document.getElementById('doc_icon_path').innerText = '未選擇檔案';
+                // 前端畫面重置的同時，把後端記住的路徑也清掉，避免前後端狀態不一致
+                pywebview.api.clear_doc_icon();
+            }
+        }
+
+        async function browseDocIcon() { const path = await pywebview.api.select_doc_icon(); if(path) document.getElementById('doc_icon_path').innerText = path; }
         async function submitForm() {
             const data = {
                 app_name: document.getElementById('app_name').value,
@@ -464,6 +496,7 @@
                     ...(document.getElementById('dep_dotnet').checked ? ['dotnet_desktop'] : []),
                 ],
                 file_associations: document.getElementById('need_file_assoc').checked ? document.getElementById('file_assoc_input').value : '',
+                use_custom_doc_icon: document.getElementById('need_file_assoc').checked && document.getElementById('custom_doc_icon').checked,
                 add_to_path: document.getElementById('add_to_path').checked,
             };
             const result = await pywebview.api.start_pack(data);

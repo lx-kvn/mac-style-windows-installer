@@ -149,6 +149,7 @@ class InstallerAPI:
         self.eula_text = ""
         self.dependencies = []
         self.file_associations = []
+        self.doc_icon = ""
         self.add_to_path = False
 
         program_files = os.environ.get("ProgramFiles", "C:\\Program Files")
@@ -200,6 +201,7 @@ class InstallerAPI:
                     self.eula_text = config.get("eula_text", "")
                     self.dependencies = config.get("dependencies", [])
                     self.file_associations = config.get("file_associations", [])
+                    self.doc_icon = config.get("doc_icon", "")
                     self.add_to_path = bool(config.get("add_to_path", False))
         except Exception as e:
             print(f"[提示] 使用預設開發模式: {e}")
@@ -385,6 +387,13 @@ class InstallerAPI:
         if not self.file_associations or not self.main_exe:
             return
         main_exe_path = os.path.join(self.selected_path, self.main_exe)
+        # 文件圖示：有自訂就指向安裝時複製過去的那顆 ico，沒有就直接沿用主程式圖示。
+        # 原本這裡完全沒寫 DefaultIcon，檔案總管會顯示 Windows 給「不知道用什麼
+        # 圖示」的檔案類型的通用預設圖示，不是預期的樣子。
+        if self.doc_icon:
+            icon_ref = os.path.join(self.selected_path, self.doc_icon)
+        else:
+            icon_ref = f"{main_exe_path},0"
         for ext in self.file_associations:
             prog_id = f"AppFile{ext.replace('.', '')}"
             try:
@@ -394,6 +403,8 @@ class InstallerAPI:
                     winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f"{self.app_name} File")
                 with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, f"Software\\Classes\\{prog_id}\\shell\\open\\command") as key:
                     winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f'"{main_exe_path}" "%1"')
+                with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, f"Software\\Classes\\{prog_id}\\DefaultIcon") as key:
+                    winreg.SetValueEx(key, "", 0, winreg.REG_SZ, icon_ref)
             except Exception as e:
                 print(f"[警告] 註冊檔案關聯 {ext} 失敗: {e}")
         try:
@@ -547,6 +558,15 @@ class InstallerAPI:
             if os.path.exists(config_src):
                 shutil.copy2(config_src, os.path.join(self.selected_path, "installer_config.json"))
                 copied_rel_paths.append("installer_config.json")
+
+            if self.doc_icon:
+                doc_icon_src = get_resource_path(self.doc_icon)
+                if os.path.exists(doc_icon_src):
+                    shutil.copy2(doc_icon_src, os.path.join(self.selected_path, self.doc_icon))
+                    copied_rel_paths.append(self.doc_icon)
+                else:
+                    log(f"[警告] 找不到內嵌的文件圖示 {self.doc_icon}，檔案關聯將沿用主程式圖示。")
+                    self.doc_icon = ""
 
             # 登錄表 + 捷徑 + 檔案關聯 + PATH
             self._report_progress(90, "正在註冊系統項目...")
