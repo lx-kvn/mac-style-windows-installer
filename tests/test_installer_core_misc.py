@@ -127,10 +127,10 @@ class TestCheckExistingInstall(unittest.TestCase):
 
     def _seed_existing(self, app_name, version, install_path="C:\\Apps\\Old"):
         reg_path = f"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{app_name}"
-        self.fake_reg.store[reg_path] = {
+        self.fake_reg.set_hklm(reg_path, {
             "InstallLocation": install_path,
             "DisplayVersion": version,
-        }
+        })
 
     def test_not_installed_before(self):
         api = make_installer_api(app_name="NeverInstalled", version="1.0.0")
@@ -176,18 +176,18 @@ class TestAddToPathEnv(unittest.TestCase):
     def test_appends_when_no_existing_path(self):
         # Environment 這個機碼在真實 Windows 上一定存在，只是底下可能沒有 "Path"
         # 這個值（極端但合法的情況）；用空機碼模擬這個狀態。
-        self.fake_reg.store[self._path_key()] = {}
+        self.fake_reg.set_hklm(self._path_key(), {})
         api = make_installer_api(selected_path="C:\\Apps\\MyApp")
         with mock.patch("installer_core.ctypes.windll.user32.SendMessageTimeoutW"):
             api._add_to_path_env()
-        self.assertEqual(self.fake_reg.store[self._path_key()]["Path"], "C:\\Apps\\MyApp")
+        self.assertEqual(self.fake_reg.hklm(self._path_key())["Path"], "C:\\Apps\\MyApp")
 
     def test_does_not_duplicate_existing_entry(self):
-        self.fake_reg.store[self._path_key()] = {"Path": "C:\\Windows;C:\\Apps\\MyApp"}
+        self.fake_reg.set_hklm(self._path_key(), {"Path": "C:\\Windows;C:\\Apps\\MyApp"})
         api = make_installer_api(selected_path="C:\\Apps\\MyApp")
         with mock.patch("installer_core.ctypes.windll.user32.SendMessageTimeoutW"):
             api._add_to_path_env()
-        self.assertEqual(self.fake_reg.store[self._path_key()]["Path"], "C:\\Windows;C:\\Apps\\MyApp")
+        self.assertEqual(self.fake_reg.hklm(self._path_key())["Path"], "C:\\Windows;C:\\Apps\\MyApp")
 
     def test_registry_failure_propagates(self):
         """修復驗證：PATH 寫入失敗不再被吞掉，讓安裝流程可以整個回滾。"""

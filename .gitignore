@@ -7,3 +7,6 @@ __pycache__/
 build/
 dist/
 *.spec
+
+# Claude Code 本機設定/skill，不進版控
+.claude/

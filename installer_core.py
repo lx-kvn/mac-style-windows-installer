@@ -429,6 +429,48 @@ class InstallerAPI:
                     log(f"已清除 {ext} 先前手動設定的預設開啟程式，改用新安裝的關聯")
             except Exception:
                 pass
+
+            # 光清 UserChoice 還不夠：實測抓到的第二個殘留點——「開啟方式」對話框
+            # 選過的程式，Windows 除了寫 UserChoice，還會在 HKCU\Software\Classes\<ext>
+            # 留一個per-user 的關聯覆寫（外加一個 OpenWithProgids 子機碼記錄候選名單），
+            # 這個 HKCU 覆寫在傳統 HKEY_CLASSES_ROOT 合併規則裡優先權高於 HKLM\Software\
+            # Classes，就算 UserChoice 清掉了，Explorer 解析 <ext> 的預設 ProgID 時還是會
+            # 先看到這個 HKCU 覆寫、指向一個過期/不完整的 ProgID，導致行為不一致
+            # （不一定固定開哪個程式，取決於那個殘留 ProgID 本身有沒有效）。
+            # 同樣是盡量做：OpenWithProgids 是子機碼，要先清掉才能刪 <ext> 本身。
+            try:
+                winreg.DeleteKey(
+                    winreg.HKEY_CURRENT_USER, rf"Software\Classes\{ext}\OpenWithProgids"
+                )
+            except Exception:
+                pass
+            try:
+                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{ext}")
+                if log:
+                    log(f"已清除 {ext} 在使用者個人層級（HKCU）殘留的關聯覆寫")
+            except Exception:
+                pass
+
+            # 第三個殘留點：FileExts\<ext> 底下的 OpenWithProgids / OpenWithList，
+            # 這是「選取應用程式以開啟」對話框「建議的應用程式」清單的資料來源，
+            # 跟上面清掉的 Software\Classes\<ext>\OpenWithProgids 是完全不同的機碼
+            # 路徑。重複測試、換過命名方式的舊 ProgID 會一直累積在這裡，導致清單
+            # 裡混雜一堆過期候選、使用者分不清哪個才是目前這次真正裝好的程式。
+            # 這兩個都是葉節點機碼（底下只有值，沒有子機碼），直接刪即可。
+            try:
+                winreg.DeleteKey(
+                    winreg.HKEY_CURRENT_USER,
+                    rf"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\{ext}\OpenWithProgids",
+                )
+            except Exception:
+                pass
+            try:
+                winreg.DeleteKey(
+                    winreg.HKEY_CURRENT_USER,
+                    rf"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\{ext}\OpenWithList",
+                )
+            except Exception:
+                pass
         try:
             ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0, None, None)  # SHCNE_ASSOCCHANGED
         except Exception:
