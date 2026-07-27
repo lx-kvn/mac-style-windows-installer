@@ -358,6 +358,7 @@ class ConfigAPI:
         eula_text = data.get("eula_text", "").strip()
         dependencies = data.get("dependencies", []) or []
         file_assoc_raw = data.get("file_associations", "").strip()
+        need_file_assoc = bool(data.get("need_file_assoc", False))
         use_custom_doc_icon = bool(data.get("use_custom_doc_icon", False))
         add_to_path = bool(data.get("add_to_path", False))
 
@@ -365,6 +366,12 @@ class ConfigAPI:
             return {
                 "status": "error",
                 "message": "欄位驗證失敗：<br>所有文字欄位（名稱、版本、發行者、安裝檔名）皆為必填項目，請檢查是否有欄位遺漏。",
+            }
+
+        if need_file_assoc and not file_assoc_raw:
+            return {
+                "status": "error",
+                "message": "欄位驗證失敗：<br>已勾選「需要註冊檔案關聯」，請填入至少一個副檔名，或取消勾選。",
             }
 
         if not self.app_dir or not os.path.exists(self.app_dir):

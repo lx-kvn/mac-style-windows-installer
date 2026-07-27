@@ -1,0 +1,9 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# PyInstaller 編譯產物（build_config_tool.py / builder.py 呼叫 pyinstaller 時產生）
+build/
+dist/
+*.spec

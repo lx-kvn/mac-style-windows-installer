@@ -496,6 +496,7 @@
                     ...(document.getElementById('dep_dotnet').checked ? ['dotnet_desktop'] : []),
                 ],
                 file_associations: document.getElementById('need_file_assoc').checked ? document.getElementById('file_assoc_input').value : '',
+                need_file_assoc: document.getElementById('need_file_assoc').checked,
                 use_custom_doc_icon: document.getElementById('need_file_assoc').checked && document.getElementById('custom_doc_icon').checked,
                 add_to_path: document.getElementById('add_to_path').checked,
             };

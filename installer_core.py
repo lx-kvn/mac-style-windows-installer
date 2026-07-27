@@ -334,27 +334,32 @@ class InstallerAPI:
             estimated_size_kb = self._required_size() // 1024
         except Exception:
             estimated_size_kb = 0
-        try:
-            with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, reg_path) as key:
-                winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, self.app_name)
-                winreg.SetValueEx(key, "UninstallString", 0, winreg.REG_SZ, f'"{uninstall_exe}"')
-                # QuietUninstallString：Windows「設定 > 已安裝的應用程式」偵測到這個欄位時，
-                # 會優先用它做靜默解除安裝（例如企業用 MDM/群組原則批次移除），
-                # 沒有這個欄位的話，系統只能呼叫一般的 UninstallString，會跳出確認視窗。
-                winreg.SetValueEx(key, "QuietUninstallString", 0, winreg.REG_SZ, f'"{uninstall_exe}" --silent')
-                winreg.SetValueEx(key, "InstallLocation", 0, winreg.REG_SZ, self.selected_path)
-                winreg.SetValueEx(key, "Publisher", 0, winreg.REG_SZ, self.publisher)
-                winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, self.version)
-                winreg.SetValueEx(key, "DisplayIcon", 0, winreg.REG_SZ, main_exe_path)
-                winreg.SetValueEx(key, "InstallDate", 0, winreg.REG_SZ, datetime.now().strftime("%Y%m%d"))
-                winreg.SetValueEx(key, "EstimatedSize", 0, winreg.REG_DWORD, estimated_size_kb)
-                winreg.SetValueEx(key, "NoModify", 0, winreg.REG_DWORD, 1)
-                winreg.SetValueEx(key, "NoRepair", 0, winreg.REG_DWORD, 1)
-        except Exception as e:
-            print(f"[警告] 寫入解除安裝登錄表失敗: {e}")
+        # 不吞例外：這支 exe 是 --noconsole 編譯，print() 沒有任何地方會顯示
+        # （同一類問題見規格文件 §8.7），失敗時直接讓例外往外拋，交給
+        # trigger_installation() 既有的外層 except 處理（回滾 + 回報使用者）。
+        with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, reg_path) as key:
+            winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, self.app_name)
+            winreg.SetValueEx(key, "UninstallString", 0, winreg.REG_SZ, f'"{uninstall_exe}"')
+            # QuietUninstallString：Windows「設定 > 已安裝的應用程式」偵測到這個欄位時，
+            # 會優先用它做靜默解除安裝（例如企業用 MDM/群組原則批次移除），
+            # 沒有這個欄位的話，系統只能呼叫一般的 UninstallString，會跳出確認視窗。
+            winreg.SetValueEx(key, "QuietUninstallString", 0, winreg.REG_SZ, f'"{uninstall_exe}" --silent')
+            winreg.SetValueEx(key, "InstallLocation", 0, winreg.REG_SZ, self.selected_path)
+            winreg.SetValueEx(key, "Publisher", 0, winreg.REG_SZ, self.publisher)
+            winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, self.version)
+            winreg.SetValueEx(key, "DisplayIcon", 0, winreg.REG_SZ, main_exe_path)
+            winreg.SetValueEx(key, "InstallDate", 0, winreg.REG_SZ, datetime.now().strftime("%Y%m%d"))
+            winreg.SetValueEx(key, "EstimatedSize", 0, winreg.REG_DWORD, estimated_size_kb)
+            winreg.SetValueEx(key, "NoModify", 0, winreg.REG_DWORD, 1)
+            winreg.SetValueEx(key, "NoRepair", 0, winreg.REG_DWORD, 1)
 
-    def _create_shortcut(self, desktop=False):
-        """建立開始功能表或桌面捷徑（依賴 pywin32，未安裝時靜默略過）"""
+    def _create_shortcut(self, desktop=False, log=None):
+        """建立開始功能表或桌面捷徑（依賴 pywin32，未安裝時靜默略過）。
+
+        跟其他登錄表寫入函式不同：捷徑建立失敗是刻意設計成「可忽略」，
+        不影響安裝整體成敗，所以這裡維持吞例外、回傳 False 的行為，
+        只是把回報管道從無效的 print() 換成真正會寫進 install_log.txt 的 log()。
+        """
         if not self.main_exe:
             return False
         try:
@@ -379,7 +384,8 @@ class InstallerAPI:
             shortcut.save()
             return True
         except Exception as e:
-            print(f"[提示] 未建立捷徑（可忽略）: {e}")
+            if log:
+                log(f"[提示] 未建立捷徑（可忽略）: {e}")
             return False
 
     def _register_file_associations(self):
@@ -394,19 +400,18 @@ class InstallerAPI:
             icon_ref = os.path.join(self.selected_path, self.doc_icon)
         else:
             icon_ref = f"{main_exe_path},0"
+        # 不吞例外：任何一個副檔名寫失敗都直接往外拋，交給呼叫端判斷是否要
+        # 整個安裝失敗回滾（見 trigger_installation()），不要讓使用者以為關聯成功了。
         for ext in self.file_associations:
             prog_id = f"AppFile{ext.replace('.', '')}"
-            try:
-                with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, f"Software\\Classes\\{ext}") as key:
-                    winreg.SetValueEx(key, "", 0, winreg.REG_SZ, prog_id)
-                with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, f"Software\\Classes\\{prog_id}") as key:
-                    winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f"{self.app_name} File")
-                with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, f"Software\\Classes\\{prog_id}\\shell\\open\\command") as key:
-                    winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f'"{main_exe_path}" "%1"')
-                with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, f"Software\\Classes\\{prog_id}\\DefaultIcon") as key:
-                    winreg.SetValueEx(key, "", 0, winreg.REG_SZ, icon_ref)
-            except Exception as e:
-                print(f"[警告] 註冊檔案關聯 {ext} 失敗: {e}")
+            with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, f"Software\\Classes\\{ext}") as key:
+                winreg.SetValueEx(key, "", 0, winreg.REG_SZ, prog_id)
+            with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, f"Software\\Classes\\{prog_id}") as key:
+                winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f"{self.app_name} File")
+            with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, f"Software\\Classes\\{prog_id}\\shell\\open\\command") as key:
+                winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f'"{main_exe_path}" "%1"')
+            with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, f"Software\\Classes\\{prog_id}\\DefaultIcon") as key:
+                winreg.SetValueEx(key, "", 0, winreg.REG_SZ, icon_ref)
         try:
             ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0, None, None)  # SHCNE_ASSOCCHANGED
         except Exception:
@@ -414,29 +419,27 @@ class InstallerAPI:
 
     def _add_to_path_env(self):
         import winreg
+        # 不吞例外：理由同上，讓 PATH 寫入失敗時整個安裝流程失敗回滾。
+        key = winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+            0, winreg.KEY_ALL_ACCESS,
+        )
         try:
-            key = winreg.OpenKey(
-                winreg.HKEY_LOCAL_MACHINE,
-                r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
-                0, winreg.KEY_ALL_ACCESS,
-            )
-            try:
-                current, reg_type = winreg.QueryValueEx(key, "Path")
-            except FileNotFoundError:
-                current, reg_type = "", winreg.REG_EXPAND_SZ
-            parts = [p for p in current.split(";") if p]
-            if not any(os.path.normcase(p) == os.path.normcase(self.selected_path) for p in parts):
-                parts.append(self.selected_path)
-                winreg.SetValueEx(key, "Path", 0, reg_type, ";".join(parts))
-            winreg.CloseKey(key)
+            current, reg_type = winreg.QueryValueEx(key, "Path")
+        except FileNotFoundError:
+            current, reg_type = "", winreg.REG_EXPAND_SZ
+        parts = [p for p in current.split(";") if p]
+        if not any(os.path.normcase(p) == os.path.normcase(self.selected_path) for p in parts):
+            parts.append(self.selected_path)
+            winreg.SetValueEx(key, "Path", 0, reg_type, ";".join(parts))
+        winreg.CloseKey(key)
 
-            HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG = 0xFFFF, 0x1A, 0x0002
-            result = ctypes.c_long()
-            ctypes.windll.user32.SendMessageTimeoutW(
-                HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment", SMTO_ABORTIFHUNG, 5000, ctypes.byref(result)
-            )
-        except Exception as e:
-            print(f"[警告] 加入環境變數 PATH 失敗: {e}")
+        HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG = 0xFFFF, 0x1A, 0x0002
+        result = ctypes.c_long()
+        ctypes.windll.user32.SendMessageTimeoutW(
+            HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment", SMTO_ABORTIFHUNG, 5000, ctypes.byref(result)
+        )
 
     # ------------------------------------------------------------------
     # 主安裝流程
@@ -570,15 +573,24 @@ class InstallerAPI:
 
             # 登錄表 + 捷徑 + 檔案關聯 + PATH
             self._report_progress(90, "正在註冊系統項目...")
-            self._register_uninstall_entry()
-            self._create_shortcut(desktop=False)
+            try:
+                self._register_uninstall_entry()
+            except Exception as e:
+                raise RuntimeError(f"寫入解除安裝登錄表失敗：{e}") from e
+            self._create_shortcut(desktop=False, log=log)
             if create_desktop_shortcut:
-                self._create_shortcut(desktop=True)
+                self._create_shortcut(desktop=True, log=log)
             if self.file_associations:
-                self._register_file_associations()
+                try:
+                    self._register_file_associations()
+                except Exception as e:
+                    raise RuntimeError(f"檔案關聯註冊失敗：{e}") from e
                 log(f"已註冊檔案關聯: {self.file_associations}")
             if self.add_to_path:
-                self._add_to_path_env()
+                try:
+                    self._add_to_path_env()
+                except Exception as e:
+                    raise RuntimeError(f"加入環境變數 PATH 失敗：{e}") from e
                 log("已加入環境變數 PATH")
 
             # 寫入安裝清單，供解除安裝時「照清單刪」使用
