@@ -7,6 +7,9 @@ install_manifest.json 記錄的檔案，保留使用者事後自己在安裝目�
 真的清空了才連資料夾一起刪。
 
 登錄表操作一樣全程用 tests/_fakes.py 的假 winreg，不會動到真實登錄表。
+
+檔案關聯（remove_file_associations）的登錄表操作已經收斂進 file_assoc.py
+的 unregister()，對應測試搬到 tests/test_file_assoc.py，這裡不再重複。
 """
 import os
 import sys
@@ -19,102 +22,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from _fakes import FakeWinReg
 import uninstall as un
-
-
-class TestRemoveFileAssociations(unittest.TestCase):
-    def setUp(self):
-        self.fake_reg = FakeWinReg()
-        # uninstall.py 在檔案最上面就 import winreg（不像 installer_core.py 是
-        # 每個函式各自 local import），module 命名空間裡的 uninstall.winreg 早就
-        # 綁定了真正的 winreg，事後 patch sys.modules 不會回溯生效，要直接換掉
-        # uninstall 模組自己的屬性。
-        self.patcher = mock.patch.object(un, "winreg", self.fake_reg)
-        self.patcher.start()
-
-    def tearDown(self):
-        self.patcher.stop()
-
-    def _seed_association(self, ext):
-        prog_id = f"AppFile{ext.replace('.', '')}"
-        self.fake_reg.set_hklm(f"Software\\Classes\\{ext}", {"": prog_id})
-        self.fake_reg.set_hklm(f"Software\\Classes\\{prog_id}", {"": "App File"})
-        self.fake_reg.set_hklm(f"Software\\Classes\\{prog_id}\\shell", {})
-        self.fake_reg.set_hklm(f"Software\\Classes\\{prog_id}\\shell\\open", {})
-        self.fake_reg.set_hklm(f"Software\\Classes\\{prog_id}\\shell\\open\\command", {"": '"app.exe" "%1"'})
-        self.fake_reg.set_hklm(f"Software\\Classes\\{prog_id}\\DefaultIcon", {"": "app.exe,0"})
-
-    def test_removes_all_keys_for_extension(self):
-        """安裝時寫了幾個機碼（ProgID 本身、shell\\open\\command、DefaultIcon），
-        解除安裝要對稱地全部清乾淨，不能留殘骸。"""
-        self._seed_association(".xyz")
-        with mock.patch("uninstall.ctypes.windll.shell32.SHChangeNotify"):
-            un.remove_file_associations([".xyz"])
-
-        remaining = [
-            k for k in self.fake_reg.store
-            if k[0] == self.fake_reg.HKEY_LOCAL_MACHINE
-            and ("AppFilexyz" in k[1] or k[1] == "Software\\Classes\\.xyz")
-        ]
-        self.assertEqual(remaining, [], f"應該完全清空，但還留著: {remaining}")
-
-    def test_deletes_defaulticon_before_parent_key(self):
-        """DefaultIcon 是 ProgID 底下的子機碼，真實 winreg.DeleteKey 要求目標
-        本身沒有子機碼才能刪除——如果沒有『先刪 DefaultIcon 再刪 ProgID 本體』
-        這個順序，最後一步會因為底下還有東西而刪不掉，留下殘留機碼。
-        用 FakeWinReg 的 DeleteKey（模擬同樣的『有子機碼不能刪』限制）驗證這個順序沒有被意外打亂。
-        """
-        self._seed_association(".xyz")
-        with mock.patch("uninstall.ctypes.windll.shell32.SHChangeNotify"):
-            un.remove_file_associations([".xyz"])
-        self.assertIsNone(self.fake_reg.hklm("Software\\Classes\\AppFilexyz"))
-
-    def test_missing_keys_do_not_raise(self):
-        """從沒註冊過的副檔名（例如清單記錄了，但登錄表其實是空的）不該讓整個
-        解除安裝流程炸掉——這支函式本來就是設計成盡量清、清不到就算了。"""
-        with mock.patch("uninstall.ctypes.windll.shell32.SHChangeNotify"):
-            un.remove_file_associations([".never-existed"])  # 不應該拋例外
-
-    def test_clears_user_choice_left_by_installer(self):
-        """安裝時為了讓新關聯生效，會順便清掉使用者當時的 UserChoice；解除安裝
-        要對稱地清掉這個機碼，不要留一個指向已經被移除之 ProgID 的殘留設定。"""
-        self._seed_association(".xyz")
-        user_choice_path = r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.xyz\UserChoice"
-        self.fake_reg.set_hkcu(user_choice_path, {"ProgId": "AppFilexyz", "Hash": "abc123"})
-
-        with mock.patch("uninstall.ctypes.windll.shell32.SHChangeNotify"):
-            un.remove_file_associations([".xyz"])
-
-        self.assertIsNone(self.fake_reg.hkcu(user_choice_path))
-
-    def test_clears_stale_hkcu_classes_override(self):
-        """跟 installer_core.py 對稱：解除安裝時也要清掉 HKCU\\Software\\Classes\\<ext>
-        這個 per-user 覆寫（外加 OpenWithProgids 子機碼），不然殘留的覆寫會讓
-        Explorer 之後解析這個副檔名時，找到一個指向已移除 ProgID 的過期設定。"""
-        self._seed_association(".xyz")
-        self.fake_reg.set_hkcu("Software\\Classes\\.xyz", {"": "AppFilexyz"})
-        self.fake_reg.set_hkcu("Software\\Classes\\.xyz\\OpenWithProgids", {"AppFilexyz": b""})
-
-        with mock.patch("uninstall.ctypes.windll.shell32.SHChangeNotify"):
-            un.remove_file_associations([".xyz"])
-
-        self.assertIsNone(self.fake_reg.hkcu("Software\\Classes\\.xyz"))
-        self.assertIsNone(self.fake_reg.hkcu("Software\\Classes\\.xyz\\OpenWithProgids"))
-
-    def test_clears_stale_open_with_progids_and_list(self):
-        """跟 installer_core.py 對稱：解除安裝時也要清掉 FileExts\\<ext>\\OpenWithProgids
-        （跟上面 HKCU\\Software\\Classes\\<ext>\\OpenWithProgids 是不同的機碼路徑，
-        是餵給「選取應用程式」對話框建議清單用的）跟 OpenWithList，不然移除後
-        清單裡還是會留著已經不存在的舊 ProgID。"""
-        self._seed_association(".xyz")
-        fileexts_prefix = r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.xyz"
-        self.fake_reg.set_hkcu(f"{fileexts_prefix}\\OpenWithProgids", {"AppFilexyz": b""})
-        self.fake_reg.set_hkcu(f"{fileexts_prefix}\\OpenWithList", {"a": "old.exe", "MRUList": "a"})
-
-        with mock.patch("uninstall.ctypes.windll.shell32.SHChangeNotify"):
-            un.remove_file_associations([".xyz"])
-
-        self.assertIsNone(self.fake_reg.hkcu(f"{fileexts_prefix}\\OpenWithProgids"))
-        self.assertIsNone(self.fake_reg.hkcu(f"{fileexts_prefix}\\OpenWithList"))
 
 
 class TestRemoveFromPath(unittest.TestCase):

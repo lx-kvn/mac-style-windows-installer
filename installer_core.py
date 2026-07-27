@@ -30,6 +30,9 @@ import subprocess
 import zlib
 import webview
 from datetime import datetime
+from window_drag import WindowDragController
+from disk_space import required_install_size, check_disk_space
+import file_assoc
 
 
 def _file_checksum(path, chunk_size=1024 * 1024):
@@ -161,31 +164,18 @@ class InstallerAPI:
         # folder_name 沒填的話 load_config() 已經 fallback 成 app_name，行為不變。
         self.default_path = os.path.join(program_files, self.folder_name or self.app_name)
         self.selected_path = self.default_path
-        self._drag_origin = None
+        self._drag = WindowDragController()
 
     def start_drag(self, cursor_x, cursor_y):
-        """自訂拖曳開始：記錄按下當下的滑鼠螢幕座標與視窗當下座標，作為位移量的計算基準。
-
-        不用 pywebview 內建的 pywebview-drag-region：那個機制在拖曳開始瞬間會讓視窗
-        往左上方跳一下才跟上游標，100% 縮放下也會發生，判斷是機制本身的問題。
-        改成完全自己算位移量、呼叫 window.move()，徹底繞開這個問題。
-        """
         global window
-        if window:
-            self._drag_origin = (cursor_x, cursor_y, window.x, window.y)
+        self._drag.start_drag(window, cursor_x, cursor_y)
 
     def drag_move(self, cursor_x, cursor_y):
-        """拖曳中：用目前滑鼠螢幕座標相對於按下當下的位移量搬動視窗。"""
         global window
-        if window and self._drag_origin:
-            start_cx, start_cy, start_wx, start_wy = self._drag_origin
-            dx = cursor_x - start_cx
-            dy = cursor_y - start_cy
-            window.move(start_wx + dx, start_wy + dy)
+        self._drag.drag_move(window, cursor_x, cursor_y)
 
     def end_drag(self):
-        """拖曳結束：清掉基準點。"""
-        self._drag_origin = None
+        self._drag.end_drag()
 
     def load_config(self):
         try:
@@ -311,19 +301,10 @@ class InstallerAPI:
             pass
 
     def _required_size(self):
-        src = get_resource_path("app_contents")
-        total = 0
-        for root, dirs, files in os.walk(src):
-            for f in files:
-                total += os.path.getsize(os.path.join(root, f))
-        return total
+        return required_install_size(get_resource_path("app_contents"))
 
     def _check_disk_space(self):
-        required = self._required_size()
-        drive = os.path.splitdrive(self.selected_path)[0] or os.path.splitdrive(self.default_path)[0] or "C:"
-        usage = shutil.disk_usage(drive + "\\")
-        # 保留 10% 緩衝空間
-        return usage.free >= required * 1.1, usage.free, required
+        return check_disk_space(self._required_size(), self.selected_path, self.default_path)
 
     def _register_uninstall_entry(self):
         import winreg
@@ -388,93 +369,14 @@ class InstallerAPI:
                 log(f"[提示] 未建立捷徑（可忽略）: {e}")
             return False
 
-    def _register_file_associations(self, log=None):
-        import winreg
-        if not self.file_associations or not self.main_exe:
-            return
-        main_exe_path = os.path.join(self.selected_path, self.main_exe)
-        # 文件圖示：有自訂就指向安裝時複製過去的那顆 ico，沒有就直接沿用主程式圖示。
-        # 原本這裡完全沒寫 DefaultIcon，檔案總管會顯示 Windows 給「不知道用什麼
-        # 圖示」的檔案類型的通用預設圖示，不是預期的樣子。
+    def _resolve_doc_icon_ref(self, main_exe_path):
+        """決定檔案關聯要用哪個圖示：有自訂就指向安裝時複製過去的那顆 ico，
+        沒有就直接沿用主程式圖示。原本完全沒寫 DefaultIcon 時，檔案總管會顯示
+        Windows 給「不知道用什麼圖示」的檔案類型的通用預設圖示，不是預期的樣子。
+        """
         if self.doc_icon:
-            icon_ref = os.path.join(self.selected_path, self.doc_icon)
-        else:
-            icon_ref = f"{main_exe_path},0"
-        # 不吞例外：任何一個副檔名寫失敗都直接往外拋，交給呼叫端判斷是否要
-        # 整個安裝失敗回滾（見 trigger_installation()），不要讓使用者以為關聯成功了。
-        for ext in self.file_associations:
-            prog_id = f"AppFile{ext.replace('.', '')}"
-            with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, f"Software\\Classes\\{ext}") as key:
-                winreg.SetValueEx(key, "", 0, winreg.REG_SZ, prog_id)
-            with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, f"Software\\Classes\\{prog_id}") as key:
-                winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f"{self.app_name} File")
-            with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, f"Software\\Classes\\{prog_id}\\shell\\open\\command") as key:
-                winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f'"{main_exe_path}" "%1"')
-            with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, f"Software\\Classes\\{prog_id}\\DefaultIcon") as key:
-                winreg.SetValueEx(key, "", 0, winreg.REG_SZ, icon_ref)
-
-            # Windows 8 之後，只要使用者曾經手動選過（或系統自動選過）這個副檔名的
-            # 預設開啟程式，就會在目前使用者的 HKCU 底下留一個帶雜湊保護的 UserChoice
-            # 機碼，Explorer 之後只認這個機碼，完全不看我們剛寫好的 HKLM 關聯——不清掉
-            # 的話，上面這段登錄表寫得再對，雙擊檔案還是會開使用者之前選的舊程式，
-            # 使用者會誤以為「檔案關聯沒有生效」。這步是盡量做，不是關聯成敗的關鍵：
-            # 這個副檔名如果原本就沒有 UserChoice（最常見的情況，例如全新副檔名），
-            # 或目前使用者帳號權限不足，都不該讓整個檔案關聯被判定失敗。
-            try:
-                user_choice_path = (
-                    rf"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\{ext}\UserChoice"
-                )
-                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, user_choice_path)
-                if log:
-                    log(f"已清除 {ext} 先前手動設定的預設開啟程式，改用新安裝的關聯")
-            except Exception:
-                pass
-
-            # 光清 UserChoice 還不夠：實測抓到的第二個殘留點——「開啟方式」對話框
-            # 選過的程式，Windows 除了寫 UserChoice，還會在 HKCU\Software\Classes\<ext>
-            # 留一個per-user 的關聯覆寫（外加一個 OpenWithProgids 子機碼記錄候選名單），
-            # 這個 HKCU 覆寫在傳統 HKEY_CLASSES_ROOT 合併規則裡優先權高於 HKLM\Software\
-            # Classes，就算 UserChoice 清掉了，Explorer 解析 <ext> 的預設 ProgID 時還是會
-            # 先看到這個 HKCU 覆寫、指向一個過期/不完整的 ProgID，導致行為不一致
-            # （不一定固定開哪個程式，取決於那個殘留 ProgID 本身有沒有效）。
-            # 同樣是盡量做：OpenWithProgids 是子機碼，要先清掉才能刪 <ext> 本身。
-            try:
-                winreg.DeleteKey(
-                    winreg.HKEY_CURRENT_USER, rf"Software\Classes\{ext}\OpenWithProgids"
-                )
-            except Exception:
-                pass
-            try:
-                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{ext}")
-                if log:
-                    log(f"已清除 {ext} 在使用者個人層級（HKCU）殘留的關聯覆寫")
-            except Exception:
-                pass
-
-            # 第三個殘留點：FileExts\<ext> 底下的 OpenWithProgids / OpenWithList，
-            # 這是「選取應用程式以開啟」對話框「建議的應用程式」清單的資料來源，
-            # 跟上面清掉的 Software\Classes\<ext>\OpenWithProgids 是完全不同的機碼
-            # 路徑。重複測試、換過命名方式的舊 ProgID 會一直累積在這裡，導致清單
-            # 裡混雜一堆過期候選、使用者分不清哪個才是目前這次真正裝好的程式。
-            # 這兩個都是葉節點機碼（底下只有值，沒有子機碼），直接刪即可。
-            try:
-                winreg.DeleteKey(
-                    winreg.HKEY_CURRENT_USER,
-                    rf"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\{ext}\OpenWithProgids",
-                )
-            except Exception:
-                pass
-            try:
-                winreg.DeleteKey(
-                    winreg.HKEY_CURRENT_USER,
-                    rf"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\{ext}\OpenWithList",
-                )
-            except Exception:
-                pass
-        try:
-            ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0, None, None)  # SHCNE_ASSOCCHANGED
-        except Exception:
-            pass
+            return os.path.join(self.selected_path, self.doc_icon)
+        return f"{main_exe_path},0"
 
     def _add_to_path_env(self):
         import winreg
@@ -640,8 +542,10 @@ class InstallerAPI:
             if create_desktop_shortcut:
                 self._create_shortcut(desktop=True, log=log)
             if self.file_associations:
+                main_exe_path = os.path.join(self.selected_path, self.main_exe)
+                icon_ref = self._resolve_doc_icon_ref(main_exe_path)
                 try:
-                    self._register_file_associations(log=log)
+                    file_assoc.register(self.file_associations, main_exe_path, self.app_name, icon_ref, log=log)
                 except Exception as e:
                     raise RuntimeError(f"檔案關聯註冊失敗：{e}") from e
                 log(f"已註冊檔案關聯: {self.file_associations}")

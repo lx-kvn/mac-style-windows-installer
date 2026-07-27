@@ -84,36 +84,18 @@ class TestCliArgs(unittest.TestCase):
 
 
 class TestCheckDiskSpace(unittest.TestCase):
-    def test_insufficient_space_reports_false(self):
-        api = make_installer_api(selected_path="C:\\FakeApp")
-        fake_usage = mock.Mock(free=100)
-        with mock.patch.object(ic, "shutil") as fake_shutil, \
-             mock.patch.object(api, "_required_size", return_value=1000):
-            fake_shutil.disk_usage.return_value = fake_usage
-            ok, free, required = api._check_disk_space()
-        self.assertFalse(ok)
-        self.assertEqual(free, 100)
-        self.assertEqual(required, 1000)
+    """_check_disk_space() 本身的邏輯（10% 緩衝、磁碟代號 fallback）已經抽到
+    disk_space.py，由 tests/test_disk_space.py 直接測那個純函式。這裡只確認
+    InstallerAPI._check_disk_space() 有把正確的參數轉交過去（真正的深模組
+    seam 在 disk_space.check_disk_space()，這裡是薄呼叫端）。"""
 
-    def test_sufficient_space_with_10_percent_buffer(self):
-        """磁碟剩餘空間要 >= 需求量的 1.1 倍（保留 10% 緩衝），
-        剛好等於需求量（沒有緩衝）應該視為不足。"""
-        api = make_installer_api(selected_path="C:\\FakeApp")
-        fake_usage = mock.Mock(free=1100)
-        with mock.patch.object(ic, "shutil") as fake_shutil, \
-             mock.patch.object(api, "_required_size", return_value=1000):
-            fake_shutil.disk_usage.return_value = fake_usage
-            ok, _, _ = api._check_disk_space()
-        self.assertTrue(ok)
-
-    def test_exactly_required_without_buffer_is_insufficient(self):
-        api = make_installer_api(selected_path="C:\\FakeApp")
-        fake_usage = mock.Mock(free=1000)
-        with mock.patch.object(ic, "shutil") as fake_shutil, \
-             mock.patch.object(api, "_required_size", return_value=1000):
-            fake_shutil.disk_usage.return_value = fake_usage
-            ok, _, _ = api._check_disk_space()
-        self.assertFalse(ok)
+    def test_delegates_to_disk_space_module_with_correct_args(self):
+        api = make_installer_api(selected_path="C:\\FakeApp", default_path="C:\\Fallback")
+        with mock.patch.object(api, "_required_size", return_value=1000), \
+             mock.patch("installer_core.check_disk_space", return_value=(True, 9999, 1000)) as mock_check:
+            result = api._check_disk_space()
+        mock_check.assert_called_once_with(1000, "C:\\FakeApp", "C:\\Fallback")
+        self.assertEqual(result, (True, 9999, 1000))
 
 
 class TestCheckExistingInstall(unittest.TestCase):

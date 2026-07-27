@@ -37,6 +37,7 @@ import webview
 import splash
 import builder
 import threading
+from window_drag import WindowDragController
 
 
 # 跟 __main__ 裡 webview.create_window() 的 min_size 保持一致，
@@ -155,7 +156,13 @@ def ensure_workspace_files(workspace_dir):
     if not hasattr(sys, "_MEIPASS"):
         return None
 
-    required_scripts = ["installer_core.py", "uninstall.py"]
+    # installer_core.py / uninstall.py 是要被 builder.py 各自拉去重新編譯成
+    # 獨立 exe 的進入點；window_drag.py / disk_space.py / file_assoc.py 是它們
+    # 匯入的共用深模組，同樣要在工作目錄裡才能被那兩次 pyinstaller 呼叫找到。
+    required_scripts = [
+        "installer_core.py", "uninstall.py",
+        "window_drag.py", "disk_space.py", "file_assoc.py",
+    ]
 
     try:
         os.makedirs(os.path.join(workspace_dir, "ui"), exist_ok=True)
@@ -188,6 +195,85 @@ def ensure_workspace_files(workspace_dir):
         )
 
 
+def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_path_selected):
+    """驗證 start_pack() 收到的表單資料，並組出要交給 builder.build_all() 的 pack_data。
+
+    純函式：不碰執行緒、不呼叫 check_build_environment()/ensure_workspace_files()
+    這類有外部副作用的檢查——那些留在 start_pack() 裡，跟這裡回傳的結果合併。
+    這樣驗證邏輯可以直接單元測試，不需要真的啟動背景執行緒或呼叫外部指令。
+
+    回傳 (pack_data, None) 表示驗證通過；(None, error_message) 表示驗證失敗，
+    error_message 就是原本要包進 {"status": "error", "message": ...} 的內容。
+    """
+    app_name = data.get("app_name", "").strip()
+    folder_name = data.get("folder_name", "").strip() or app_name
+    version = data.get("version", "").strip()
+    publisher = data.get("publisher", "").strip()
+    exe_name = data.get("exe_name", "").strip()
+    main_exe = data.get("main_exe", "").strip()
+    eula_text = data.get("eula_text", "").strip()
+    dependencies = data.get("dependencies", []) or []
+    file_assoc_raw = data.get("file_associations", "").strip()
+    need_file_assoc = bool(data.get("need_file_assoc", False))
+    use_custom_doc_icon = bool(data.get("use_custom_doc_icon", False))
+    add_to_path = bool(data.get("add_to_path", False))
+
+    if not app_name or not version or not publisher or not exe_name:
+        return None, "欄位驗證失敗：<br>所有文字欄位（名稱、版本、發行者、安裝檔名）皆為必填項目，請檢查是否有欄位遺漏。"
+
+    if need_file_assoc and not file_assoc_raw:
+        return None, "欄位驗證失敗：<br>已勾選「需要註冊檔案關聯」，請填入至少一個副檔名，或取消勾選。"
+
+    if not app_dir or not os.path.exists(app_dir):
+        return None, "欄位驗證失敗：<br>請選擇有效的應用程式內容資料夾。"
+
+    if not png_path or not png_path.lower().endswith('.png'):
+        return None, "欄位驗證失敗：<br>請選擇介面拖拽專用的 PNG 圖示檔案。"
+
+    if not ico_path or not ico_path.lower().endswith('.ico'):
+        return None, "欄位驗證失敗：<br>請選擇執行檔封面專用的 ICO 圖示檔案。"
+
+    if not main_exe:
+        return None, "欄位驗證失敗：<br>請選擇應用程式的主要執行檔（.exe），這是建立捷徑、偵測執行中狀態、立即執行等功能所必需的。"
+
+    if not os.path.exists(os.path.join(app_dir, main_exe)):
+        return None, "欄位驗證失敗：<br>選擇的主要執行檔不存在於應用程式資料夾中，請重新選擇。"
+
+    doc_icon_path = ""
+    if use_custom_doc_icon:
+        if not doc_icon_path_selected or not doc_icon_path_selected.lower().endswith('.ico'):
+            return None, "欄位驗證失敗：<br>已勾選自訂文件圖示，請選擇一顆 ICO 檔案，或取消勾選改沿用應用程式圖示。"
+        doc_icon_path = doc_icon_path_selected
+
+    try:
+        folder_contents = os.listdir(app_dir)
+        if len(folder_contents) == 0:
+            return None, "拒絕編譯：<br>所選的應用程式資料夾內部是空的，請確認已放入軟體檔案。"
+    except Exception as e:
+        return None, f"讀取資料夾失敗: {e}"
+
+    # 解析副檔名清單："txt, .abc,xyz" -> [".txt", ".abc", ".xyz"]
+    file_associations = []
+    if file_assoc_raw:
+        for part in file_assoc_raw.replace("，", ",").split(","):
+            ext = part.strip()
+            if not ext:
+                continue
+            if not ext.startswith("."):
+                ext = "." + ext
+            file_associations.append(ext.lower())
+
+    pack_data = dict(data)
+    pack_data["folder_name"] = folder_name
+    pack_data["file_associations"] = file_associations
+    pack_data["doc_icon_path"] = doc_icon_path
+    pack_data["dependencies"] = dependencies
+    pack_data["eula_text"] = eula_text
+    pack_data["main_exe"] = main_exe
+    pack_data["add_to_path"] = add_to_path
+    return pack_data, None
+
+
 class ConfigAPI:
     def __init__(self):
         self.app_dir = ""
@@ -195,7 +281,7 @@ class ConfigAPI:
         self.ico_path = ""
         self.doc_icon_path = ""
         self._window = None
-        self._drag_origin = None
+        self._drag = WindowDragController()
         self._resize_origin = None
 
     def set_window(self, window):
@@ -203,26 +289,13 @@ class ConfigAPI:
         self._window = window
 
     def start_drag(self, cursor_x, cursor_y):
-        """自訂拖曳開始：記錄按下當下的滑鼠螢幕座標與視窗當下座標，作為位移量的計算基準。
-
-        不用 pywebview 內建的 pywebview-drag-region：那個機制在拖曳開始瞬間會讓視窗
-        往左上方跳一下才跟上游標，100% 縮放下也會發生，判斷是機制本身的問題。
-        改成完全自己算位移量、呼叫 window.move()，徹底繞開這個問題。
-        """
-        if self._window:
-            self._drag_origin = (cursor_x, cursor_y, self._window.x, self._window.y)
+        self._drag.start_drag(self._window, cursor_x, cursor_y)
 
     def drag_move(self, cursor_x, cursor_y):
-        """拖曳中：用目前滑鼠螢幕座標相對於按下當下的位移量搬動視窗。"""
-        if self._window and self._drag_origin:
-            start_cx, start_cy, start_wx, start_wy = self._drag_origin
-            dx = cursor_x - start_cx
-            dy = cursor_y - start_cy
-            self._window.move(start_wx + dx, start_wy + dy)
+        self._drag.drag_move(self._window, cursor_x, cursor_y)
 
     def end_drag(self):
-        """拖曳結束：清掉基準點。"""
-        self._drag_origin = None
+        self._drag.end_drag()
 
     def start_resize(self, edge, cursor_x, cursor_y):
         """自訂縮放開始：記錄按下當下的滑鼠座標與視窗當下大小。
@@ -349,83 +422,16 @@ class ConfigAPI:
                             "，請先安裝必要環境後再試一次（畫面載入時的環境提示視窗有詳細安裝指令）。",
             }
 
-        app_name = data.get("app_name", "").strip()
-        folder_name = data.get("folder_name", "").strip() or app_name
-        version = data.get("version", "").strip()
-        publisher = data.get("publisher", "").strip()
-        exe_name = data.get("exe_name", "").strip()
-        main_exe = data.get("main_exe", "").strip()
-        eula_text = data.get("eula_text", "").strip()
-        dependencies = data.get("dependencies", []) or []
-        file_assoc_raw = data.get("file_associations", "").strip()
-        need_file_assoc = bool(data.get("need_file_assoc", False))
-        use_custom_doc_icon = bool(data.get("use_custom_doc_icon", False))
-        add_to_path = bool(data.get("add_to_path", False))
-
-        if not app_name or not version or not publisher or not exe_name:
-            return {
-                "status": "error",
-                "message": "欄位驗證失敗：<br>所有文字欄位（名稱、版本、發行者、安裝檔名）皆為必填項目，請檢查是否有欄位遺漏。",
-            }
-
-        if need_file_assoc and not file_assoc_raw:
-            return {
-                "status": "error",
-                "message": "欄位驗證失敗：<br>已勾選「需要註冊檔案關聯」，請填入至少一個副檔名，或取消勾選。",
-            }
-
-        if not self.app_dir or not os.path.exists(self.app_dir):
-            return {"status": "error", "message": "欄位驗證失敗：<br>請選擇有效的應用程式內容資料夾。"}
-
-        if not self.png_path or not self.png_path.lower().endswith('.png'):
-            return {"status": "error", "message": "欄位驗證失敗：<br>請選擇介面拖拽專用的 PNG 圖示檔案。"}
-
-        if not self.ico_path or not self.ico_path.lower().endswith('.ico'):
-            return {"status": "error", "message": "欄位驗證失敗：<br>請選擇執行檔封面專用的 ICO 圖示檔案。"}
-
-        if not main_exe:
-            return {"status": "error", "message": "欄位驗證失敗：<br>請選擇應用程式的主要執行檔（.exe），這是建立捷徑、偵測執行中狀態、立即執行等功能所必需的。"}
-
-        if not os.path.exists(os.path.join(self.app_dir, main_exe)):
-            return {"status": "error", "message": "欄位驗證失敗：<br>選擇的主要執行檔不存在於應用程式資料夾中，請重新選擇。"}
-
-        doc_icon_path = ""
-        if use_custom_doc_icon:
-            if not self.doc_icon_path or not self.doc_icon_path.lower().endswith('.ico'):
-                return {"status": "error", "message": "欄位驗證失敗：<br>已勾選自訂文件圖示，請選擇一顆 ICO 檔案，或取消勾選改沿用應用程式圖示。"}
-            doc_icon_path = self.doc_icon_path
-
-        try:
-            folder_contents = os.listdir(self.app_dir)
-            if len(folder_contents) == 0:
-                return {"status": "error", "message": "拒絕編譯：<br>所選的應用程式資料夾內部是空的，請確認已放入軟體檔案。"}
-        except Exception as e:
-            return {"status": "error", "message": f"讀取資料夾失敗: {e}"}
+        pack_data, error = validate_and_build_pack_data(
+            data, self.app_dir, self.png_path, self.ico_path, self.doc_icon_path,
+        )
+        if error:
+            return {"status": "error", "message": error}
 
         workspace_dir = get_workspace_dir()
         prep_error = ensure_workspace_files(workspace_dir)
         if prep_error:
             return {"status": "error", "message": f"環境準備失敗：<br>{prep_error}"}
-
-        # 解析副檔名清單："txt, .abc,xyz" -> [".txt", ".abc", ".xyz"]
-        file_associations = []
-        if file_assoc_raw:
-            for part in file_assoc_raw.replace("，", ",").split(","):
-                ext = part.strip()
-                if not ext:
-                    continue
-                if not ext.startswith("."):
-                    ext = "." + ext
-                file_associations.append(ext.lower())
-
-        pack_data = dict(data)
-        pack_data["folder_name"] = folder_name
-        pack_data["file_associations"] = file_associations
-        pack_data["doc_icon_path"] = doc_icon_path
-        pack_data["dependencies"] = dependencies
-        pack_data["eula_text"] = eula_text
-        pack_data["main_exe"] = main_exe
-        pack_data["add_to_path"] = add_to_path
         pack_data["workspace_dir"] = workspace_dir
 
         threading.Thread(target=self._run_pack_thread, args=(pack_data,)).start()

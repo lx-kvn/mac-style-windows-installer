@@ -42,6 +42,12 @@ class TestEnsureWorkspaceFiles(unittest.TestCase):
             f.write("# NEW installer_core content")
         with open(os.path.join(self.embedded_dir, "uninstall.py"), "w") as f:
             f.write("# NEW uninstall content")
+        with open(os.path.join(self.embedded_dir, "window_drag.py"), "w") as f:
+            f.write("# NEW window_drag content")
+        with open(os.path.join(self.embedded_dir, "disk_space.py"), "w") as f:
+            f.write("# NEW disk_space content")
+        with open(os.path.join(self.embedded_dir, "file_assoc.py"), "w") as f:
+            f.write("# NEW file_assoc content")
         os.makedirs(os.path.join(self.embedded_dir, "ui"))
         with open(os.path.join(self.embedded_dir, "ui", "index.html"), "w") as f:
             f.write("<!-- NEW index.html -->")
@@ -87,6 +93,21 @@ class TestEnsureWorkspaceFiles(unittest.TestCase):
         self.assertIsNone(result)
         with open(os.path.join(self.workspace_dir, "installer_core.py")) as f:
             self.assertEqual(f.read(), "# NEW installer_core content")
+
+    def test_shared_deep_modules_are_always_overwritten(self):
+        """window_drag.py / disk_space.py / file_assoc.py 是 installer_core.py 跟
+        uninstall.py 匯入的共用深模組，跟 installer_core.py/uninstall.py 本身一樣
+        是內部實作，必須無條件覆蓋，理由相同：漏了任何一個沒同步更新，重新編譯出來
+        的 exe 用的還是這個共用模組的舊版本。"""
+        for name in ("window_drag.py", "disk_space.py", "file_assoc.py"):
+            with open(os.path.join(self.workspace_dir, name), "w") as f:
+                f.write(f"# STALE old {name} content")
+
+        gui_config.ensure_workspace_files(self.workspace_dir)
+
+        for name in ("window_drag.py", "disk_space.py", "file_assoc.py"):
+            with open(os.path.join(self.workspace_dir, name)) as f:
+                self.assertEqual(f.read(), f"# NEW {name.replace('.py', '')} content")
 
     def test_index_html_is_always_overwritten(self):
         """ui/index.html 也是內部實作（安裝端介面），不是使用者自訂項目，同樣要無條件覆蓋。"""

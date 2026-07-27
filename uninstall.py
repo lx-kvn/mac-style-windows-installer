@@ -36,6 +36,7 @@ import ctypes
 import time
 import subprocess
 from datetime import datetime
+import file_assoc
 
 
 def is_admin():
@@ -84,61 +85,6 @@ def remove_shortcut(app_name, desktop=False):
     except Exception:
         pass
     return False
-
-
-def remove_file_associations(extensions):
-    for ext in extensions:
-        prog_id = f"AppFile{ext.replace('.', '')}"
-        # DefaultIcon 是這輪新增的子機碼（跟 shell 平行），winreg.DeleteKey 要求
-        # 目標本身沒有子機碼才能刪除，所以要在刪 {prog_id} 本體之前先把它清掉，
-        # 不然最後一步會因為底下還有 DefaultIcon 而刪不掉，留下殘留機碼。
-        for reg_path in (f"Software\\Classes\\{ext}", f"Software\\Classes\\{prog_id}\\shell\\open\\command",
-                          f"Software\\Classes\\{prog_id}\\shell\\open", f"Software\\Classes\\{prog_id}\\shell",
-                          f"Software\\Classes\\{prog_id}\\DefaultIcon",
-                          f"Software\\Classes\\{prog_id}"):
-            try:
-                winreg.DeleteKey(winreg.HKEY_LOCAL_MACHINE, reg_path)
-            except Exception:
-                pass
-        # 安裝時為了讓新關聯真的生效，會順便清掉使用者當時的 UserChoice，以及
-        # HKCU\Software\Classes\<ext> 這個 per-user 關聯覆寫（見 installer_core.py
-        # 的 _register_file_associations()）；解除安裝時對稱地清掉，避免殘留一個
-        # 指向已經被移除之 ProgID 的設定。
-        try:
-            winreg.DeleteKey(
-                winreg.HKEY_CURRENT_USER,
-                rf"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\{ext}\UserChoice",
-            )
-        except Exception:
-            pass
-        try:
-            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{ext}\OpenWithProgids")
-        except Exception:
-            pass
-        try:
-            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{ext}")
-        except Exception:
-            pass
-        # FileExts\<ext> 底下的 OpenWithProgids / OpenWithList 一樣要對稱清掉，
-        # 不然「選取應用程式」對話框的建議清單會留著這個已經被移除的 ProgID。
-        try:
-            winreg.DeleteKey(
-                winreg.HKEY_CURRENT_USER,
-                rf"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\{ext}\OpenWithProgids",
-            )
-        except Exception:
-            pass
-        try:
-            winreg.DeleteKey(
-                winreg.HKEY_CURRENT_USER,
-                rf"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\{ext}\OpenWithList",
-            )
-        except Exception:
-            pass
-    try:
-        ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0, None, None)
-    except Exception:
-        pass
 
 
 def remove_from_path(install_path):
@@ -227,7 +173,7 @@ def main():
     file_associations = manifest.get("file_associations") or []
     if file_associations:
         print("[步驟 3] 正在移除檔案關聯...")
-        remove_file_associations(file_associations)
+        file_assoc.unregister(file_associations)
         log_lines.append(f"已移除檔案關聯: {file_associations}")
 
     if manifest.get("path_added"):
