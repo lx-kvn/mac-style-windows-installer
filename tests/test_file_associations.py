@@ -20,40 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import gui_config
 import installer_core
-
-
-class FakeWinReg:
-    """用一個巢狀 dict 模擬登錄表，CreateKey/SetValueEx 呼叫都紀錄在這裡，
-    這樣可以斷言「最後登錄表裡實際上寫了什麼」，而不必真的去動 Windows 登錄表。
-    """
-
-    HKEY_LOCAL_MACHINE = "HKLM"
-    REG_SZ = 1
-
-    def __init__(self):
-        self.store = {}
-        self.fail_on_ext = None  # 設成某個副檔名字串時，CreateKey 對應到那個子路徑會丟例外
-
-    def CreateKey(self, hive, subkey):
-        if self.fail_on_ext and self.fail_on_ext in subkey:
-            raise PermissionError(f"模擬權限不足，無法寫入 {subkey}")
-        self.store.setdefault(subkey, {})
-        return _FakeKeyCtx(self, subkey)
-
-    def SetValueEx(self, key_ctx, name, reserved, value_type, value):
-        self.store[key_ctx.subkey][name] = value
-
-
-class _FakeKeyCtx:
-    def __init__(self, reg, subkey):
-        self.reg = reg
-        self.subkey = subkey
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
+from _fakes import FakeWinReg
 
 
 def make_installer_api(**overrides):
@@ -184,7 +151,7 @@ class TestFileAssociationRegistration(unittest.TestCase):
         不再被 print() 靜默吞掉。呼叫端（trigger_installation()）可以接住這個例外，
         觸發回滾並回報安裝失敗，不會誤報「安裝成功」。
         """
-        self.fake_reg.fail_on_ext = ".xyz"
+        self.fake_reg.fail_on_substring = ".xyz"
         api = make_installer_api(
             file_associations=[".xyz"],
             main_exe="MyApp.exe",
@@ -198,6 +165,44 @@ class TestFileAssociationRegistration(unittest.TestCase):
                 api._register_file_associations()
 
         self.assertNotIn("Software\\Classes\\.xyz", self.fake_reg.store, "確認登錄表真的沒寫成功")
+
+    def test_clears_existing_user_choice_override(self):
+        """修復驗證：使用者之前手動選過（或系統自動選過）這個副檔名的預設開啟程式時，
+        Windows 8+ 會在 HKCU 留一個 UserChoice 機碼，Explorer 之後只認這個機碼、
+        完全無視我們寫的 HKLM 關聯。現在安裝時要順便清掉這個機碼，下次雙擊才會真的
+        套用新安裝的關聯，而不是照樣打開使用者先前選的舊程式。
+        """
+        user_choice_path = (
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.xyz\UserChoice"
+        )
+        self.fake_reg.store[user_choice_path] = {"ProgId": "Notepad", "Hash": "abc123"}
+        api = make_installer_api(
+            file_associations=[".xyz"],
+            main_exe="MyApp.exe",
+            app_name="MyApp",
+            doc_icon="",
+            selected_path=self.tmp_install_dir,
+        )
+        logged = []
+
+        with mock.patch("installer_core.ctypes.windll.shell32.SHChangeNotify"):
+            api._register_file_associations(log=logged.append)
+
+        self.assertNotIn(user_choice_path, self.fake_reg.store)
+        self.assertTrue(any(".xyz" in msg for msg in logged))
+
+    def test_missing_user_choice_does_not_raise(self):
+        """最常見的情況：這個副檔名從沒被手動選過，UserChoice 機碼根本不存在，
+        清除動作本來就該是「盡量做」，不存在就跳過，不能讓整個檔案關聯因此失敗。"""
+        api = make_installer_api(
+            file_associations=[".xyz"],
+            main_exe="MyApp.exe",
+            app_name="MyApp",
+            doc_icon="",
+            selected_path=self.tmp_install_dir,
+        )
+        with mock.patch("installer_core.ctypes.windll.shell32.SHChangeNotify"):
+            api._register_file_associations()  # 不應該拋例外
 
     def test_shortcut_failure_stays_non_fatal_but_is_logged(self):
         """_create_shortcut() 是刻意設計成失敗可忽略、不影響安裝，這個行為維持不變，

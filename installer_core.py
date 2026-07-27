@@ -388,7 +388,7 @@ class InstallerAPI:
                 log(f"[提示] 未建立捷徑（可忽略）: {e}")
             return False
 
-    def _register_file_associations(self):
+    def _register_file_associations(self, log=None):
         import winreg
         if not self.file_associations or not self.main_exe:
             return
@@ -412,6 +412,23 @@ class InstallerAPI:
                 winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f'"{main_exe_path}" "%1"')
             with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, f"Software\\Classes\\{prog_id}\\DefaultIcon") as key:
                 winreg.SetValueEx(key, "", 0, winreg.REG_SZ, icon_ref)
+
+            # Windows 8 之後，只要使用者曾經手動選過（或系統自動選過）這個副檔名的
+            # 預設開啟程式，就會在目前使用者的 HKCU 底下留一個帶雜湊保護的 UserChoice
+            # 機碼，Explorer 之後只認這個機碼，完全不看我們剛寫好的 HKLM 關聯——不清掉
+            # 的話，上面這段登錄表寫得再對，雙擊檔案還是會開使用者之前選的舊程式，
+            # 使用者會誤以為「檔案關聯沒有生效」。這步是盡量做，不是關聯成敗的關鍵：
+            # 這個副檔名如果原本就沒有 UserChoice（最常見的情況，例如全新副檔名），
+            # 或目前使用者帳號權限不足，都不該讓整個檔案關聯被判定失敗。
+            try:
+                user_choice_path = (
+                    rf"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\{ext}\UserChoice"
+                )
+                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, user_choice_path)
+                if log:
+                    log(f"已清除 {ext} 先前手動設定的預設開啟程式，改用新安裝的關聯")
+            except Exception:
+                pass
         try:
             ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0, None, None)  # SHCNE_ASSOCCHANGED
         except Exception:
@@ -582,7 +599,7 @@ class InstallerAPI:
                 self._create_shortcut(desktop=True, log=log)
             if self.file_associations:
                 try:
-                    self._register_file_associations()
+                    self._register_file_associations(log=log)
                 except Exception as e:
                     raise RuntimeError(f"檔案關聯註冊失敗：{e}") from e
                 log(f"已註冊檔案關聯: {self.file_associations}")

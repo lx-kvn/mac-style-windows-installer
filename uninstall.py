@@ -100,6 +100,16 @@ def remove_file_associations(extensions):
                 winreg.DeleteKey(winreg.HKEY_LOCAL_MACHINE, reg_path)
             except Exception:
                 pass
+        # 安裝時為了讓新關聯真的生效，會順便清掉使用者當時的 UserChoice（見
+        # installer_core.py 的 _register_file_associations()）；解除安裝時對稱地
+        # 清掉這個機碼，避免殘留一個指向已經被移除之 ProgID 的 UserChoice。
+        try:
+            winreg.DeleteKey(
+                winreg.HKEY_CURRENT_USER,
+                rf"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\{ext}\UserChoice",
+            )
+        except Exception:
+            pass
     try:
         ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0, None, None)
     except Exception:
