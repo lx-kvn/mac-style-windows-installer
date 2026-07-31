@@ -30,8 +30,12 @@
 
     新增紀錄（安裝精靈標準流程補齊）：
     - EULA 頁：pywebview.api.get_eula_text() 若回傳非空字串，安裝前先顯示同意頁面。
-    - 覆蓋安裝偵測：頁面載入時呼叫 check_existing_install()，偵測到舊版本會跳出
-      「更新覆蓋 / 取消」選擇，選更新會先靜默呼叫舊版本的 uninstall.exe。
+    - 覆蓋安裝偵測：頁面載入時呼叫 check_existing_install()，依 is_newer/is_same/
+      is_older 三態分別顯示藍色更新／原本樣式／收斂過的警示紅三種提示。這裡
+      按下確認鈕只代表使用者同意，真正靜默呼叫舊版本 uninstall.exe 的動作
+      延後到使用者拖曳圖示、觸發 trigger_installation() 之後才由後端執行
+      （見 installer_core.py 的 run_upgrade_uninstall() 呼叫時機），避免使用者
+      按完確認鈕、還沒拖曳圖示就反悔關視窗，舊版本卻已經被刪掉。
     - 相依元件警告：呼叫 get_dependency_warnings()，非阻擋式提示缺少的執行環境。
     - 真實進度條：安裝過程由後端呼叫 window.updateInstallProgress(percent, message)
       即時更新，不再是死文字。
@@ -125,6 +129,10 @@
         }
         .nice-icon.error { background: #FF3B30; }
         .nice-icon.warn { background: #FF9500; }
+        .nice-icon.update { background: #0071e3; }
+        /* 警示紅：跟 .error 的亮紅區分開來，飽和度/明度收斂過，用在「要安裝的
+           版本比目前已安裝的還舊」這種需要使用者留意、但不是錯誤的情境 */
+        .nice-icon.downgrade { background: #C0392B; }
         .nice-title { font-size: 17px; font-weight: 600; color: #1d1d1f; margin-bottom: 6px; }
         .nice-message { font-size: 13px; color: #86868b; margin-bottom: 20px; text-align: left; line-height: 1.6; }
         .nice-btn {
@@ -210,7 +218,7 @@
     <!-- 覆蓋安裝偵測 -->
     <div class="nice-modal-overlay" id="upgradeModal">
         <div class="nice-modal-box">
-            <div class="nice-icon warn"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L14.7 3.86a2 2 0 0 0-3.4 0z"></path></svg></div>
+            <div class="nice-icon warn" id="upgradeIcon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L14.7 3.86a2 2 0 0 0-3.4 0z"></path></svg></div>
             <div class="nice-title" id="upgradeTitle">偵測到已安裝的版本</div>
             <div class="nice-message" id="upgradeMessage"></div>
             <button class="nice-btn secondary" onclick="cancelUpgrade()">取消</button>
@@ -335,18 +343,14 @@
         }
 
         // ---------------- 覆蓋安裝偵測 ----------------
+        // 這裡按下確認鈕只代表「使用者知情並同意」，還沒有任何檔案被動到；
+        // 真正移除舊版本的動作延後到使用者實際拖曳圖示、觸發
+        // trigger_installation() 之後才由後端執行（見 installer_core.py），
+        // 這樣使用者按完確認鈕、還沒拖曳圖示前反悔關視窗，舊版本完全不受影響。
         let pendingExistingInstall = null;
         function cancelUpgrade() { document.getElementById('upgradeModal').classList.remove('active'); closeWindow(); }
-        async function confirmUpgrade() {
+        function confirmUpgrade() {
             document.getElementById('upgradeModal').classList.remove('active');
-            document.getElementById('installProgressWrap').style.display = 'block';
-            document.getElementById('installProgressText').innerText = '正在移除舊版本...';
-            const result = await pywebview.api.run_upgrade_uninstall();
-            document.getElementById('installProgressWrap').style.display = 'none';
-            if (result.status === 'error') {
-                showModal('移除舊版本失敗', result.message, true, false);
-                return;
-            }
             afterUpgradeCheck();
         }
 
@@ -383,20 +387,33 @@
                 const titleEl = document.getElementById('upgradeTitle');
                 const msgEl = document.getElementById('upgradeMessage');
                 const btnEl = document.getElementById('confirmUpgradeBtn');
+                const iconEl = document.getElementById('upgradeIcon');
 
                 if (existing.is_newer) {
-                    // 這次要裝的版本比已安裝的新：正常的「有更新」流程
-                    titleEl.innerText = '偵測到已安裝的版本';
-                    msgEl.innerText =
-                        `偵測到已安裝版本 ${existing.version}，目前要安裝的版本是 ${existing.new_version}。` +
-                        `選擇「更新覆蓋安裝」會先移除舊版本再安裝新版本，選擇「取消」則結束安裝程式。`;
+                    // 本機是舊版：這次要裝的版本比較新，藍色「更新」圖示
+                    iconEl.className = 'nice-icon update';
+                    iconEl.innerHTML = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"></path><path d="M21 3v6h-6"></path></svg>';
+                    titleEl.innerText = '發現新版本';
+                    msgEl.innerText = `偵測到已安裝版本 ${existing.version}，您是否要更新至 ${existing.new_version} 版本？`;
                     btnEl.innerText = '更新覆蓋安裝';
-                } else {
-                    // 這次要裝的版本跟已安裝的一樣新、或更舊：明確提示使用者，不要照舊講「有更新」
+                } else if (existing.is_same) {
+                    // 版本一致：維持原本的樣式與文字
+                    iconEl.className = 'nice-icon warn';
+                    iconEl.innerHTML = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L14.7 3.86a2 2 0 0 0-3.4 0z"></path></svg>';
                     titleEl.innerText = '目前安裝的版本較新或相同';
                     msgEl.innerText =
                         `已安裝的版本是 ${existing.version}，這次要安裝的版本是 ${existing.new_version}，` +
                         `並不比目前已安裝的版本新。選擇「仍要繼續安裝」會用這次的版本覆蓋現有安裝，選擇「取消」則結束安裝程式。`;
+                    btnEl.innerText = '仍要繼續安裝';
+                } else {
+                    // 本機版本比較新（這次要裝的版本比較舊）：警示色，明確告知使用者
+                    // 要裝的版本比較舊，讓使用者自己決定要不要繼續
+                    iconEl.className = 'nice-icon downgrade';
+                    iconEl.innerHTML = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L14.7 3.86a2 2 0 0 0-3.4 0z"></path></svg>';
+                    titleEl.innerText = '已安裝較新的版本';
+                    msgEl.innerText =
+                        `已安裝的版本是 ${existing.version}，比這次要安裝的版本 ${existing.new_version} 還新，` +
+                        `這次要安裝的版本比較舊。選擇「仍要繼續安裝」會用這次較舊的版本覆蓋現有安裝，選擇「取消」則結束安裝程式。`;
                     btnEl.innerText = '仍要繼續安裝';
                 }
                 document.getElementById('upgradeModal').classList.add('active');

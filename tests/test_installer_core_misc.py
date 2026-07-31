@@ -125,22 +125,26 @@ class TestCheckExistingInstall(unittest.TestCase):
         result = api.check_existing_install()
         self.assertTrue(result["exists"])
         self.assertTrue(result["is_newer"])
-        self.assertFalse(result["is_same_or_older"])
+        self.assertFalse(result["is_same"])
+        self.assertFalse(result["is_older"])
 
-    def test_downgrade_scenario_is_same_or_older(self):
+    def test_downgrade_scenario_is_older(self):
+        """本機已安裝的版本比這次要裝的新：這次要裝的版本比較舊。"""
         self._seed_existing("MyApp", "3.0.0")
         api = make_installer_api(app_name="MyApp", version="1.0.0")
         result = api.check_existing_install()
         self.assertFalse(result["is_newer"])
-        self.assertTrue(result["is_same_or_older"])
+        self.assertFalse(result["is_same"])
+        self.assertTrue(result["is_older"])
 
-    def test_same_version_is_same_or_older(self):
-        """相同版本重裝：不該被誤判成「有更新可以裝」。"""
+    def test_same_version_is_same(self):
+        """相同版本重裝：不該被誤判成「有更新可以裝」，也不是「比較舊」。"""
         self._seed_existing("MyApp", "1.0.0")
         api = make_installer_api(app_name="MyApp", version="1.0.0")
         result = api.check_existing_install()
         self.assertFalse(result["is_newer"])
-        self.assertTrue(result["is_same_or_older"])
+        self.assertTrue(result["is_same"])
+        self.assertFalse(result["is_older"])
 
 
 class TestAddToPathEnv(unittest.TestCase):
@@ -177,6 +181,212 @@ class TestAddToPathEnv(unittest.TestCase):
         api = make_installer_api(selected_path="C:\\Apps\\MyApp")
         with self.assertRaises(PermissionError):
             api._add_to_path_env()
+
+
+class TestUpgradeBackup(unittest.TestCase):
+    """_backup_existing_install() / _restore_upgrade_backup() /
+    _discard_upgrade_backup() 三個方法本身：更新覆蓋安裝時，刪除舊版本前先
+    備份，取消或安裝失敗時把備份搬回原位，成功時清掉備份。"""
+
+    def setUp(self):
+        self.old_install_dir = tempfile.mkdtemp()
+        with open(os.path.join(self.old_install_dir, "app.exe"), "w") as f:
+            f.write("舊版本")
+        self.api = make_installer_api(app_name="MyApp")
+
+    def tearDown(self):
+        shutil.rmtree(self.old_install_dir, ignore_errors=True)
+        if self.api._upgrade_backup_path and os.path.exists(self.api._upgrade_backup_path):
+            shutil.rmtree(self.api._upgrade_backup_path, ignore_errors=True)
+
+    def test_backup_copies_install_dir_to_temp(self):
+        backup_path = self.api._backup_existing_install(self.old_install_dir)
+        self.assertIsNotNone(backup_path)
+        self.assertTrue(os.path.exists(os.path.join(backup_path, "app.exe")))
+
+    def test_backup_returns_none_when_source_missing(self):
+        backup_path = self.api._backup_existing_install("C:\\不存在的資料夾\\Nope")
+        self.assertIsNone(backup_path)
+
+    def test_restore_moves_backup_back_to_original_path(self):
+        backup_path = self.api._backup_existing_install(self.old_install_dir)
+        self.api._upgrade_backup_path = backup_path
+        self.api._upgrade_backup_original_path = self.old_install_dir
+        shutil.rmtree(self.old_install_dir)  # 模擬 uninstall.exe 已經把舊資料夾刪了
+
+        self.api._restore_upgrade_backup()
+
+        self.assertTrue(os.path.exists(os.path.join(self.old_install_dir, "app.exe")), "備份應該搬回原位")
+        self.assertIsNone(self.api._upgrade_backup_path)
+        self.assertIsNone(self.api._upgrade_backup_original_path)
+
+    def test_restore_is_noop_when_no_backup_pending(self):
+        self.api._upgrade_backup_path = None
+        self.api._restore_upgrade_backup()  # 不應該拋例外
+        self.assertIsNone(self.api._upgrade_backup_path)
+
+    def test_discard_removes_backup_folder(self):
+        backup_path = self.api._backup_existing_install(self.old_install_dir)
+        self.api._upgrade_backup_path = backup_path
+        self.api._upgrade_backup_original_path = self.old_install_dir
+
+        self.api._discard_upgrade_backup()
+
+        self.assertFalse(os.path.exists(backup_path))
+        self.assertIsNone(self.api._upgrade_backup_path)
+
+
+class TestRunUpgradeUninstall(unittest.TestCase):
+    """run_upgrade_uninstall()：靜默呼叫舊版 uninstall.exe 前先備份，失敗時
+    復原備份。這個方法現在只在 trigger_installation() 內部被呼叫（使用者拖曳
+    圖示觸發安裝之後），不再由前端在按下確認彈窗當下直接呼叫。"""
+
+    def setUp(self):
+        self.fake_reg = FakeWinReg()
+        self.patcher = mock.patch.dict(sys.modules, {"winreg": self.fake_reg})
+        self.patcher.start()
+        self.old_install_dir = tempfile.mkdtemp()
+        with open(os.path.join(self.old_install_dir, "uninstall.exe"), "w") as f:
+            f.write("fake")
+        reg_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\MyApp"
+        self.fake_reg.set_hklm(reg_path, {
+            "InstallLocation": self.old_install_dir,
+            "DisplayVersion": "1.0.0",
+        })
+        self.api = make_installer_api(app_name="MyApp", version="2.0.0")
+
+    def tearDown(self):
+        self.patcher.stop()
+        shutil.rmtree(self.old_install_dir, ignore_errors=True)
+        if self.api._upgrade_backup_path and os.path.exists(self.api._upgrade_backup_path):
+            shutil.rmtree(self.api._upgrade_backup_path, ignore_errors=True)
+
+    def test_backs_up_before_calling_uninstall_exe(self):
+        call_order = []
+
+        def fake_backup(install_path):
+            call_order.append("backup")
+            return "C:\\FakeBackup"
+
+        def fake_subprocess_run(*args, **kwargs):
+            call_order.append("uninstall_exe")
+
+        with mock.patch.object(self.api, "_backup_existing_install", side_effect=fake_backup), \
+             mock.patch("installer_core.subprocess.run", side_effect=fake_subprocess_run), \
+             mock.patch("installer_core.time.sleep"):
+            result = self.api.run_upgrade_uninstall()
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(call_order, ["backup", "uninstall_exe"], "必須先備份，才能靜默移除舊版本")
+
+    def test_restores_backup_when_uninstall_exe_fails(self):
+        with open(os.path.join(self.old_install_dir, "extra.txt"), "w") as f:
+            f.write("舊資料")
+
+        with mock.patch("installer_core.subprocess.run", side_effect=RuntimeError("模擬失敗")):
+            result = self.api.run_upgrade_uninstall()
+
+        self.assertEqual(result["status"], "error")
+        self.assertTrue(os.path.exists(os.path.join(self.old_install_dir, "extra.txt")), "備份應該被復原回原位")
+        self.assertIsNone(self.api._upgrade_backup_path)
+
+
+class TestCloseWindowRestoresPendingBackup(unittest.TestCase):
+    """使用者在更新覆蓋安裝流程跑到一半（舊版本已刪、新版本還沒裝完）就關
+    視窗，等同取消安裝，備份的舊版本檔案要被復原。"""
+
+    def test_restores_backup_before_destroying_window(self):
+        api = make_installer_api()
+        api._upgrade_backup_path = "C:\\Fake\\Backup"
+        with mock.patch.object(api, "_restore_upgrade_backup") as mock_restore, \
+             mock.patch("installer_core.window", create=True) as mock_window:
+            api.close_window()
+        mock_restore.assert_called_once()
+        mock_window.destroy.assert_called_once()
+
+    def test_no_restore_when_no_pending_backup(self):
+        api = make_installer_api()
+        api._upgrade_backup_path = None
+        with mock.patch.object(api, "_restore_upgrade_backup") as mock_restore, \
+             mock.patch("installer_core.window", create=True) as mock_window:
+            api.close_window()
+        mock_restore.assert_not_called()
+        mock_window.destroy.assert_called_once()
+
+
+class TestTriggerInstallationUpgradeFlow(unittest.TestCase):
+    """驗證『刪除舊版本』延後到 trigger_installation() 內部才執行：使用者拖曳
+    圖示、真正觸發安裝之後才會動舊版本，不是彈窗一按確認鈕就刪（見
+    ui/index.html 的 confirmUpgrade() 現在不再呼叫 run_upgrade_uninstall()）。"""
+
+    def setUp(self):
+        self.resource_dir = tempfile.mkdtemp()
+        self.app_contents_dir = os.path.join(self.resource_dir, "app_contents")
+        os.makedirs(self.app_contents_dir)
+        with open(os.path.join(self.app_contents_dir, "app.exe"), "wb") as f:
+            f.write(b"fake-app")
+        self.install_dir = tempfile.mkdtemp()
+        shutil.rmtree(self.install_dir)  # trigger_installation 應該自己建立這個資料夾
+
+    def tearDown(self):
+        shutil.rmtree(self.resource_dir, ignore_errors=True)
+        shutil.rmtree(self.install_dir, ignore_errors=True)
+
+    def _resource_path(self, relative_path):
+        return os.path.join(self.resource_dir, relative_path)
+
+    def _make_api(self):
+        return make_installer_api(
+            app_name="MyApp", main_exe="", selected_path=self.install_dir,
+            file_associations=[], add_to_path=False,
+        )
+
+    def test_calls_run_upgrade_uninstall_before_copying_when_existing_install_detected(self):
+        api = self._make_api()
+        call_order = []
+        real_copy2 = shutil.copy2
+
+        def recording_copy2(src, dst):
+            call_order.append("copy")
+            return real_copy2(src, dst)
+
+        def fake_run_upgrade_uninstall():
+            call_order.append("upgrade")
+            return {"status": "success"}
+
+        with mock.patch("installer_core.get_resource_path", side_effect=self._resource_path), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": True}), \
+             mock.patch.object(api, "run_upgrade_uninstall", side_effect=fake_run_upgrade_uninstall), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_register_uninstall_entry"), \
+             mock.patch.object(api, "_create_shortcut", return_value=True), \
+             mock.patch.object(api, "_discard_upgrade_backup") as mock_discard, \
+             mock.patch("installer_core.shutil.copy2", side_effect=recording_copy2):
+            result = api.trigger_installation(create_desktop_shortcut=False)
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(call_order[0], "upgrade", "移除舊版本必須發生在複製檔案之前")
+        self.assertIn("copy", call_order)
+        mock_discard.assert_called_once()
+
+    def test_upgrade_uninstall_failure_short_circuits_before_copying(self):
+        api = self._make_api()
+
+        with mock.patch("installer_core.get_resource_path", side_effect=self._resource_path), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": True}), \
+             mock.patch.object(
+                 api, "run_upgrade_uninstall",
+                 return_value={"status": "error", "message": "移除舊版本失敗: 模擬錯誤"},
+             ), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)):
+            result = api.trigger_installation(create_desktop_shortcut=False)
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("移除舊版本失敗", result["message"])
+        self.assertFalse(
+            os.path.exists(self.install_dir),
+            "移除舊版本失敗就該直接回傳錯誤，不該繼續建立安裝目錄、複製檔案",
+        )
 
 
 class TestRollback(unittest.TestCase):

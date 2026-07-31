@@ -165,6 +165,11 @@ class InstallerAPI:
         self.default_path = os.path.join(program_files, self.folder_name or self.app_name)
         self.selected_path = self.default_path
         self._drag = WindowDragController()
+        # 更新覆蓋安裝的復原用備份：run_upgrade_uninstall() 靜默刪掉舊版本前，
+        # 會把舊安裝資料夾複製到這裡；使用者事後取消，或新版本安裝失敗，
+        # 都要能把這份備份搬回原位，見 _backup_existing_install() / _restore_upgrade_backup()。
+        self._upgrade_backup_path = None
+        self._upgrade_backup_original_path = None
 
     def start_drag(self, cursor_x, cursor_y):
         global window
@@ -233,10 +238,11 @@ class InstallerAPI:
     def check_existing_install(self):
         """檢查是否已安裝過同名應用程式（讀取解除安裝登錄表），並比較版本新舊。
 
-        原本只檢查「有沒有裝過」，現在加上版本比對：is_newer 為 True 代表這次要裝的
-        版本比已安裝的新（該問「是否更新」）；is_same_or_older 為 True 代表這次要裝的
-        版本跟已安裝的一樣新或更舊（該提示使用者「目前安裝的版本比較新/一樣新」，
-        而不是照舊講「有更新可以裝」這種容易誤導的話）。
+        三種互斥的結果，讓前端可以分別顯示對應的提示樣式：
+          - is_newer：這次要裝的版本比已安裝的新（本機是舊版，該問「是否要更新」）。
+          - is_same：版本完全一致（單純重裝，維持原本的提示樣式）。
+          - is_older：這次要裝的版本比已安裝的舊（本機版本比較新，該用警示樣式，
+            明確告知使用者要裝的版本比較舊，讓使用者自己決定要不要繼續）。
         """
         import winreg
         reg_path = f"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{self.app_name}"
@@ -251,20 +257,75 @@ class InstallerAPI:
                     "version": old_version,
                     "new_version": self.version,
                     "is_newer": comparison > 0,
-                    "is_same_or_older": comparison <= 0,
+                    "is_same": comparison == 0,
+                    "is_older": comparison < 0,
                 }
         except Exception:
             return {"exists": False}
 
+    def _backup_existing_install(self, install_path):
+        """更新覆蓋安裝前，把舊安裝資料夾整份複製到暫存區。
+
+        run_upgrade_uninstall() 接下來會靜默呼叫舊版本的 uninstall.exe 把這個
+        資料夾整個刪掉，這份備份是唯一的復原機會：使用者事後取消、或這次新版本
+        安裝失敗，都靠它把舊檔案搬回原位（見 _restore_upgrade_backup()）。
+
+        失敗只回傳 None、不拋例外：沒有備份頂多是沒辦法復原，不該因此擋住
+        合法的更新流程。
+        """
+        backup_path = os.path.join(
+            os.environ.get("TEMP", "."), f"{self.app_name}_upgrade_backup_{os.getpid()}",
+        )
+        try:
+            if os.path.exists(backup_path):
+                shutil.rmtree(backup_path, ignore_errors=True)
+            shutil.copytree(install_path, backup_path)
+            return backup_path
+        except Exception:
+            return None
+
+    def _restore_upgrade_backup(self):
+        """把 _backup_existing_install() 備份的舊安裝資料夾搬回原位。
+
+        使用者在更新覆蓋安裝途中取消（close_window()），或這次新版本
+        trigger_installation() 失敗時呼叫，盡量讓系統回到更新前的狀態。
+        沒有備份（例如備份當初就失敗、或這次根本不是更新流程）時是no-op。
+        """
+        if not self._upgrade_backup_path or not os.path.exists(self._upgrade_backup_path):
+            self._upgrade_backup_path = None
+            self._upgrade_backup_original_path = None
+            return
+        try:
+            if os.path.exists(self._upgrade_backup_original_path):
+                shutil.rmtree(self._upgrade_backup_original_path, ignore_errors=True)
+            shutil.move(self._upgrade_backup_path, self._upgrade_backup_original_path)
+        except Exception:
+            pass
+        finally:
+            self._upgrade_backup_path = None
+            self._upgrade_backup_original_path = None
+
+    def _discard_upgrade_backup(self):
+        """新版本安裝成功後，備份已經沒用了，清掉暫存區避免留垃圾。"""
+        if self._upgrade_backup_path and os.path.exists(self._upgrade_backup_path):
+            shutil.rmtree(self._upgrade_backup_path, ignore_errors=True)
+        self._upgrade_backup_path = None
+        self._upgrade_backup_original_path = None
+
     def run_upgrade_uninstall(self):
-        """更新覆蓋安裝流程：靜默呼叫舊版本的解除安裝助手，移除乾淨後再繼續安裝"""
+        """更新覆蓋安裝流程：先備份舊安裝資料夾，再靜默呼叫舊版本的解除安裝
+        助手移除乾淨，之後才繼續安裝新版本。"""
         info = self.check_existing_install()
         if not info.get("exists"):
             return {"status": "skipped"}
 
-        uninstall_exe = os.path.join(info["install_path"], "uninstall.exe")
+        install_path = info["install_path"]
+        uninstall_exe = os.path.join(install_path, "uninstall.exe")
         if not os.path.exists(uninstall_exe):
             return {"status": "error", "message": "找不到舊版本的解除安裝程式，請先手動移除舊版本後再安裝。"}
+
+        self._upgrade_backup_original_path = install_path
+        self._upgrade_backup_path = self._backup_existing_install(install_path)
 
         try:
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -274,6 +335,7 @@ class InstallerAPI:
             time.sleep(3)
             return {"status": "success"}
         except Exception as e:
+            self._restore_upgrade_backup()
             return {"status": "error", "message": f"移除舊版本失敗: {e}"}
 
     def select_folder(self):
@@ -447,11 +509,13 @@ class InstallerAPI:
         try:
             src_dir = get_resource_path("app_contents")
             if not os.path.exists(src_dir):
+                self._restore_upgrade_backup()
                 return {"status": "error", "message": "安裝失敗：找不到內建軟體資源！"}
 
             # 磁碟空間檢查
             ok, free, required = self._check_disk_space()
             if not ok:
+                self._restore_upgrade_backup()
                 return {
                     "status": "error",
                     "message": f"磁碟空間不足：本次安裝約需 {required // (1024 * 1024)} MB，"
@@ -461,10 +525,22 @@ class InstallerAPI:
 
             # 主程式執行中偵測
             if self.main_exe and _is_process_running(os.path.basename(self.main_exe)):
+                self._restore_upgrade_backup()
                 return {
                     "status": "error",
                     "message": f"安裝失敗：偵測到「{self.main_exe}」正在執行，請先關閉程式後再安裝。",
                 }
+
+            # 覆蓋安裝：使用者在拖曳圖示前的彈窗只是「確認要不要繼續」，真正
+            # 刪除舊版本檔案的動作延後到這裡——使用者已經實際拖曳圖示、確定要
+            # 安裝了才動手，而不是彈窗一按確認鈕、使用者都還沒觸發安裝就先刪。
+            # run_upgrade_uninstall() 內部會先備份舊安裝資料夾，失敗時自己復原。
+            existing = self.check_existing_install()
+            if existing.get("exists"):
+                self._report_progress(3, "正在移除舊版本...")
+                upgrade_result = self.run_upgrade_uninstall()
+                if upgrade_result.get("status") == "error":
+                    return {"status": "error", "message": upgrade_result.get("message")}
 
             if not os.path.exists(self.selected_path):
                 os.makedirs(self.selected_path)
@@ -478,6 +554,7 @@ class InstallerAPI:
 
             total = len(file_list)
             if total == 0:
+                self._restore_upgrade_backup()
                 return {"status": "error", "message": "安裝失敗：打包的資源資料夾是空的。"}
 
             integrity_errors = []
@@ -504,6 +581,7 @@ class InstallerAPI:
             if integrity_errors:
                 log(f"完整性驗證失敗的檔案: {integrity_errors}")
                 self._rollback(copied_rel_paths, log)
+                self._restore_upgrade_backup()
                 return {
                     "status": "error",
                     "message": f"安裝失敗：{len(integrity_errors)} 個檔案複製後驗證不通過，"
@@ -578,15 +656,18 @@ class InstallerAPI:
                 f.write("\n".join(log_lines))
 
             self._report_progress(100, "安裝完成")
+            self._discard_upgrade_backup()
 
             main_exe_path = os.path.join(self.selected_path, self.main_exe) if self.main_exe else ""
             return {"status": "success", "message": "安裝成功", "main_exe_path": main_exe_path}
 
         except PermissionError:
             self._rollback(copied_rel_paths, log)
+            self._restore_upgrade_backup()
             return {"status": "error", "message": "安裝失敗：權限不足。請安裝到桌面或 D 槽，或以管理員身分執行。"}
         except Exception as e:
             self._rollback(copied_rel_paths, log)
+            self._restore_upgrade_backup()
             return {"status": "error", "message": f"發生未知錯誤：\n{str(e)}"}
 
     def launch_app(self):
@@ -603,6 +684,10 @@ class InstallerAPI:
 
     def close_window(self):
         global window
+        # 更新覆蓋安裝流程跑到一半（舊版本檔案已刪、新版本還沒裝完）就關視窗，
+        # 等於使用者取消了這次安裝，要把備份的舊版本檔案搬回去，避免兩頭落空。
+        if self._upgrade_backup_path:
+            self._restore_upgrade_backup()
         window.destroy()
 
 
@@ -696,11 +781,9 @@ def run_silent_install(install_dir=None, create_desktop_shortcut=True):
 
     existing = api.check_existing_install()
     if existing.get("exists"):
-        log(f"[資訊] 偵測到已安裝版本 {existing.get('version')}，這次安裝版本 {api.version}，正在靜默更新覆蓋...")
-        upgrade_result = api.run_upgrade_uninstall()
-        if upgrade_result.get("status") == "error":
-            log(f"[錯誤] 移除舊版本失敗: {upgrade_result.get('message')}")
-            return write_log_and_return(api.app_name, 1)
+        # 實際的移除/備份/復原都交給 trigger_installation() 內部處理（跟 GUI
+        # 流程共用同一份邏輯），這裡只負責記錄，避免同一個舊版本被刪兩次。
+        log(f"[資訊] 偵測到已安裝版本 {existing.get('version')}，這次安裝版本 {api.version}，將靜默更新覆蓋...")
 
     warnings = api.get_dependency_warnings()
     for w in warnings:
