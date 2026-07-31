@@ -56,18 +56,21 @@
         /* ➔ 工具視窗的標題列：直接套用原生拖曳類別，乾淨俐落 */
         .title-bar {
             width: 100%; height: 44px; background-color: var(--bg-main);
-            display: flex; align-items: center; padding: 0 16px;
+            display: flex; align-items: center; gap: 8px; padding: 0 16px;
             position: fixed; top: 0; left: 0; z-index: 999;
             border-bottom: 1px solid var(--border-color);
             transition: background-color 0.2s, border-color 0.2s;
         }
-        .window-controls { display: flex; gap: 8px; margin-right: 14px; }
+        .window-controls { display: flex; gap: 8px; margin-right: 14px; flex-shrink: 0; }
         .control-btn { width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; border-radius: 6px; cursor: pointer; color: var(--text-muted); transition: background-color 0.2s, color 0.2s; }
         .close-btn:hover { background-color: #FF5252; color: #ffffff; }
         .minimize-btn:hover { background-color: #FFB300; color: #ffffff; }
-        .title-text { font-size: 13px; font-weight: 500; color: var(--text-muted); letter-spacing: -0.01em; }
-        .theme-toggle { font-size: 12px; color: var(--text-muted); cursor: pointer; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color); background-color: var(--input-bg); transition: all 0.2s; }
+        .title-text { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; font-weight: 500; color: var(--text-muted); letter-spacing: -0.01em; }
+        .theme-toggle { flex-shrink: 0; font-size: 11px; color: var(--text-muted); cursor: pointer; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border-color); background-color: var(--input-bg); transition: all 0.2s; white-space: nowrap; }
         .theme-toggle:hover { color: var(--text-main); border-color: var(--text-muted); }
+        /* 這個工具的全域樣式表把所有 select 都設成 width:100%（給表單裡的下拉選單用），
+           標題列這個語言切換選單不屬於表單、不該吃滿整條標題列寬度，明確蓋掉那條規則。 */
+        .lang-select { width: auto; flex: 0 0 auto; font-size: 11px; color: var(--text-muted); cursor: pointer; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border-color); background-color: var(--input-bg); }
 
         .main-container { padding: 74px 32px 32px 32px; max-width: 600px; margin: 0 auto; }
         h2 { margin: 0 0 24px 0; font-size: 22px; font-weight: 600; color: var(--text-main); letter-spacing: -0.02em; }
@@ -79,7 +82,7 @@
         .checkbox-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
         .checkbox-row input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; }
         .checkbox-row label { margin-bottom: 0; text-transform: none; font-size: 13px; letter-spacing: 0; cursor: pointer; }
-        .help-btn { width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; border-radius: 50%; border: 1.5px solid var(--text-muted); color: var(--text-muted); cursor: pointer; font-size: 13px; font-weight: 600; margin-left: auto; margin-right: 10px; transition: all 0.2s; flex-shrink: 0; }
+        .help-btn { width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; border-radius: 50%; border: 1.5px solid var(--text-muted); color: var(--text-muted); cursor: pointer; font-size: 13px; font-weight: 600; transition: all 0.2s; flex-shrink: 0; }
         .help-btn:hover { color: var(--text-main); border-color: var(--text-main); }
         .help-modal-box { text-align: left; max-width: 460px; max-height: 70vh; overflow-y: auto; }
         .help-modal-box .modal-message { text-align: left; }
@@ -133,73 +136,140 @@
                 <span style="display: block; width: 11px; height: 2px; background-color: currentColor; border-radius: 1px;"></span>
             </div>
         </div>
-        <div class="title-text">安裝軟體生成器</div>
-        <div class="help-btn" onclick="showHelpModal();" title="使用說明">?</div>
-        <div class="theme-toggle" onclick="toggleTheme();"><span id="theme-btn-text">深色模式</span></div>
+        <div class="title-text" data-i18n="app_title" title="安裝軟體生成器">安裝軟體生成器</div>
+        <select class="lang-select" id="langSelect" onchange="onLangSelectChange(this.value)" title="Language">
+            <option value="zh-TW">繁體中文</option>
+            <option value="en">English</option>
+        </select>
+        <div class="help-btn" onclick="showHelpModal();" title="使用說明" data-i18n-title="help_btn_title">?</div>
+        <div class="theme-toggle" onclick="toggleTheme();"><span id="theme-btn-text" data-i18n="theme_dark">深色模式</span></div>
     </div>
 
     <!-- 其餘表單內容保持不變 -->
     <div class="main-container">
-        <h2>配置您的安裝程式資訊</h2>
-        <div class="form-group"><label>應用程式名稱</label><input type="text" id="app_name" placeholder="例如: MyCustomApp"></div>
+        <h2 data-i18n="form_heading">配置您的安裝程式資訊</h2>
+        <div class="form-group"><label data-i18n="label_app_name">應用程式名稱</label><input type="text" id="app_name" placeholder="例如: MyCustomApp" data-i18n-placeholder="ph_app_name"></div>
         <div class="form-group">
-            <label>安裝資料夾名稱</label>
-            <input type="text" id="folder_name" placeholder="留空則沿用上方的應用程式名稱" oninput="checkFolderNameSafety()">
-            <span class="note" id="folder_name_note">安裝路徑（例如 C:\Program Files\這裡）會用這個名稱，跟上面的應用程式名稱是分開的兩件事——應用程式名稱可以是中文，用來顯示給使用者看；如果應用程式名稱是中文，建議在這裡另外填一個純英數字的名稱，避免路徑中出現中文字在少數環境下造成讀寫問題。</span>
+            <label data-i18n="label_folder_name">安裝資料夾名稱</label>
+            <input type="text" id="folder_name" placeholder="留空則沿用上方的應用程式名稱" data-i18n-placeholder="ph_folder_name" oninput="checkFolderNameSafety()">
+            <span class="note" id="folder_name_note" data-i18n="note_folder_name">安裝路徑（例如 C:\Program Files\這裡）會用這個名稱，跟上面的應用程式名稱是分開的兩件事——應用程式名稱可以是中文，用來顯示給使用者看；如果應用程式名稱是中文，建議在這裡另外填一個純英數字的名稱，避免路徑中出現中文字在少數環境下造成讀寫問題。</span>
         </div>
-        <div class="form-group"><label>應用程式版本號</label><input type="text" id="version" placeholder="example: 1.0.0"></div>
-        <div class="form-group"><label>軟體發行者 / 開發商</label><input type="text" id="publisher" placeholder="例如: CustomPublisher"></div>
-        <div class="form-group"><label>最終輸出的安裝檔名稱 (.exe)</label><input type="text" id="exe_name" placeholder="例如: Setup_MyCustomApp"></div>
-        <div class="form-group"><label>應用程式內容資料夾 (不得為空)</label><div class="file-selector"><button class="btn-browse" onclick="browseFolder()">選擇資料夾</button><span class="path-display" id="app_dir_path">未選擇資料夾</span></div></div>
+        <div class="form-group"><label data-i18n="label_version">應用程式版本號</label><input type="text" id="version" placeholder="example: 1.0.0"></div>
+        <div class="form-group"><label data-i18n="label_publisher">軟體發行者 / 開發商</label><input type="text" id="publisher" placeholder="例如: CustomPublisher" data-i18n-placeholder="ph_publisher"></div>
+        <div class="form-group"><label data-i18n="label_exe_name">最終輸出的安裝檔名稱 (.exe)</label><input type="text" id="exe_name" placeholder="例如: Setup_MyCustomApp" data-i18n-placeholder="ph_exe_name"></div>
+        <div class="form-group"><label data-i18n="label_app_dir">應用程式內容資料夾 (不得為空)</label><div class="file-selector"><button class="btn-browse" onclick="browseFolder()" data-i18n="btn_browse_folder">選擇資料夾</button><span class="path-display" id="app_dir_path" data-i18n="no_folder_selected">未選擇資料夾</span></div></div>
         <div class="form-group">
-            <label>主要執行檔</label>
-            <select id="main_exe"><option value="">請先選擇應用程式資料夾</option></select>
-            <span class="note">用於建立捷徑、偵測執行中狀態、安裝完成後立即執行等功能。</span>
+            <label data-i18n="label_main_exe">主要執行檔</label>
+            <select id="main_exe"><option value="" data-i18n="select_app_dir_first">請先選擇應用程式資料夾</option></select>
+            <span class="note" data-i18n="note_main_exe">用於建立捷徑、偵測執行中狀態、安裝完成後立即執行等功能。</span>
         </div>
-        <div class="form-group"><label>應用程式圖標 (必須為 PNG 格式)</label><div class="file-selector"><button class="btn-browse" onclick="browsePng()">選擇 PNG 圖示</button><span class="path-display" id="png_icon_path">未選擇檔案</span></div><span class="note">用於安裝視窗內顯示的精細圖標。</span></div>
-        <div class="form-group"><label>執行檔封面圖示 (必須為 ICO 格式)</label><div class="file-selector"><button class="btn-browse" onclick="browseIco()">選擇 ICO 檔案</button><span class="path-display" id="ico_icon_path">未選擇檔案</span></div><span class="note">用於安裝檔在 Windows 檔案總管中顯示的外觀。</span></div>
+        <div class="form-group"><label data-i18n="label_png_icon">應用程式圖標 (必須為 PNG 格式)</label><div class="file-selector"><button class="btn-browse" onclick="browsePng()" data-i18n="btn_browse_png">選擇 PNG 圖示</button><span class="path-display" id="png_icon_path" data-i18n="no_file_selected">未選擇檔案</span></div><span class="note" data-i18n="note_png_icon">用於安裝視窗內顯示的精細圖標。</span></div>
+        <div class="form-group"><label data-i18n="label_ico_icon">執行檔封面圖示 (必須為 ICO 格式)</label><div class="file-selector"><button class="btn-browse" onclick="browseIco()" data-i18n="btn_browse_ico">選擇 ICO 檔案</button><span class="path-display" id="ico_icon_path" data-i18n="no_file_selected">未選擇檔案</span></div><span class="note" data-i18n="note_ico_icon">用於安裝檔在 Windows 檔案總管中顯示的外觀。</span></div>
 
         <div class="form-group">
-            <label>使用者授權合約 (EULA，選填)</label>
-            <textarea id="eula_text" placeholder="留空則安裝時不顯示同意頁面。若填寫，使用者安裝前必須點擊「同意」才能繼續。"></textarea>
-        </div>
-
-        <div class="form-group">
-            <label>相依元件偵測 (選填)</label>
-            <div class="checkbox-row"><input type="checkbox" id="dep_vcredist"><label for="dep_vcredist">Visual C++ Redistributable (x64)</label></div>
-            <div class="checkbox-row"><input type="checkbox" id="dep_dotnet"><label for="dep_dotnet">.NET Desktop Runtime</label></div>
-            <span class="note">安裝時僅會偵測系統是否已安裝，缺少時提示使用者前往官方頁面下載，不會自動安裝。</span>
-        </div>
-
-        <div class="form-group">
-            <div class="checkbox-row"><input type="checkbox" id="need_file_assoc" onchange="toggleFileAssocFields(this.checked)"><label for="need_file_assoc">需要註冊檔案關聯</label></div>
-            <input type="text" id="file_assoc_input" placeholder="輸入副檔名，以逗號分隔，例如: .xyz, .abc" style="display: none; margin-top: 6px;">
-            <div id="doc_icon_section" style="display: none; margin-top: 10px;">
-                <div class="checkbox-row"><input type="checkbox" id="custom_doc_icon" onchange="onToggleCustomDocIcon(this.checked)"><label for="custom_doc_icon">自訂這個副檔名的文件圖示</label></div>
-                <div class="file-selector" id="doc_icon_row" style="display: none; margin-top: 6px;">
-                    <button class="btn-browse" onclick="browseDocIcon()">選擇 ICO 檔案</button>
-                    <span class="path-display" id="doc_icon_path">未選擇檔案</span>
-                </div>
-                <span class="note">不勾選的話，文件圖示會直接沿用應用程式本身的圖示。</span>
+            <label data-i18n="label_eula">使用者授權合約 (EULA，選填)</label>
+            <span class="note" data-i18n="note_eula">留空則安裝時不顯示同意頁面。可以新增多種語言的版本，開發者自行提供每種語言的文字；終端使用者安裝時會依系統語言自動挑選對應版本，挑不到才會用下面指定的「預設/回退語言」。</span>
+            <div id="eulaLangRows"></div>
+            <button type="button" class="btn-browse" style="margin-top: 8px;" onclick="addEulaLangRow()" data-i18n="btn_add_eula_lang">+ 新增語言版本</button>
+            <div class="form-group" id="eulaDefaultLangGroup" style="display: none; margin-top: 14px;">
+                <label data-i18n="label_eula_default_lang">預設 / 回退語言</label>
+                <select id="eula_default_lang"></select>
+                <span class="note" data-i18n="note_eula_default_lang">當終端使用者的系統語言沒有對應到任何已提供的 EULA 版本時，顯示這個語言的版本。</span>
             </div>
         </div>
 
         <div class="form-group">
-            <div class="checkbox-row"><input type="checkbox" id="add_to_path"><label for="add_to_path">安裝後將程式路徑加入環境變數 PATH</label></div>
+            <label data-i18n="label_dependencies">相依元件偵測 (選填)</label>
+            <div class="checkbox-row"><input type="checkbox" id="dep_vcredist"><label for="dep_vcredist">Visual C++ Redistributable (x64)</label></div>
+            <div class="checkbox-row"><input type="checkbox" id="dep_dotnet"><label for="dep_dotnet">.NET Desktop Runtime</label></div>
+            <span class="note" data-i18n="note_dependencies">安裝時僅會偵測系統是否已安裝，缺少時提示使用者前往官方頁面下載，不會自動安裝。</span>
         </div>
 
         <div class="form-group">
-            <div class="checkbox-row"><input type="checkbox" id="restart_explorer_on_update"><label for="restart_explorer_on_update">更新覆蓋安裝時，暫時關閉檔案總管以釋放被鎖定的檔案</label></div>
-            <span class="note">適用於應用程式有註冊 Windows 檔案總管殼層擴充功能（Shell Extension，例如右鍵選單擴充 DLL）的情況——只要檔案總管還在執行，就會鎖住這類 DLL，導致更新覆蓋時無法覆寫。勾選後，更新覆蓋安裝時會先關閉檔案總管、刪除完畢後自動重啟；使用者畫面會短暫閃爍、所有檔案總管視窗會關閉，非必要（沒有殼層擴充功能）不建議勾選。</span>
+            <div class="checkbox-row"><input type="checkbox" id="need_file_assoc" onchange="toggleFileAssocFields(this.checked)"><label for="need_file_assoc" data-i18n="label_file_assoc">需要註冊檔案關聯</label></div>
+            <input type="text" id="file_assoc_input" placeholder="輸入副檔名，以逗號分隔，例如: .xyz, .abc" data-i18n-placeholder="ph_file_assoc" style="display: none; margin-top: 6px;">
+            <div id="doc_icon_section" style="display: none; margin-top: 10px;">
+                <div class="checkbox-row"><input type="checkbox" id="custom_doc_icon" onchange="onToggleCustomDocIcon(this.checked)"><label for="custom_doc_icon" data-i18n="label_custom_doc_icon">自訂這個副檔名的文件圖示</label></div>
+                <div class="file-selector" id="doc_icon_row" style="display: none; margin-top: 6px;">
+                    <button class="btn-browse" onclick="browseDocIcon()" data-i18n="btn_browse_ico">選擇 ICO 檔案</button>
+                    <span class="path-display" id="doc_icon_path" data-i18n="no_file_selected">未選擇檔案</span>
+                </div>
+                <span class="note" data-i18n="note_custom_doc_icon">不勾選的話，文件圖示會直接沿用應用程式本身的圖示。</span>
+            </div>
         </div>
 
-        <button class="btn-submit" onclick="submitForm()">開始編譯安裝檔</button>
+        <div class="form-group">
+            <div class="checkbox-row"><input type="checkbox" id="add_to_path"><label for="add_to_path" data-i18n="label_add_to_path">安裝後將程式路徑加入環境變數 PATH</label></div>
+        </div>
+
+        <div class="form-group">
+            <div class="checkbox-row"><input type="checkbox" id="restart_explorer_on_update"><label for="restart_explorer_on_update" data-i18n="label_restart_explorer">更新覆蓋安裝時，暫時關閉檔案總管以釋放被鎖定的檔案</label></div>
+            <span class="note" data-i18n="note_restart_explorer">適用於應用程式有註冊 Windows 檔案總管殼層擴充功能（Shell Extension，例如右鍵選單擴充 DLL）的情況——只要檔案總管還在執行，就會鎖住這類 DLL，導致更新覆蓋時無法覆寫。勾選後，更新覆蓋安裝時會先關閉檔案總管、刪除完畢後自動重啟；使用者畫面會短暫閃爍、所有檔案總管視窗會關閉，非必要（沒有殼層擴充功能）不建議勾選。</span>
+        </div>
+
+        <button class="btn-submit" onclick="submitForm()" data-i18n="btn_submit">開始編譯安裝檔</button>
     </div>
 
     <div class="modal-overlay" id="helpModal">
         <div class="modal-box help-modal-box">
-            <div class="modal-title">使用說明</div>
-            <div class="modal-message">
+            <div class="modal-title" data-i18n="help_modal_title">使用說明</div>
+            <div class="modal-message" id="helpModalBody" data-i18n-html="help_modal_body"></div>
+            <button class="btn-modal-close" onclick="closeHelpModal()" data-i18n="btn_close">關閉</button>
+        </div>
+    </div>
+
+    <div class="progress-overlay" id="progressOverlay">
+        <div class="progress-box">
+            <div class="progress-status" id="progressStatus" data-i18n="progress_preparing_env">正在準備環境...</div>
+            <div class="progress-percentage" id="progressPercentage">0%</div>
+            <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+            <button class="btn-close-overlay" id="btnCloseOverlay" onclick="hideOverlay()" data-i18n="btn_ok">確定</button>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="langCodeHelpModal">
+        <div class="modal-box help-modal-box">
+            <div class="modal-title" data-i18n="lang_code_help_title">常見語言代碼對照</div>
+            <div class="modal-message" id="langCodeHelpBody" data-i18n-html="lang_code_help_body"></div>
+            <button class="btn-modal-close" onclick="closeLangCodeHelpModal()" data-i18n="btn_close">關閉</button>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="errorModal">
+        <div class="modal-box">
+            <div class="modal-icon"><svg viewBox="0 0 24 24" width="24" height="24" stroke="#FF5252" stroke-width="2.5" fill="none"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg></div>
+            <div class="modal-title" data-i18n="notice_title">注意</div>
+            <div class="modal-message" id="errorMessage" data-i18n="default_error_message">請檢查欄位。</div>
+            <button class="btn-modal-close" onclick="closeErrorModal()" data-i18n="btn_ok_alt">好的</button>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="envModal">
+        <div class="modal-box help-modal-box">
+            <div class="modal-icon"><svg viewBox="0 0 24 24" width="24" height="24" stroke="#FF9500" stroke-width="2.5" fill="none"><path d="M12 9v4M12 17h.01M10.3 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L14.7 3.86a2 2 0 0 0-3.4 0z"></path></svg></div>
+            <div class="modal-title" data-i18n="env_modal_title">缺少編譯安裝檔所需的環境</div>
+            <div class="modal-message" id="envModalBody" data-i18n-html="env_modal_body">
+                這個工具本身已經正常開啟，不受影響；但「開始編譯安裝檔」這個動作，
+                需要另外呼叫系統上的 PyInstaller 去實際編譯出安裝檔，缺少下列項目的話會編譯失敗：
+                <div id="envChecklist" style="margin: 12px 0;"></div>
+                <div style="font-size: 12px; margin-top: 8px;">安裝指令（在命令提示字元執行）：</div>
+                <div style="background: var(--input-bg); border: 1px solid var(--border-color); border-radius: 6px; padding: 10px 12px; font-family: monospace; font-size: 12px; margin-top: 6px; user-select: text;">pip install pyinstaller pywebview pywin32</div>
+                <div style="font-size: 11px; margin-top: 8px; color: var(--text-muted);">如果連 Python 都還沒裝，請先前往官網下載安裝，安裝時記得勾選「Add python.exe to PATH」。</div>
+            </div>
+            <button class="btn-modal-close" onclick="pywebview.api.open_url('https://www.python.org/downloads/')" style="margin-bottom: 8px; background: var(--input-bg); color: var(--text-main); border: 1px solid var(--border-color);" data-i18n="btn_python_download">前往 Python 官網下載</button>
+            <button class="btn-modal-close" onclick="closeEnvModal()" data-i18n="btn_got_it">我知道了</button>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('contextmenu', (e) => e.preventDefault());
+
+        // ---------------- 多語言介面（打包工具本身）----------------
+        // 跟安裝檔（ui/index.html）不同：這裡語言可以讓開發者自己手動切換，
+        // 初次開啟預設用系統語言（get_system_language()），切換過的選擇記在
+        // localStorage，下次開啟這個工具沿用，不需要每次重選。
+        const HELP_MODAL_BODY = {
+            "zh-TW": `
                 <h4>這個工具在做什麼</h4>
                 總共會產出三顆獨立的 exe：<b>這個工具本身</b>（你現在看到的畫面，用來設定並編譯安裝檔）、
                 <b>編譯出來的安裝檔</b>（給終端使用者雙擊安裝軟體的 macOS 風格拖曳視窗）、
@@ -225,8 +295,11 @@
                 安裝資料夾名稱決定實際安裝路徑長什麼樣子，留空會沿用應用程式名稱。
                 如果應用程式名稱是中文，建議另外填一個純英數字的資料夾名稱，避免路徑含中文在少數環境下出問題。
 
-                <h4>EULA 留空會怎樣？</h4>
-                留空的話，使用者安裝時不會看到同意頁面，直接進入安裝畫面。
+                <h4>EULA 留空會怎樣？多語言 EULA 怎麼運作？</h4>
+                一個語言都沒新增的話，使用者安裝時不會看到同意頁面，直接進入安裝畫面。
+                有新增的話，終端使用者安裝時會依他的系統語言自動挑選對應版本；挑不到對應語言，
+                就顯示你在「預設/回退語言」選的那個版本。每種語言的文字都要你自己貼上，
+                這個工具不會幫你翻譯。
 
                 <h4>相依元件偵測 / 檔案關聯 / PATH 有什麼限制？</h4>
                 相依元件目前只做偵測與提示下載連結，不會自動安裝該元件。
@@ -235,15 +308,16 @@
                 不勾選的話，文件圖示會直接沿用應用程式本身的圖示。
 
                 <h4>安裝端實際會做的事</h4>
-                單一實例鎖、EULA（有設定的話）、覆蓋安裝偵測（偵測到已安裝版本會比較版本新舊，
+                單一實例鎖、EULA（有設定的話，語言依系統自動偵測）、覆蓋安裝偵測（偵測到已安裝版本會比較版本新舊，
                 版本較新才會問是否更新，版本相同或較舊會提示使用者）、相依元件提示、磁碟空間檢查、
                 執行中偵測、真實複製進度、複製後 checksum 完整性驗證、失敗自動回滾、
-                登錄表寫入、捷徑、檔案關聯、PATH、安裝清單與安裝紀錄。
+                登錄表寫入、捷徑、檔案關聯、PATH、安裝清單與安裝紀錄。安裝介面本身的語言（按鈕、
+                標籤等）也會依終端使用者的系統語言自動偵測顯示，目前支援繁體中文與英文。
 
                 <h4>靜默 / 命令列安裝</h4>
                 編譯出來的安裝檔支援命令列參數，給企業批次部署用：
                 <br><code>Setup_XXX.exe /S</code>（靜默安裝，不開視窗）
-                <br><code>Setup_XXX.exe /S /D=D:\Apps\MyApp</code>（指定安裝路徑）
+                <br><code>Setup_XXX.exe /S /D=D:\\Apps\\MyApp</code>（指定安裝路徑）
                 <br><code>Setup_XXX.exe /S /NODESKTOPSHORTCUT</code>（不建立桌面捷徑）
                 <br>執行結果反映在 exit code（0 = 成功），這個數字不會顯示在畫面上，
                 要用 <code>echo %errorlevel%</code> 檢查；同時也會寫一份 log 檔留底。
@@ -255,55 +329,285 @@
 
                 <h4>已知限制</h4>
                 目前沒有數位簽章（第一次執行大概率會被 SmartScreen 攔）；
-                相依元件只做偵測不會自動安裝；沒有多語言介面；
+                相依元件只做偵測不會自動安裝；安裝介面 chrome 目前只有繁體中文/英文兩種語言，
+                解除安裝程式互動模式的文字仍固定為繁體中文；
                 極少數沒更新過的 Windows 10 可能需要另外安裝 WebView2 Runtime。
 
                 <h4>常見問題</h4>
                 若編譯過程中顯示找不到 ui 資料夾，代表 ui/index.html 沒有跟這個工具放在一起；
                 若打包時卡在「存取被拒」，通常是上一次編譯出來的 exe 還在執行中或被防毒軟體鎖住；
                 若編譯失敗，請確認 PyInstaller 已正確安裝在執行環境中。
-            </div>
-            <button class="btn-modal-close" onclick="closeHelpModal()">關閉</button>
-        </div>
-    </div>
+            `,
+            "en": `
+                <h4>What this tool does</h4>
+                It produces three separate executables: <b>this tool itself</b> (the window you're looking at,
+                used to configure and build the installer), the <b>compiled installer</b> (the macOS-style
+                drag-to-install window your end users double-click), and the <b>uninstaller</b> (placed in the
+                install directory automatically during installation). Each has its own job — clicking
+                "Build Installer" invokes PyInstaller on your system to compile the latter two on the spot.
 
-    <div class="progress-overlay" id="progressOverlay">
-        <div class="progress-box">
-            <div class="progress-status" id="progressStatus">正在準備環境...</div>
-            <div class="progress-percentage" id="progressPercentage">0%</div>
-            <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
-            <button class="btn-close-overlay" id="btnCloseOverlay" onclick="hideOverlay()">確定</button>
-        </div>
-    </div>
+                <h4>Environment requirements</h4>
+                The machine running this tool needs: <code>pip install pyinstaller pywebview pywin32</code>.
+                The first two are required and are checked automatically when this tool opens; pywin32 is
+                optional and only affects shortcut creation. Whether you run this tool as
+                <code>python gui_config.py</code> or as a compiled exe, the machine still needs the above
+                installed to actually build an installer.
 
-    <div class="modal-overlay" id="errorModal">
-        <div class="modal-box">
-            <div class="modal-icon"><svg viewBox="0 0 24 24" width="24" height="24" stroke="#FF5252" stroke-width="2.5" fill="none"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg></div>
-            <div class="modal-title">注意</div>
-            <div class="modal-message" id="errorMessage">請檢查欄位。</div>
-            <button class="btn-modal-close" onclick="closeErrorModal()">好的</button>
-        </div>
-    </div>
+                <h4>Basic workflow</h4>
+                Fill in the application name, install folder name, version, publisher, and installer filename;
+                choose the folder containing your application's files; pick the main executable from the
+                dropdown; choose a PNG and an ICO icon; then build.
 
-    <div class="modal-overlay" id="envModal">
-        <div class="modal-box help-modal-box">
-            <div class="modal-icon"><svg viewBox="0 0 24 24" width="24" height="24" stroke="#FF9500" stroke-width="2.5" fill="none"><path d="M12 9v4M12 17h.01M10.3 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L14.7 3.86a2 2 0 0 0-3.4 0z"></path></svg></div>
-            <div class="modal-title">缺少編譯安裝檔所需的環境</div>
-            <div class="modal-message">
-                這個工具本身已經正常開啟，不受影響；但「開始編譯安裝檔」這個動作，
+                <h4>What is the "Main Executable"?</h4>
+                The .exe that actually launches after installation completes. It's used for shortcuts,
+                detecting whether the app is currently running, and the "launch after install" option.
+
+                <h4>What is "Installation Folder Name"?</h4>
+                Separate from the application name: the application name is shown to the end user and can be
+                in any language; the folder name determines the actual install path and defaults to the
+                application name if left blank. If the application name isn't plain ASCII, it's worth setting
+                a plain-ASCII folder name to avoid path issues on a small number of environments.
+
+                <h4>What happens if EULA is left empty? How does multi-language EULA work?</h4>
+                With no language added, end users won't see an agreement screen at all — installation goes
+                straight through. If you add one or more languages, the end user's version is picked
+                automatically based on their system language; if none match, the "default/fallback language"
+                you chose is shown instead. You supply the text for each language yourself — this tool does
+                not translate anything for you.
+
+                <h4>Limitations of dependency detection / file associations / PATH</h4>
+                Dependency detection only checks for presence and links to the official download page — it
+                does not install anything automatically. File associations and PATH changes require the
+                installer to run with administrator rights (installers built by this tool request that by
+                default). After enabling file associations, you can optionally set a custom icon for that
+                file type; otherwise it falls back to the application's own icon.
+
+                <h4>What the installer actually does</h4>
+                Single-instance lock, EULA (if configured, language auto-detected), upgrade detection
+                (compares version numbers and only offers an update when the new version is actually newer;
+                same or older versions prompt the user), dependency warnings, disk space check, running-process
+                detection, real copy progress, post-copy checksum verification, automatic rollback on failure,
+                registry entries, shortcuts, file associations, PATH, and an install manifest + log. The
+                installer's own interface language (buttons, labels, etc.) is also auto-detected from the end
+                user's system language — currently Traditional Chinese and English are supported.
+
+                <h4>Silent / command-line installation</h4>
+                The compiled installer supports command-line flags for enterprise deployment:
+                <br><code>Setup_XXX.exe /S</code> (silent install, no window)
+                <br><code>Setup_XXX.exe /S /D=D:\\Apps\\MyApp</code> (custom install path)
+                <br><code>Setup_XXX.exe /S /NODESKTOPSHORTCUT</code> (skip the desktop shortcut)
+                <br>Results are reflected in the exit code (0 = success); this isn't shown on screen, check it
+                with <code>echo %errorlevel%</code>. A log file is also written for reference.
+
+                <h4>Uninstall behavior</h4>
+                Only removes files this installer itself placed (per the install manifest) — it won't touch
+                anything the user later added to the install folder. The folder is only removed entirely if it
+                ends up empty after cleanup; otherwise just the uninstaller itself is removed and the folder
+                stays.
+
+                <h4>Known limitations</h4>
+                No code signing yet (first run will likely be flagged by SmartScreen); dependency detection
+                only, no automatic installation; the installer's UI chrome currently supports only Traditional
+                Chinese and English; the uninstaller's interactive-mode text is still Traditional-Chinese-only;
+                a small number of un-updated Windows 10 machines may need the WebView2 Runtime installed
+                separately.
+
+                <h4>Troubleshooting</h4>
+                "Can't find ui folder" during build means ui/index.html isn't sitting alongside this tool;
+                "Access is denied" while packaging usually means a previously built exe is still running or
+                locked by antivirus software; if the build fails outright, confirm PyInstaller is properly
+                installed in the environment being used.
+            `,
+        };
+
+        const I18N = {
+            "zh-TW": {
+                app_title: "安裝軟體生成器",
+                help_btn_title: "使用說明",
+                theme_dark: "深色模式",
+                theme_light: "淺色模式",
+                form_heading: "配置您的安裝程式資訊",
+                label_app_name: "應用程式名稱", ph_app_name: "例如: MyCustomApp",
+                label_folder_name: "安裝資料夾名稱", ph_folder_name: "留空則沿用上方的應用程式名稱",
+                note_folder_name: "安裝路徑（例如 C:\\Program Files\\這裡）會用這個名稱，跟上面的應用程式名稱是分開的兩件事——應用程式名稱可以是中文，用來顯示給使用者看；如果應用程式名稱是中文，建議在這裡另外填一個純英數字的名稱，避免路徑中出現中文字在少數環境下造成讀寫問題。",
+                note_folder_name_warn: "⚠ 偵測到非英數字元，路徑中含有中文字在少數環境（舊版工具、部分中文編碼設定）下仍可能出問題，建議改用純英數字。",
+                label_version: "應用程式版本號",
+                label_publisher: "軟體發行者 / 開發商", ph_publisher: "例如: CustomPublisher",
+                label_exe_name: "最終輸出的安裝檔名稱 (.exe)", ph_exe_name: "例如: Setup_MyCustomApp",
+                label_app_dir: "應用程式內容資料夾 (不得為空)",
+                btn_browse_folder: "選擇資料夾", no_folder_selected: "未選擇資料夾",
+                label_main_exe: "主要執行檔", select_app_dir_first: "請先選擇應用程式資料夾",
+                note_main_exe: "用於建立捷徑、偵測執行中狀態、安裝完成後立即執行等功能。",
+                no_exe_found: "此資料夾內找不到 .exe 檔案", select_placeholder: "請選擇...",
+                label_png_icon: "應用程式圖標 (必須為 PNG 格式)", btn_browse_png: "選擇 PNG 圖示",
+                no_file_selected: "未選擇檔案", note_png_icon: "用於安裝視窗內顯示的精細圖標。",
+                label_ico_icon: "執行檔封面圖示 (必須為 ICO 格式)", btn_browse_ico: "選擇 ICO 檔案",
+                note_ico_icon: "用於安裝檔在 Windows 檔案總管中顯示的外觀。",
+                label_eula: "使用者授權合約 (EULA，選填)",
+                note_eula: "留空則安裝時不顯示同意頁面。可以新增多種語言的版本，開發者自行提供每種語言的文字；終端使用者安裝時會依系統語言自動挑選對應版本，挑不到才會用下面指定的「預設/回退語言」。",
+                btn_add_eula_lang: "+ 新增語言版本",
+                label_eula_default_lang: "預設 / 回退語言",
+                note_eula_default_lang: "當終端使用者的系統語言沒有對應到任何已提供的 EULA 版本時，顯示這個語言的版本。",
+                eula_lang_code_placeholder: "例如 zh-TW、en",
+                eula_text_placeholder: "貼上這個語言版本的 EULA 全文",
+                btn_remove: "移除",
+                lang_code_help_title: "常見語言代碼對照",
+                lang_code_help_body: `
+                    <div style="text-align:left; line-height:1.9;">
+                        <div><code>zh-TW</code> 繁體中文（台灣）</div>
+                        <div><code>zh-CN</code> 簡體中文（中國大陸）</div>
+                        <div><code>en</code> 英文</div>
+                        <div><code>ja-JP</code> 日文</div>
+                        <div><code>ko-KR</code> 韓文</div>
+                        <div><code>fr-FR</code> 法文</div>
+                        <div><code>de-DE</code> 德文</div>
+                        <div><code>es-ES</code> 西班牙文</div>
+                        <div><code>pt-BR</code> 葡萄牙文（巴西）</div>
+                        <div><code>ru-RU</code> 俄文</div>
+                        <div><code>vi-VN</code> 越南文</div>
+                        <div><code>th-TH</code> 泰文</div>
+                        <div><code>id-ID</code> 印尼文</div>
+                    </div>
+                    <div style="margin-top:12px; font-size:11px; color:var(--text-muted);">
+                        這裡的代碼只用來讓程式比對終端使用者的系統語言，你也可以自己填其他 BCP-47 語言代碼，不限於上面列出的這幾種。
+                    </div>
+                `,
+                label_dependencies: "相依元件偵測 (選填)",
+                note_dependencies: "安裝時僅會偵測系統是否已安裝，缺少時提示使用者前往官方頁面下載，不會自動安裝。",
+                label_file_assoc: "需要註冊檔案關聯", ph_file_assoc: "輸入副檔名，以逗號分隔，例如: .xyz, .abc",
+                label_custom_doc_icon: "自訂這個副檔名的文件圖示",
+                note_custom_doc_icon: "不勾選的話，文件圖示會直接沿用應用程式本身的圖示。",
+                label_add_to_path: "安裝後將程式路徑加入環境變數 PATH",
+                label_restart_explorer: "更新覆蓋安裝時，暫時關閉檔案總管以釋放被鎖定的檔案",
+                note_restart_explorer: "適用於應用程式有註冊 Windows 檔案總管殼層擴充功能（Shell Extension，例如右鍵選單擴充 DLL）的情況——只要檔案總管還在執行，就會鎖住這類 DLL，導致更新覆蓋時無法覆寫。勾選後，更新覆蓋安裝時會先關閉檔案總管、刪除完畢後自動重啟；使用者畫面會短暫閃爍、所有檔案總管視窗會關閉，非必要（沒有殼層擴充功能）不建議勾選。",
+                btn_submit: "開始編譯安裝檔",
+                help_modal_title: "使用說明", help_modal_body: HELP_MODAL_BODY["zh-TW"], btn_close: "關閉",
+                progress_preparing_env: "正在準備環境...", btn_ok: "確定",
+                notice_title: "注意", default_error_message: "請檢查欄位。", btn_ok_alt: "好的",
+                env_modal_title: "缺少編譯安裝檔所需的環境",
+                env_modal_body: `這個工具本身已經正常開啟，不受影響；但「開始編譯安裝檔」這個動作，
                 需要另外呼叫系統上的 PyInstaller 去實際編譯出安裝檔，缺少下列項目的話會編譯失敗：
                 <div id="envChecklist" style="margin: 12px 0;"></div>
                 <div style="font-size: 12px; margin-top: 8px;">安裝指令（在命令提示字元執行）：</div>
                 <div style="background: var(--input-bg); border: 1px solid var(--border-color); border-radius: 6px; padding: 10px 12px; font-family: monospace; font-size: 12px; margin-top: 6px; user-select: text;">pip install pyinstaller pywebview pywin32</div>
-                <div style="font-size: 11px; margin-top: 8px; color: var(--text-muted);">如果連 Python 都還沒裝，請先前往官網下載安裝，安裝時記得勾選「Add python.exe to PATH」。</div>
-            </div>
-            <button class="btn-modal-close" onclick="pywebview.api.open_url('https://www.python.org/downloads/')" style="margin-bottom: 8px; background: var(--input-bg); color: var(--text-main); border: 1px solid var(--border-color);">前往 Python 官網下載</button>
-            <button class="btn-modal-close" onclick="closeEnvModal()">我知道了</button>
-        </div>
-    </div>
+                <div style="font-size: 11px; margin-top: 8px; color: var(--text-muted);">如果連 Python 都還沒裝，請先前往官網下載安裝，安裝時記得勾選「Add python.exe to PATH」。</div>`,
+                btn_python_download: "前往 Python 官網下載", btn_got_it: "我知道了",
+                env_python: "Python 直譯器", env_pyinstaller: "PyInstaller",
+                env_webview: "pywebview（Python 套件）", env_pywin32: "pywin32（選用，缺少只影響捷徑功能）",
+            },
+            "en": {
+                app_title: "Installer Builder",
+                help_btn_title: "Help",
+                theme_dark: "Dark Mode",
+                theme_light: "Light Mode",
+                form_heading: "Configure Your Installer",
+                label_app_name: "Application Name", ph_app_name: "e.g. MyCustomApp",
+                label_folder_name: "Installation Folder Name", ph_folder_name: "Leave blank to reuse the application name above",
+                note_folder_name: "The install path (e.g. C:\\Program Files\\here) uses this name — separate from the application name above. The application name is shown to the user and can be in any language; if it isn't plain ASCII, it's worth setting a plain-ASCII folder name here to avoid path issues on a small number of environments.",
+                note_folder_name_warn: "⚠ Non-ASCII characters detected. Non-ASCII paths can still cause issues on a small number of environments (older tools, certain encoding setups) — plain ASCII is recommended.",
+                label_version: "Application Version",
+                label_publisher: "Publisher / Developer", ph_publisher: "e.g. CustomPublisher",
+                label_exe_name: "Output Installer Filename (.exe)", ph_exe_name: "e.g. Setup_MyCustomApp",
+                label_app_dir: "Application Content Folder (required)",
+                btn_browse_folder: "Browse Folder", no_folder_selected: "No folder selected",
+                label_main_exe: "Main Executable", select_app_dir_first: "Select the application folder first",
+                note_main_exe: "Used for shortcuts, running-process detection, and launch-after-install.",
+                no_exe_found: "No .exe files found in this folder", select_placeholder: "Select...",
+                label_png_icon: "Application Icon (PNG required)", btn_browse_png: "Choose PNG Icon",
+                no_file_selected: "No file selected", note_png_icon: "Shown as the icon inside the install window.",
+                label_ico_icon: "Executable Icon (ICO required)", btn_browse_ico: "Choose ICO File",
+                note_ico_icon: "Used as the installer's icon in Windows Explorer.",
+                label_eula: "End User License Agreement (EULA, optional)",
+                note_eula: "Leave empty to skip the agreement screen entirely. You can add multiple language versions and supply the text for each yourself; the end user's version is picked automatically based on their system language, falling back to the \"default/fallback language\" below when there's no match.",
+                btn_add_eula_lang: "+ Add Language Version",
+                label_eula_default_lang: "Default / Fallback Language",
+                note_eula_default_lang: "Shown when the end user's system language doesn't match any of the versions provided above.",
+                eula_lang_code_placeholder: "e.g. zh-TW, en",
+                eula_text_placeholder: "Paste the full EULA text for this language",
+                btn_remove: "Remove",
+                lang_code_help_title: "Common language codes",
+                lang_code_help_body: `
+                    <div style="text-align:left; line-height:1.9;">
+                        <div><code>zh-TW</code> Traditional Chinese (Taiwan)</div>
+                        <div><code>zh-CN</code> Simplified Chinese (Mainland China)</div>
+                        <div><code>en</code> English</div>
+                        <div><code>ja-JP</code> Japanese</div>
+                        <div><code>ko-KR</code> Korean</div>
+                        <div><code>fr-FR</code> French</div>
+                        <div><code>de-DE</code> German</div>
+                        <div><code>es-ES</code> Spanish</div>
+                        <div><code>pt-BR</code> Portuguese (Brazil)</div>
+                        <div><code>ru-RU</code> Russian</div>
+                        <div><code>vi-VN</code> Vietnamese</div>
+                        <div><code>th-TH</code> Thai</div>
+                        <div><code>id-ID</code> Indonesian</div>
+                    </div>
+                    <div style="margin-top:12px; font-size:11px; color:var(--text-muted);">
+                        These codes are only used to match the end user's system language. You can use any other BCP-47 language code too — this list isn't a restriction.
+                    </div>
+                `,
+                label_dependencies: "Dependency Detection (optional)",
+                note_dependencies: "Only detects whether these are installed; if missing, the user is prompted to download them from the official page — nothing is installed automatically.",
+                label_file_assoc: "Register file associations", ph_file_assoc: "Enter file extensions, comma-separated, e.g. .xyz, .abc",
+                label_custom_doc_icon: "Use a custom icon for this file type",
+                note_custom_doc_icon: "If left unchecked, the file icon falls back to the application's own icon.",
+                label_add_to_path: "Add the install path to the PATH environment variable",
+                label_restart_explorer: "Temporarily close File Explorer during update overwrites to release locked files",
+                note_restart_explorer: "For applications that register a Windows File Explorer shell extension (e.g. a right-click context menu DLL) — as long as Explorer is running, it keeps that DLL locked, which can block overwrites during an update. When enabled, Explorer is closed before deleting old files during an update overwrite and restarted afterward; the screen will flicker briefly and all Explorer windows will close. Not recommended unless you actually have a shell extension.",
+                btn_submit: "Build Installer",
+                help_modal_title: "Help", help_modal_body: HELP_MODAL_BODY["en"], btn_close: "Close",
+                progress_preparing_env: "Preparing environment...", btn_ok: "OK",
+                notice_title: "Notice", default_error_message: "Please check the form fields.", btn_ok_alt: "OK",
+                env_modal_title: "Missing environment required to build the installer",
+                env_modal_body: `This tool itself opened normally and is unaffected; but "Build Installer" needs
+                to invoke PyInstaller on this system to actually compile the installer, and will fail to build
+                if the following are missing:
+                <div id="envChecklist" style="margin: 12px 0;"></div>
+                <div style="font-size: 12px; margin-top: 8px;">Install command (run in Command Prompt):</div>
+                <div style="background: var(--input-bg); border: 1px solid var(--border-color); border-radius: 6px; padding: 10px 12px; font-family: monospace; font-size: 12px; margin-top: 6px; user-select: text;">pip install pyinstaller pywebview pywin32</div>
+                <div style="font-size: 11px; margin-top: 8px; color: var(--text-muted);">If Python itself isn't installed yet, download it from the official site first, and remember to check "Add python.exe to PATH" during setup.</div>`,
+                btn_python_download: "Download Python", btn_got_it: "Got it",
+                env_python: "Python interpreter", env_pyinstaller: "PyInstaller",
+                env_webview: "pywebview (Python package)", env_pywin32: "pywin32 (optional, only affects shortcuts)",
+            },
+        };
 
-    <script>
-        document.addEventListener('contextmenu', (e) => e.preventDefault());
+        let currentLang = "zh-TW";
+        function t(key, vars) {
+            let s = (I18N[currentLang] && I18N[currentLang][key]) || (I18N["zh-TW"][key] || key);
+            if (vars) { for (const k in vars) s = s.replaceAll(`{{${k}}}`, vars[k]); }
+            return s;
+        }
+        function applyI18n(lang) {
+            currentLang = I18N[lang] ? lang : "zh-TW";
+            document.documentElement.setAttribute("lang", currentLang);
+            document.getElementById("langSelect").value = currentLang;
+            document.querySelectorAll("[data-i18n]").forEach(el => { el.innerText = t(el.dataset.i18n); });
+            document.querySelectorAll("[data-i18n-placeholder]").forEach(el => { el.placeholder = t(el.dataset.i18nPlaceholder); });
+            document.querySelectorAll("[data-i18n-title]").forEach(el => { el.setAttribute("title", t(el.dataset.i18nTitle)); });
+            document.querySelectorAll("[data-i18n-html]").forEach(el => { el.innerHTML = t(el.dataset.i18nHtml); });
+            // 深色模式按鈕文字不是靠 data-i18n（切換深色/淺色時另外自己控制文字），這裡補上同步
+            const themeText = document.getElementById('theme-btn-text');
+            themeText.innerText = document.body.classList.contains('dark') ? t('theme_light') : t('theme_dark');
+            // env 檢查清單（#envChecklist）是動態產生的內容，套用 env_modal_body 這個
+            // data-i18n-html 會把它整個換掉，這裡如果之前已經跑過環境檢查，重新畫一次清單
+            if (typeof lastEnvResult !== 'undefined' && lastEnvResult) renderEnvChecklist(lastEnvResult);
+            const defaultLangSelect = document.getElementById('eula_default_lang');
+            if (defaultLangSelect) refreshEulaDefaultLangOptions();
+        }
+        function onLangSelectChange(lang) {
+            try { localStorage.setItem('builder_lang', lang); } catch (e) {}
+            applyI18n(lang);
+        }
+        async function initLanguage() {
+            let lang = null;
+            try { lang = localStorage.getItem('builder_lang'); } catch (e) {}
+            if (!lang) {
+                try { lang = await pywebview.api.get_system_language(); } catch (e) { lang = 'zh-TW'; }
+            }
+            applyI18n(lang);
+        }
+
         function executeClose() { pywebview.api.close_window(); }
 
         // 自訂視窗拖曳：不依賴 pywebview 內建的 pywebview-drag-region（該機制拖曳開始瞬間
@@ -327,7 +631,7 @@
             }
 
             titleBar.addEventListener('mousedown', (e) => {
-                if (e.target.closest('.window-controls') || e.target.closest('.help-btn') || e.target.closest('.theme-toggle')) return;
+                if (e.target.closest('.window-controls') || e.target.closest('.help-btn') || e.target.closest('.theme-toggle') || e.target.closest('.lang-select')) return;
                 isDragging = true;
                 pywebview.api.start_drag(e.screenX, e.screenY);
                 requestAnimationFrame(dragLoop);
@@ -403,6 +707,8 @@
         function showHelpModal() { document.getElementById('helpModal').classList.add('active'); }
         function closeHelpModal() { document.getElementById('helpModal').classList.remove('active'); }
         function closeEnvModal() { document.getElementById('envModal').classList.remove('active'); }
+        function showLangCodeHelpModal() { document.getElementById('langCodeHelpModal').classList.add('active'); }
+        function closeLangCodeHelpModal() { document.getElementById('langCodeHelpModal').classList.remove('active'); }
 
         function checkFolderNameSafety() {
             const val = document.getElementById('folder_name').value;
@@ -410,10 +716,10 @@
             const hasNonAscii = /[^\x00-\x7F]/.test(val);
             if (hasNonAscii) {
                 note.style.color = '#FF9500';
-                note.innerText = '⚠ 偵測到非英數字元，路徑中含有中文字在少數環境（舊版工具、部分中文編碼設定）下仍可能出問題，建議改用純英數字。';
+                note.innerText = t('note_folder_name_warn');
             } else {
                 note.style.color = '';
-                note.innerText = '安裝路徑（例如 C:\\Program Files\\這裡）會用這個名稱，跟上面的應用程式名稱是分開的兩件事——應用程式名稱可以是中文，用來顯示給使用者看；如果應用程式名稱是中文，建議在這裡另外填一個純英數字的名稱，避免路徑中出現中文字在少數環境下造成讀寫問題。';
+                note.innerText = t('note_folder_name');
             }
         }
 
@@ -423,6 +729,17 @@
             return `<div style="color:${color}; font-size:13px; margin-bottom:4px;">${mark} ${label}</div>`;
         }
 
+        function renderEnvChecklist(env) {
+            let html = '';
+            html += checkRow(env.python_found, t('env_python'));
+            html += checkRow(env.pyinstaller_found, t('env_pyinstaller'));
+            if (env.python_found) html += checkRow(env.webview_found, t('env_webview'));
+            if (env.python_found) html += checkRow(env.pywin32_found, t('env_pywin32'));
+            const checklistEl = document.getElementById('envChecklist');
+            if (checklistEl) checklistEl.innerHTML = html;
+        }
+
+        let lastEnvResult = null;
         async function checkEnvironmentOnLoad() {
             let env;
             try {
@@ -431,12 +748,8 @@
                 return; // API 還沒 ready 或呼叫失敗就先跳過，不影響工具本身使用
             }
 
-            let html = '';
-            html += checkRow(env.python_found, 'Python 直譯器');
-            html += checkRow(env.pyinstaller_found, 'PyInstaller');
-            if (env.python_found) html += checkRow(env.webview_found, 'pywebview（Python 套件）');
-            if (env.python_found) html += checkRow(env.pywin32_found, 'pywin32（選用，缺少只影響捷徑功能）');
-            document.getElementById('envChecklist').innerHTML = html;
+            lastEnvResult = env;
+            renderEnvChecklist(env);
 
             if (!env.ready) {
                 document.getElementById('envModal').classList.add('active');
@@ -447,8 +760,8 @@
                 submitBtn.title = '缺少必要的編譯環境，請先安裝後重新開啟本工具';
             }
         }
-        window.addEventListener('pywebviewready', checkEnvironmentOnLoad);
-        function toggleTheme() { const body = document.body; const themeText = document.getElementById('theme-btn-text'); if (body.classList.contains('dark')) { body.classList.remove('dark'); themeText.innerText = "深色模式"; } else { body.classList.add('dark'); themeText.innerText = "淺色模式"; } }
+        window.addEventListener('pywebviewready', async () => { await initLanguage(); await checkEnvironmentOnLoad(); });
+        function toggleTheme() { const body = document.body; const themeText = document.getElementById('theme-btn-text'); if (body.classList.contains('dark')) { body.classList.remove('dark'); themeText.innerText = t('theme_dark'); } else { body.classList.add('dark'); themeText.innerText = t('theme_light'); } }
         async function browseFolder() {
             const path = await pywebview.api.select_app_dir();
             if (path) {
@@ -457,9 +770,9 @@
                 const select = document.getElementById('main_exe');
                 select.innerHTML = '';
                 if (exeList.length === 0) {
-                    select.innerHTML = '<option value="">此資料夾內找不到 .exe 檔案</option>';
+                    select.innerHTML = `<option value="">${t('no_exe_found')}</option>`;
                 } else {
-                    select.innerHTML = '<option value="">請選擇...</option>' + exeList.map(p => `<option value="${p}">${p}</option>`).join('');
+                    select.innerHTML = `<option value="">${t('select_placeholder')}</option>` + exeList.map(p => `<option value="${p}">${p}</option>`).join('');
                 }
             }
         }
@@ -487,7 +800,60 @@
         }
 
         async function browseDocIcon() { const path = await pywebview.api.select_doc_icon(); if(path) document.getElementById('doc_icon_path').innerText = path; }
+
+        // ---------------- 多語言 EULA ----------------
+        let eulaRowCounter = 0;
+        function addEulaLangRow(prefillLang, prefillText) {
+            eulaRowCounter += 1;
+            const rowId = `eulaRow${eulaRowCounter}`;
+            const row = document.createElement('div');
+            row.className = 'eula-lang-row';
+            row.id = rowId;
+            row.style.marginBottom = '10px';
+            row.innerHTML = `
+                <div style="display:flex; gap:8px; align-items:center;">
+                    <input type="text" class="eula-lang-code" style="width:auto; flex:0 0 200px;" placeholder="${t('eula_lang_code_placeholder')}" value="${prefillLang || ''}" oninput="refreshEulaDefaultLangOptions()">
+                    <div class="help-btn" style="width:22px; height:22px; font-size:11px; flex-shrink:0;" onclick="showLangCodeHelpModal()" title="${t('lang_code_help_title')}">i</div>
+                    <button type="button" class="btn-browse" onclick="removeEulaLangRow('${rowId}')" style="margin-left:auto; flex-shrink:0;">${t('btn_remove')}</button>
+                </div>
+                <textarea class="eula-lang-text" style="margin-top:6px;" placeholder="${t('eula_text_placeholder')}">${prefillText || ''}</textarea>
+            `;
+            document.getElementById('eulaLangRows').appendChild(row);
+            document.getElementById('eulaDefaultLangGroup').style.display = 'block';
+            refreshEulaDefaultLangOptions();
+        }
+        function removeEulaLangRow(rowId) {
+            const row = document.getElementById(rowId);
+            if (row) row.remove();
+            if (document.querySelectorAll('.eula-lang-row').length === 0) {
+                document.getElementById('eulaDefaultLangGroup').style.display = 'none';
+            }
+            refreshEulaDefaultLangOptions();
+        }
+        function refreshEulaDefaultLangOptions() {
+            const select = document.getElementById('eula_default_lang');
+            if (!select) return;
+            const previous = select.value;
+            const codes = Array.from(document.querySelectorAll('.eula-lang-code'))
+                .map(el => el.value.trim())
+                .filter(code => code.length > 0);
+            select.innerHTML = codes.map(code => `<option value="${code}">${code}</option>`).join('');
+            if (codes.includes(previous)) select.value = previous;
+        }
+        function collectEulaData() {
+            const eula_texts = {};
+            document.querySelectorAll('.eula-lang-row').forEach(row => {
+                const code = row.querySelector('.eula-lang-code').value.trim();
+                const text = row.querySelector('.eula-lang-text').value.trim();
+                if (code && text) eula_texts[code] = text;
+            });
+            const defaultLangSelect = document.getElementById('eula_default_lang');
+            const eula_default_lang = defaultLangSelect ? defaultLangSelect.value : '';
+            return { eula_texts, eula_default_lang };
+        }
+
         async function submitForm() {
+            const { eula_texts, eula_default_lang } = collectEulaData();
             const data = {
                 app_name: document.getElementById('app_name').value,
                 folder_name: document.getElementById('folder_name').value,
@@ -495,7 +861,8 @@
                 publisher: document.getElementById('publisher').value,
                 exe_name: document.getElementById('exe_name').value,
                 main_exe: document.getElementById('main_exe').value,
-                eula_text: document.getElementById('eula_text').value,
+                eula_texts: eula_texts,
+                eula_default_lang: eula_default_lang,
                 dependencies: [
                     ...(document.getElementById('dep_vcredist').checked ? ['vcredist_x64'] : []),
                     ...(document.getElementById('dep_dotnet').checked ? ['dotnet_desktop'] : []),
@@ -507,11 +874,16 @@
                 restart_explorer_on_update: document.getElementById('restart_explorer_on_update').checked,
             };
             const result = await pywebview.api.start_pack(data);
-            if (result.status === 'error') { showErrorModal(result.message); } 
+            if (result.status === 'error') { showErrorModal(result.message); }
             else if (result.status === 'processing') {
                 document.getElementById('progressOverlay').style.display = 'flex';
                 document.getElementById('btnCloseOverlay').style.display = 'none';
                 resetProgressAnimation();
+                // 已知限制：編譯過程中的進度提示文字（這則、以及 builder.py 陸續回報的
+                // 幾則）目前只有繁體中文，跟這個工具本身的語言切換無關——那些是後端
+                // builder.py 產生的字串，這次沒有一併字串抽離，之後要擴充可以比照
+                // ui/index.html 的 I18N 做法，把 builder.py 的訊息改成傳「key」而不是
+                // 現成的中文句子。
                 window.updateProgress(0, "正在初始化打包程序...");
             }
         }

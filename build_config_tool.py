@@ -168,6 +168,8 @@ class BuilderGUI:
             problems.append("找不到 disk_space.py")
         if not os.path.exists("file_assoc.py"):
             problems.append("找不到 file_assoc.py")
+        if not os.path.exists("lang_detect.py"):
+            problems.append("找不到 lang_detect.py")
         if shutil.which("pyinstaller") is None:
             problems.append("找不到 pyinstaller，請先執行 pip install pyinstaller")
         if problems:
@@ -271,13 +273,15 @@ class BuilderGUI:
                 "--add-data=installer_core.py;.",
                 "--add-data=uninstall.py;.",
                 "--add-data=splash_helper.py;.",
-                # window_drag.py / disk_space.py / file_assoc.py 是 installer_core.py
-                # 跟 uninstall.py 共用的深模組——這兩支之後會被 builder.py 另外拉去
-                # 重新編譯成獨立的 exe（見 gui_config.py 的 ensure_workspace_files()），
-                # 所以這裡也要當成資源內嵌，執行時才能複製到工作目錄讓那次編譯找得到。
+                # window_drag.py / disk_space.py / file_assoc.py / lang_detect.py 是
+                # installer_core.py 跟 uninstall.py 共用的深模組——這兩支之後會被
+                # builder.py 另外拉去重新編譯成獨立的 exe（見 gui_config.py 的
+                # ensure_workspace_files()），所以這裡也要當成資源內嵌，執行時才能
+                # 複製到工作目錄讓那次編譯找得到。
                 "--add-data=window_drag.py;.",
                 "--add-data=disk_space.py;.",
                 "--add-data=file_assoc.py;.",
+                "--add-data=lang_detect.py;.",
                 # pywebview 支援多種 GUI 後端，PyInstaller 靜態分析是保守做法，
                 # 只要程式碼「有可能」用到某個後端就整包塞進去。Windows 上
                 # pywebview 實際只會用 EdgeChromium（靠 pythonnet 接 WebView2），

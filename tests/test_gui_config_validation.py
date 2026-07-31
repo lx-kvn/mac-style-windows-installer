@@ -33,7 +33,8 @@ class TestValidateAndBuildPackData(unittest.TestCase):
             "publisher": "Tester",
             "exe_name": "Setup_TestApp",
             "main_exe": "main.exe",
-            "eula_text": "",
+            "eula_texts": {},
+            "eula_default_lang": "",
             "dependencies": [],
             "file_associations": "",
             "need_file_assoc": False,
@@ -59,6 +60,26 @@ class TestValidateAndBuildPackData(unittest.TestCase):
         pack_data, error = self._validate(self._base_data(restart_explorer_on_update=True))
         self.assertIsNone(error)
         self.assertTrue(pack_data["restart_explorer_on_update"])
+
+    def test_eula_texts_pass_through_with_trimmed_empty_entries_dropped(self):
+        pack_data, error = self._validate(self._base_data(
+            eula_texts={"zh-TW": "  合約全文  ", "en": "   ", "ja-JP": ""},
+            eula_default_lang="zh-TW",
+        ))
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["eula_texts"], {"zh-TW": "合約全文"}, "空白/空字串的語言版本應該被丟棄")
+        self.assertEqual(pack_data["eula_default_lang"], "zh-TW")
+
+    def test_eula_default_lang_not_among_provided_languages_is_rejected(self):
+        _, error = self._validate(self._base_data(
+            eula_texts={"zh-TW": "合約全文"}, eula_default_lang="en",
+        ))
+        self.assertIsNotNone(error, "預設/回退語言不在已提供的 EULA 語言清單裡，應該擋下來")
+
+    def test_empty_eula_texts_does_not_require_default_lang(self):
+        pack_data, error = self._validate(self._base_data(eula_texts={}, eula_default_lang=""))
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["eula_texts"], {})
 
     def test_missing_required_text_field_is_rejected(self):
         _, error = self._validate(self._base_data(publisher=""))

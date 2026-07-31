@@ -37,7 +37,12 @@ import webview
 import splash
 import builder
 import threading
+import lang_detect
 from window_drag import WindowDragController
+
+# 打包工具本身的介面語言選項，對應 ui/config.html 內嵌的 I18N 翻譯表。
+BUILDER_UI_LANGUAGES = ["zh-TW", "en"]
+DEFAULT_BUILDER_UI_LANGUAGE = "zh-TW"
 
 
 # 跟 __main__ 裡 webview.create_window() 的 min_size 保持一致，
@@ -157,11 +162,12 @@ def ensure_workspace_files(workspace_dir):
         return None
 
     # installer_core.py / uninstall.py 是要被 builder.py 各自拉去重新編譯成
-    # 獨立 exe 的進入點；window_drag.py / disk_space.py / file_assoc.py 是它們
-    # 匯入的共用深模組，同樣要在工作目錄裡才能被那兩次 pyinstaller 呼叫找到。
+    # 獨立 exe 的進入點；window_drag.py / disk_space.py / file_assoc.py /
+    # lang_detect.py 是它們匯入的共用深模組，同樣要在工作目錄裡才能被那兩次
+    # pyinstaller 呼叫找到。
     required_scripts = [
         "installer_core.py", "uninstall.py",
-        "window_drag.py", "disk_space.py", "file_assoc.py",
+        "window_drag.py", "disk_space.py", "file_assoc.py", "lang_detect.py",
     ]
 
     try:
@@ -211,7 +217,13 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     publisher = data.get("publisher", "").strip()
     exe_name = data.get("exe_name", "").strip()
     main_exe = data.get("main_exe", "").strip()
-    eula_text = data.get("eula_text", "").strip()
+    eula_texts_raw = data.get("eula_texts", {}) or {}
+    eula_texts = {
+        str(lang).strip(): text.strip()
+        for lang, text in eula_texts_raw.items()
+        if str(lang).strip() and str(text).strip()
+    }
+    eula_default_lang = data.get("eula_default_lang", "").strip()
     dependencies = data.get("dependencies", []) or []
     file_assoc_raw = data.get("file_associations", "").strip()
     need_file_assoc = bool(data.get("need_file_assoc", False))
@@ -224,6 +236,9 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
 
     if need_file_assoc and not file_assoc_raw:
         return None, "欄位驗證失敗：<br>已勾選「需要註冊檔案關聯」，請填入至少一個副檔名，或取消勾選。"
+
+    if eula_texts and eula_default_lang not in eula_texts:
+        return None, "欄位驗證失敗：<br>已新增多語言 EULA，請從中選擇一個「預設/回退語言」。"
 
     if not app_dir or not os.path.exists(app_dir):
         return None, "欄位驗證失敗：<br>請選擇有效的應用程式內容資料夾。"
@@ -269,7 +284,8 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     pack_data["file_associations"] = file_associations
     pack_data["doc_icon_path"] = doc_icon_path
     pack_data["dependencies"] = dependencies
-    pack_data["eula_text"] = eula_text
+    pack_data["eula_texts"] = eula_texts
+    pack_data["eula_default_lang"] = eula_default_lang
     pack_data["main_exe"] = main_exe
     pack_data["add_to_path"] = add_to_path
     pack_data["restart_explorer_on_update"] = restart_explorer_on_update
@@ -333,6 +349,12 @@ class ConfigAPI:
     def check_environment(self):
         """供前端在畫面載入時呼叫，檢查編譯安裝檔所需的外部環境是否齊全。"""
         return check_build_environment()
+
+    def get_system_language(self):
+        """供前端決定語言下拉選單的初始值：使用者第一次開啟本工具、
+        localStorage 裡還沒記住任何選擇時，用這台電腦的系統語言當預設值。
+        """
+        return lang_detect.detect_system_language(BUILDER_UI_LANGUAGES, DEFAULT_BUILDER_UI_LANGUAGE)
 
     def open_url(self, url):
         """讓前端可以開啟預設瀏覽器前往下載頁（例如缺 Python 時導去官網）。"""
@@ -463,7 +485,8 @@ class ConfigAPI:
                 png_path=self.png_path,
                 ico_path=self.ico_path,
                 main_exe=data.get("main_exe"),
-                eula_text=data.get("eula_text", ""),
+                eula_texts=data.get("eula_texts", {}),
+                eula_default_lang=data.get("eula_default_lang", ""),
                 dependencies=data.get("dependencies", []),
                 file_associations=data.get("file_associations", []),
                 doc_icon_path=data.get("doc_icon_path", ""),

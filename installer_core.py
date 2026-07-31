@@ -34,6 +34,13 @@ from datetime import datetime
 from window_drag import WindowDragController
 from disk_space import required_install_size, check_disk_space
 import file_assoc
+import lang_detect
+
+# 目前介面 chrome（ui/index.html 裡固定的標籤、按鈕、提示文字）支援的語言，
+# 跟 ui/index.html 內嵌的 I18N 翻譯表一一對應。EULA 文字語言不受此限制——
+# 開發者可以自訂任意語言代碼，這裡只限制「安裝介面本身」的語言。
+SUPPORTED_UI_LANGUAGES = ["zh-TW", "en"]
+DEFAULT_UI_LANGUAGE = "zh-TW"
 
 
 def _file_checksum(path, chunk_size=1024 * 1024):
@@ -150,12 +157,14 @@ class InstallerAPI:
         self.version = "1.0.0"
         self.publisher = "Unknown"
         self.main_exe = ""
-        self.eula_text = ""
+        self.eula_texts = {}
+        self.eula_default_lang = ""
         self.dependencies = []
         self.file_associations = []
         self.doc_icon = ""
         self.add_to_path = False
         self.restart_explorer_on_update = False
+        self.ui_language = lang_detect.detect_system_language(SUPPORTED_UI_LANGUAGES, DEFAULT_UI_LANGUAGE)
 
         program_files = os.environ.get("ProgramFiles", "C:\\Program Files")
         self.default_path = os.path.join(program_files, self.app_name)
@@ -195,7 +204,8 @@ class InstallerAPI:
                     self.version = config.get("version", self.version)
                     self.publisher = config.get("publisher", self.publisher)
                     self.main_exe = config.get("main_exe", "")
-                    self.eula_text = config.get("eula_text", "")
+                    self.eula_texts = config.get("eula_texts", {})
+                    self.eula_default_lang = config.get("eula_default_lang", "")
                     self.dependencies = config.get("dependencies", [])
                     self.file_associations = config.get("file_associations", [])
                     self.doc_icon = config.get("doc_icon", "")
@@ -214,8 +224,26 @@ class InstallerAPI:
     def get_default_path(self):
         return self.default_path
 
+    def get_ui_language(self):
+        return self.ui_language
+
     def get_eula_text(self):
-        return self.eula_text
+        """回傳目前語言對應的 EULA 文字。
+
+        回退順序：偵測到的系統語言完全對到開發者提供的語言 → 開發者打包時
+        指定的「預設/回退語言」→ 字典裡第一筆（保底，避免開發者忘記設定
+        預設語言時 EULA 整個消失不見）→ 空字串（維持既有「空字串 = 跳過
+        EULA 頁」的行為）。
+        """
+        if not self.eula_texts:
+            return ""
+        text = self.eula_texts.get(self.ui_language)
+        if text:
+            return text
+        text = self.eula_texts.get(self.eula_default_lang)
+        if text:
+            return text
+        return next(iter(self.eula_texts.values()), "")
 
     def get_dependency_warnings(self):
         """回傳目前系統缺少的相依元件清單（顯示名稱 + 下載連結），不阻擋安裝"""
@@ -885,9 +913,15 @@ if __name__ == '__main__':
     # 單一實例鎖：避免使用者手滑重複開啟安裝程式，兩個流程同時寫同一個目錄
     got_lock, _mutex_handle = _acquire_single_instance_lock(api.app_name)
     if not got_lock:
-        ctypes.windll.user32.MessageBoxW(
-            0, f"「{api.app_name}」安裝程式已經在執行中。", "安裝應用程式", 0x30,
-        )
+        # 這個對話框在 webview 視窗建立之前就跳出，沒辦法用 ui/index.html 的
+        # JS 翻譯表套用語言，直接在這裡用偵測結果從兩種語言的文字二選一。
+        _lock_dialog_lang = lang_detect.detect_system_language(SUPPORTED_UI_LANGUAGES, DEFAULT_UI_LANGUAGE)
+        if _lock_dialog_lang == "en":
+            _lock_title, _lock_message = "Installer", f'"{api.app_name}" installer is already running.'
+        else:
+            _lock_title = "安裝應用程式"
+            _lock_message = f"「{api.app_name}」安裝程式已經在執行中。"
+        ctypes.windll.user32.MessageBoxW(0, _lock_message, _lock_title, 0x30)
         sys.exit(0)
 
     html_path = get_resource_path(os.path.join('ui', 'index.html'))

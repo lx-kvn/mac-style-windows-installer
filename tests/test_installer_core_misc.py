@@ -529,5 +529,38 @@ class TestRollback(unittest.TestCase):
         self.assertFalse(os.path.exists(self.tmp_dir), "回滾後資料夾裡如果真的空了，應該連資料夾一起刪掉")
 
 
+class TestGetUiLanguage(unittest.TestCase):
+    def test_returns_whatever_load_config_computed(self):
+        api = make_installer_api(ui_language="en")
+        self.assertEqual(api.get_ui_language(), "en")
+
+
+class TestGetEulaTextFallbackChain(unittest.TestCase):
+    def test_returns_empty_string_when_no_eula_configured(self):
+        api = make_installer_api(eula_texts={}, eula_default_lang="", ui_language="zh-TW")
+        self.assertEqual(api.get_eula_text(), "")
+
+    def test_exact_ui_language_match_wins(self):
+        api = make_installer_api(
+            eula_texts={"zh-TW": "中文合約", "en": "English EULA"},
+            eula_default_lang="en", ui_language="zh-TW",
+        )
+        self.assertEqual(api.get_eula_text(), "中文合約")
+
+    def test_falls_back_to_default_lang_when_ui_language_has_no_text(self):
+        api = make_installer_api(
+            eula_texts={"zh-TW": "中文合約", "en": "English EULA"},
+            eula_default_lang="en", ui_language="ja-JP",
+        )
+        self.assertEqual(api.get_eula_text(), "English EULA")
+
+    def test_falls_back_to_first_entry_when_default_lang_also_missing(self):
+        api = make_installer_api(
+            eula_texts={"zh-TW": "中文合約", "en": "English EULA"},
+            eula_default_lang="ja-JP", ui_language="ko-KR",
+        )
+        self.assertEqual(api.get_eula_text(), "中文合約", "開發者忘記設定有效的預設語言時，至少要保底顯示一個版本，而不是整個消失")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

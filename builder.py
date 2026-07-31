@@ -14,7 +14,8 @@ builder.py
   - 原本 builder.py 寫的是 metadata.json，但 installer_core.py 讀的是 installer_config.json，
     兩個檔名對不起來，等於安裝端那段讀取邏輯從沒真正生效過。這次統一成
     installer_config.json，兩邊一致。
-  - 新增欄位：eula_text、main_exe、dependencies、file_associations、add_to_path，
+  - 新增欄位：eula_texts（多語言 EULA，語言代碼對應文字的字典）、
+    eula_default_lang、main_exe、dependencies、file_associations、add_to_path，
     對應「近期目標」清單裡要在製作工具端設定的項目。
   - 沿用上一輪的修正：build 前清空 dist/build、不使用 shell=True。
   - 新增 workspace_dir 參數：build_all() 需要 ui/index.html、installer_core.py、
@@ -36,7 +37,7 @@ CONFIG_FILE_NAME = "installer_config.json"
 
 def build_all(
     app_dir, exe_name, app_name, folder_name, version, publisher, png_path, ico_path,
-    main_exe, eula_text="", dependencies=None, file_associations=None, doc_icon_path="",
+    main_exe, eula_texts=None, eula_default_lang="", dependencies=None, file_associations=None, doc_icon_path="",
     add_to_path=False, restart_explorer_on_update=False, workspace_dir=".", progress_callback=None,
 ):
     """流水線：產生配置 -> 編譯反安裝檔 -> 編譯主安裝檔
@@ -102,7 +103,8 @@ def build_all(
         "version": version,
         "publisher": publisher,
         "main_exe": main_exe,
-        "eula_text": eula_text,
+        "eula_texts": eula_texts or {},
+        "eula_default_lang": eula_default_lang,
         "dependencies": dependencies,
         "file_associations": file_associations,
         "doc_icon": "doc_icon.ico" if doc_icon_path else "",

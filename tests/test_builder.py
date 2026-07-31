@@ -99,7 +99,8 @@ class TestConfigAssembly(BuildAllTestBase):
                 app_dir=self.app_dir, exe_name="Setup_TestApp", app_name="測試應用程式",
                 folder_name="TestApp", version="2.3.1", publisher="Acme",
                 png_path=self.png_path, ico_path=self.ico_path, main_exe="main.exe",
-                eula_text="EULA 全文", dependencies=["vcredist_x64"],
+                eula_texts={"zh-TW": "EULA 全文", "en": "EULA full text"}, eula_default_lang="zh-TW",
+                dependencies=["vcredist_x64"],
                 file_associations=[".xyz"], add_to_path=True,
                 restart_explorer_on_update=True,
                 workspace_dir=self.workspace_dir,
@@ -110,7 +111,8 @@ class TestConfigAssembly(BuildAllTestBase):
         self.assertNotIn("Setup_TestApp", captured.values())
         self.assertEqual(captured["version"], "2.3.1")
         self.assertEqual(captured["publisher"], "Acme")
-        self.assertEqual(captured["eula_text"], "EULA 全文")
+        self.assertEqual(captured["eula_texts"], {"zh-TW": "EULA 全文", "en": "EULA full text"})
+        self.assertEqual(captured["eula_default_lang"], "zh-TW")
         self.assertEqual(captured["dependencies"], ["vcredist_x64"])
         self.assertEqual(captured["file_associations"], [".xyz"])
         self.assertTrue(captured["add_to_path"])

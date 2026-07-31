@@ -160,17 +160,17 @@
 
     <div class="drag-region" id="dragRegion"></div>
 
-    <div class="custom-close-btn" onclick="closeWindow();" title="關閉">
+    <div class="custom-close-btn" onclick="closeWindow();" title="關閉" data-i18n-title="close_title">
         <div class="css-close-icon"></div>
     </div>
 
     <!-- EULA 同意頁：eula_text 非空時才會顯示 -->
     <div class="eula-view" id="eulaView">
-        <div class="eula-title" id="eulaTitle">使用者授權合約</div>
+        <div class="eula-title" id="eulaTitle" data-i18n="eula_title">使用者授權合約</div>
         <div class="eula-text-box" id="eulaTextBox"></div>
         <div class="eula-actions">
-            <button class="nice-btn secondary" onclick="declineEula()">不同意</button>
-            <button class="nice-btn" onclick="acceptEula()">同意並繼續</button>
+            <button class="nice-btn secondary" onclick="declineEula()" data-i18n="btn_decline">不同意</button>
+            <button class="nice-btn" onclick="acceptEula()" data-i18n="btn_accept">同意並繼續</button>
         </div>
     </div>
 
@@ -181,7 +181,7 @@
                 <div class="icon-wrapper" id="drag-item" draggable="true">
                     <img src="app_icon.png" alt="App">
                 </div>
-                <div class="label" id="app_name_label">載入中...</div>
+                <div class="label" id="app_name_label" data-i18n="loading">載入中...</div>
             </div>
 
             <div class="arrow-box">
@@ -194,13 +194,13 @@
                 <div class="icon-wrapper">
                     <img src="folder_icon.png" alt="Folder">
                 </div>
-                <div class="label">安裝目的地</div>
-                <div id="path-preview">載入中...</div>
+                <div class="label" data-i18n="install_destination_label">安裝目的地</div>
+                <div id="path-preview" data-i18n="loading">載入中...</div>
             </div>
         </div>
 
         <div class="install-progress-wrap" id="installProgressWrap">
-            <div class="install-progress-text" id="installProgressText">正在準備...</div>
+            <div class="install-progress-text" id="installProgressText" data-i18n="progress_preparing">正在準備...</div>
             <div class="install-progress-track"><div class="install-progress-fill" id="installProgressFill"></div></div>
         </div>
     </div>
@@ -211,7 +211,7 @@
     <div class="bottom-bar" id="bottomBar">
         <div class="desktop-shortcut-row">
             <input type="checkbox" id="desktopShortcutCheck" checked>
-            <label for="desktopShortcutCheck">建立桌面捷徑</label>
+            <label for="desktopShortcutCheck" data-i18n="desktop_shortcut_label">建立桌面捷徑</label>
         </div>
     </div>
 
@@ -219,10 +219,10 @@
     <div class="nice-modal-overlay" id="upgradeModal">
         <div class="nice-modal-box">
             <div class="nice-icon warn" id="upgradeIcon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L14.7 3.86a2 2 0 0 0-3.4 0z"></path></svg></div>
-            <div class="nice-title" id="upgradeTitle">偵測到已安裝的版本</div>
+            <div class="nice-title" id="upgradeTitle" data-i18n="upgrade_default_title">偵測到已安裝的版本</div>
             <div class="nice-message" id="upgradeMessage"></div>
-            <button class="nice-btn secondary" onclick="cancelUpgrade()">取消</button>
-            <button class="nice-btn" id="confirmUpgradeBtn" onclick="confirmUpgrade()">更新覆蓋安裝</button>
+            <button class="nice-btn secondary" onclick="cancelUpgrade()" data-i18n="btn_cancel">取消</button>
+            <button class="nice-btn" id="confirmUpgradeBtn" onclick="confirmUpgrade()" data-i18n="btn_update_overwrite">更新覆蓋安裝</button>
         </div>
     </div>
 
@@ -230,9 +230,9 @@
     <div class="nice-modal-overlay" id="depModal">
         <div class="nice-modal-box">
             <div class="nice-icon warn"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L14.7 3.86a2 2 0 0 0-3.4 0z"></path></svg></div>
-            <div class="nice-title">建議先安裝以下元件</div>
+            <div class="nice-title" data-i18n="dep_modal_title">建議先安裝以下元件</div>
             <div class="nice-message" id="depMessage"></div>
-            <button class="nice-btn secondary" onclick="closeDepModal()">仍要繼續安裝</button>
+            <button class="nice-btn secondary" onclick="closeDepModal()" data-i18n="btn_continue_anyway">仍要繼續安裝</button>
         </div>
     </div>
 
@@ -242,18 +242,97 @@
             <div class="nice-icon" id="modal-icon">
                 <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
             </div>
-            <div class="nice-title" id="modal-title">安裝成功</div>
+            <div class="nice-title" id="modal-title" data-i18n="install_success_title">安裝成功</div>
             <div class="nice-message" id="modal-message" style="text-align:center;"></div>
             <div class="launch-row" id="launchRow">
                 <input type="checkbox" id="launchAfterInstall" checked>
-                <label for="launchAfterInstall">安裝完成後立即執行程式</label>
+                <label for="launchAfterInstall" data-i18n="launch_after_install_label">安裝完成後立即執行程式</label>
             </div>
-            <button class="nice-btn" onclick="closeModal()">完成</button>
+            <button class="nice-btn" onclick="closeModal()" data-i18n="btn_done">完成</button>
         </div>
     </div>
 
     <script>
         document.addEventListener('contextmenu', (e) => e.preventDefault());
+
+        // ---------------- 多語言介面（chrome）----------------
+        // 安裝檔的介面語言不給使用者選，由 installer_core.py 依系統語言自動
+        // 偵測後透過 get_ui_language() 提供，這裡只負責套用。EULA 文字語言
+        // 不受這份翻譯表限制（開發者可自訂任意語言代碼），是分開的另一個機制。
+        const I18N = {
+            "zh-TW": {
+                close_title: "關閉",
+                eula_title: "使用者授權合約",
+                btn_decline: "不同意",
+                btn_accept: "同意並繼續",
+                loading: "載入中...",
+                install_destination_label: "安裝目的地",
+                progress_preparing: "正在準備...",
+                desktop_shortcut_label: "建立桌面捷徑",
+                upgrade_default_title: "偵測到已安裝的版本",
+                btn_cancel: "取消",
+                btn_update_overwrite: "更新覆蓋安裝",
+                btn_continue_anyway: "仍要繼續安裝",
+                dep_modal_title: "建議先安裝以下元件",
+                dep_download_link: "前往下載",
+                install_success_title: "安裝成功",
+                install_failed_title: "安裝失敗",
+                launch_after_install_label: "安裝完成後立即執行程式",
+                btn_done: "完成",
+                initializing_install: "正在初始化安裝...",
+                installing: "正在安裝...",
+                install_complete_path: "安裝完成！",
+                upgrade_newer_title: "發現新版本",
+                upgrade_newer_msg: "偵測到已安裝版本 {{old}}，您是否要更新至 {{new}} 版本？",
+                upgrade_same_title: "目前安裝的版本較新或相同",
+                upgrade_same_msg: "已安裝的版本是 {{old}}，這次要安裝的版本是 {{new}}，並不比目前已安裝的版本新。選擇「仍要繼續安裝」會用這次的版本覆蓋現有安裝，選擇「取消」則結束安裝程式。",
+                upgrade_older_title: "已安裝較新的版本",
+                upgrade_older_msg: "已安裝的版本是 {{old}}，比這次要安裝的版本 {{new}} 還新，這次要安裝的版本比較舊。選擇「仍要繼續安裝」會用這次較舊的版本覆蓋現有安裝，選擇「取消」則結束安裝程式。",
+            },
+            "en": {
+                close_title: "Close",
+                eula_title: "End User License Agreement",
+                btn_decline: "Decline",
+                btn_accept: "Agree & Continue",
+                loading: "Loading...",
+                install_destination_label: "Install Location",
+                progress_preparing: "Preparing...",
+                desktop_shortcut_label: "Create a desktop shortcut",
+                upgrade_default_title: "Existing installation detected",
+                btn_cancel: "Cancel",
+                btn_update_overwrite: "Update",
+                btn_continue_anyway: "Continue Anyway",
+                dep_modal_title: "Recommended components missing",
+                dep_download_link: "Download",
+                install_success_title: "Installation Complete",
+                install_failed_title: "Installation Failed",
+                launch_after_install_label: "Launch the app after installation",
+                btn_done: "Done",
+                initializing_install: "Initializing installation...",
+                installing: "Installing...",
+                install_complete_path: "Installation complete!",
+                upgrade_newer_title: "New version available",
+                upgrade_newer_msg: "Version {{old}} is currently installed. Would you like to update to version {{new}}?",
+                upgrade_same_title: "The installed version is newer or the same",
+                upgrade_same_msg: "The installed version is {{old}}; the version you're about to install is {{new}}, which is not newer. Choose \"Continue Anyway\" to overwrite the existing installation, or \"Cancel\" to quit.",
+                upgrade_older_title: "A newer version is already installed",
+                upgrade_older_msg: "The installed version is {{old}}, which is newer than the version you're about to install ({{new}}). Choose \"Continue Anyway\" to overwrite it with this older version, or \"Cancel\" to quit.",
+            },
+        };
+        let currentLang = "zh-TW";
+        function t(key, vars) {
+            let s = (I18N[currentLang] && I18N[currentLang][key]) || (I18N["zh-TW"][key] || key);
+            if (vars) {
+                for (const k in vars) s = s.replaceAll(`{{${k}}}`, vars[k]);
+            }
+            return s;
+        }
+        function applyI18n(lang) {
+            currentLang = I18N[lang] ? lang : "zh-TW";
+            document.documentElement.setAttribute("lang", currentLang);
+            document.querySelectorAll("[data-i18n]").forEach(el => { el.innerText = t(el.dataset.i18n); });
+            document.querySelectorAll("[data-i18n-title]").forEach(el => { el.setAttribute("title", t(el.dataset.i18nTitle)); });
+        }
         function closeWindow() { if (window.pywebview && window.pywebview.api && window.pywebview.api.close_window) { pywebview.api.close_window(); } }
 
         // 自訂視窗拖曳：不依賴 pywebview 內建的 pywebview-drag-region（該機制拖曳開始瞬間
@@ -363,6 +442,9 @@
         const appLabel = document.getElementById('app_name_label');
 
         window.addEventListener('pywebviewready', async () => {
+            const uiLanguage = await pywebview.api.get_ui_language();
+            applyI18n(uiLanguage);
+
             const defaultPath = await pywebview.api.get_default_path();
             const appName = await pywebview.api.get_app_name();
             pathPreview.innerText = defaultPath;
@@ -393,28 +475,24 @@
                     // 本機是舊版：這次要裝的版本比較新，藍色「更新」圖示
                     iconEl.className = 'nice-icon update';
                     iconEl.innerHTML = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"></path><path d="M21 3v6h-6"></path></svg>';
-                    titleEl.innerText = '發現新版本';
-                    msgEl.innerText = `偵測到已安裝版本 ${existing.version}，您是否要更新至 ${existing.new_version} 版本？`;
-                    btnEl.innerText = '更新覆蓋安裝';
+                    titleEl.innerText = t('upgrade_newer_title');
+                    msgEl.innerText = t('upgrade_newer_msg', { old: existing.version, new: existing.new_version });
+                    btnEl.innerText = t('btn_update_overwrite');
                 } else if (existing.is_same) {
                     // 版本一致：維持原本的樣式與文字
                     iconEl.className = 'nice-icon warn';
                     iconEl.innerHTML = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L14.7 3.86a2 2 0 0 0-3.4 0z"></path></svg>';
-                    titleEl.innerText = '目前安裝的版本較新或相同';
-                    msgEl.innerText =
-                        `已安裝的版本是 ${existing.version}，這次要安裝的版本是 ${existing.new_version}，` +
-                        `並不比目前已安裝的版本新。選擇「仍要繼續安裝」會用這次的版本覆蓋現有安裝，選擇「取消」則結束安裝程式。`;
-                    btnEl.innerText = '仍要繼續安裝';
+                    titleEl.innerText = t('upgrade_same_title');
+                    msgEl.innerText = t('upgrade_same_msg', { old: existing.version, new: existing.new_version });
+                    btnEl.innerText = t('btn_continue_anyway');
                 } else {
                     // 本機版本比較新（這次要裝的版本比較舊）：警示色，明確告知使用者
                     // 要裝的版本比較舊，讓使用者自己決定要不要繼續
                     iconEl.className = 'nice-icon downgrade';
                     iconEl.innerHTML = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L14.7 3.86a2 2 0 0 0-3.4 0z"></path></svg>';
-                    titleEl.innerText = '已安裝較新的版本';
-                    msgEl.innerText =
-                        `已安裝的版本是 ${existing.version}，比這次要安裝的版本 ${existing.new_version} 還新，` +
-                        `這次要安裝的版本比較舊。選擇「仍要繼續安裝」會用這次較舊的版本覆蓋現有安裝，選擇「取消」則結束安裝程式。`;
-                    btnEl.innerText = '仍要繼續安裝';
+                    titleEl.innerText = t('upgrade_older_title');
+                    msgEl.innerText = t('upgrade_older_msg', { old: existing.version, new: existing.new_version });
+                    btnEl.innerText = t('btn_continue_anyway');
                 }
                 document.getElementById('upgradeModal').classList.add('active');
             } else {
@@ -426,7 +504,7 @@
             const warnings = await pywebview.api.get_dependency_warnings();
             if (warnings && warnings.length > 0) {
                 document.getElementById('depMessage').innerHTML = warnings
-                    .map(w => `• ${w.name}（<a href="#" onclick="pywebview.api.open_url('${w.url}'); return false;">前往下載</a>）`)
+                    .map(w => `• ${w.name}（<a href="#" onclick="pywebview.api.open_url('${w.url}'); return false;">${t('dep_download_link')}</a>）`)
                     .join('<br>');
                 document.getElementById('depModal').classList.add('active');
             }
@@ -453,19 +531,19 @@
             if (e.dataTransfer.getData('text/plain') === 'install-trigger') {
                 const createDesktopShortcut = document.getElementById('desktopShortcutCheck').checked;
                 document.getElementById('installProgressWrap').style.display = 'block';
-                document.getElementById('installProgressText').innerText = '正在初始化安裝...';
+                document.getElementById('installProgressText').innerText = t('initializing_install');
                 document.getElementById('installProgressFill').style.width = '0%';
-                pathPreview.innerText = '正在安裝...';
+                pathPreview.innerText = t('installing');
 
                 const result = await pywebview.api.trigger_installation(createDesktopShortcut);
 
                 if (result.status === 'success') {
                     installSucceeded = true;
-                    showModal('安裝成功', '', false, true);
-                    pathPreview.innerText = '安裝完成！';
+                    showModal(t('install_success_title'), '', false, true);
+                    pathPreview.innerText = t('install_complete_path');
                 } else {
                     installSucceeded = false;
-                    showModal('安裝失敗', result.message, true, false);
+                    showModal(t('install_failed_title'), result.message, true, false);
                     pathPreview.innerText = await pywebview.api.get_default_path();
                 }
                 document.getElementById('installProgressWrap').style.display = 'none';
