@@ -24,6 +24,7 @@ import os
 import sys
 import json
 import shutil
+import tempfile
 import time
 import ctypes
 import subprocess
@@ -154,6 +155,7 @@ class InstallerAPI:
         self.file_associations = []
         self.doc_icon = ""
         self.add_to_path = False
+        self.restart_explorer_on_update = False
 
         program_files = os.environ.get("ProgramFiles", "C:\\Program Files")
         self.default_path = os.path.join(program_files, self.app_name)
@@ -198,6 +200,7 @@ class InstallerAPI:
                     self.file_associations = config.get("file_associations", [])
                     self.doc_icon = config.get("doc_icon", "")
                     self.add_to_path = bool(config.get("add_to_path", False))
+                    self.restart_explorer_on_update = bool(config.get("restart_explorer_on_update", False))
         except Exception as e:
             print(f"[提示] 使用預設開發模式: {e}")
 
@@ -272,10 +275,27 @@ class InstallerAPI:
 
         失敗只回傳 None、不拋例外：沒有備份頂多是沒辦法復原，不該因此擋住
         合法的更新流程。
+
+        修正紀錄（真實抓到的 bug）：原本用 os.environ.get("TEMP", ".") 算暫存
+        路徑，`.get()` 只有在 TEMP 這個環境變數整個不存在時才會用預設值 "."；
+        如果它存在但是空字串（實測發生在某些提權執行的情境下，環境變數區塊
+        沒有正確帶出 TEMP），會直接算出一個相對路徑，實際落點變成「這個安裝
+        程式執行當下的工作目錄」——如果使用者剛好把新安裝檔放在舊安裝目錄
+        本身執行更新，備份資料夾會被建立在 install_path 底下，變成
+        shutil.copytree() 對自己複製（複製到自己的子資料夾），越複製越亂，
+        最後多半是拋例外收場，留下一個爛尾的子資料夾，而且完全沒有真的
+        備份到東西。改用 tempfile.gettempdir()：這是標準函式庫保證一定回傳
+        真實存在、絕對路徑的系統暫存資料夾的做法，不會有空字串/相對路徑這種
+        陷阱。另外加一道保險：算出來的路徑如果還是落在 install_path 底下，
+        直接拒絕備份，不要冒險對自己複製。
         """
         backup_path = os.path.join(
-            os.environ.get("TEMP", "."), f"{self.app_name}_upgrade_backup_{os.getpid()}",
+            tempfile.gettempdir(), f"{self.app_name}_upgrade_backup_{os.getpid()}",
         )
+        install_path_abs = os.path.abspath(install_path)
+        backup_path_abs = os.path.abspath(backup_path)
+        if backup_path_abs == install_path_abs or backup_path_abs.startswith(install_path_abs + os.sep):
+            return None
         try:
             if os.path.exists(backup_path):
                 shutil.rmtree(backup_path, ignore_errors=True)
@@ -312,9 +332,47 @@ class InstallerAPI:
         self._upgrade_backup_path = None
         self._upgrade_backup_original_path = None
 
+    def _wait_for_selected_path_writable(self, timeout=10, interval=0.5):
+        """更新覆蓋安裝後，安裝目標路徑可能還卡在 Windows 的 pending-delete
+        狀態：舊版本 uninstall.exe 是用背景、不等待（fire-and-forget）的
+        cmd.exe 延遲自我刪除、視情況把整個資料夾一起 rmdir（見 uninstall.py），
+        run_upgrade_uninstall() 呼叫完不保證那個背景流程已經真的跑完——資料夾
+        可能還有沒放掉的 handle，這時候在同一個路徑建立新目錄會被系統擋下來、
+        丟出 PermissionError，而且這跟是不是系統管理員身分完全無關（不是權限
+        被拒絕，是那個目錄物件還沒真的從檔案系統移除）。
+
+        這裡用短暫重試等它真的釋放，取代原本賭一個固定等待時間夠不夠的做法。
+        重試期間遇到的 PermissionError 都是預期中的過渡狀態，吞掉繼續等即可；
+        逾時還是不行，就不再攔，讓後面真正的複製流程去踢出原本的失敗處理
+        （回滾 + 回報使用者）。
+        """
+        deadline = time.time() + timeout
+        while True:
+            try:
+                os.makedirs(self.selected_path, exist_ok=True)
+                return
+            except PermissionError:
+                if time.time() >= deadline:
+                    return
+                time.sleep(interval)
+
     def run_upgrade_uninstall(self):
         """更新覆蓋安裝流程：先備份舊安裝資料夾，再靜默呼叫舊版本的解除安裝
-        助手移除乾淨，之後才繼續安裝新版本。"""
+        助手移除乾淨，之後才繼續安裝新版本。
+
+        修正紀錄（真實抓到的 bug）：這裡呼叫的是「舊版本」的 uninstall.exe，
+        它是否會在刪除前關閉檔案總管，原本完全依賴舊版本自己那份
+        install_manifest.json 裡的 restart_explorer_on_update 欄位——這個欄位
+        記錄的是「舊版本被安裝當下」的打包設定，跟「這次重新打包、使用者剛
+        勾選的新設定」是兩回事，新設定完全影響不到「拿舊版本的 uninstall.exe
+        來移除它自己」這個當下的行為。實測會導致「時好時壞」：每次安裝嘗試
+        （不論成功失敗）都可能在磁碟上留下不同版本的 install_manifest.json，
+        這次移除到底會不會關檔案總管，取決於上一輪剛好留下哪份 manifest，
+        不是使用者這次的選擇。修正做法：把這次（新版本）的
+        restart_explorer_on_update 設定透過命令列參數明確傳給舊版
+        uninstall.exe，覆蓋掉它自己那份可能過期的 manifest 設定
+        （見 uninstall.py 對 --restart-explorer 的處理）。
+        """
         info = self.check_existing_install()
         if not info.get("exists"):
             return {"status": "skipped"}
@@ -329,10 +387,11 @@ class InstallerAPI:
 
         try:
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            subprocess.run([uninstall_exe, "--silent"], timeout=30, creationflags=creationflags)
-            # uninstall.exe 結束後會用背景指令延遲刪除自己所在資料夾，
-            # 這裡多等一下讓那個背景流程有時間跑完，避免馬上寫入同一個路徑時互相搶檔案。
-            time.sleep(3)
+            cmd = [uninstall_exe, "--silent"]
+            if self.restart_explorer_on_update:
+                cmd.append("--restart-explorer")
+            subprocess.run(cmd, timeout=30, creationflags=creationflags)
+            self._wait_for_selected_path_writable()
             return {"status": "success"}
         except Exception as e:
             self._restore_upgrade_backup()
@@ -647,6 +706,7 @@ class InstallerAPI:
                 "start_menu_shortcut": True,
                 "file_associations": self.file_associations,
                 "path_added": self.add_to_path,
+                "restart_explorer_on_update": self.restart_explorer_on_update,
                 "installed_at": datetime.now().isoformat(),
             }
             with open(os.path.join(self.selected_path, "install_manifest.json"), "w", encoding="utf-8") as f:
@@ -664,7 +724,12 @@ class InstallerAPI:
         except PermissionError:
             self._rollback(copied_rel_paths, log)
             self._restore_upgrade_backup()
-            return {"status": "error", "message": "安裝失敗：權限不足。請安裝到桌面或 D 槽，或以管理員身分執行。"}
+            return {
+                "status": "error",
+                "message": "安裝失敗：權限不足。請安裝到桌面或 D 槽，或以管理員身分執行。\n"
+                           "（若已經是系統管理員身分仍失敗，也可能是舊版本尚未移除完畢，"
+                           "請關閉安裝程式稍後再試一次。）",
+            }
         except Exception as e:
             self._rollback(copied_rel_paths, log)
             self._restore_upgrade_backup()
@@ -763,7 +828,7 @@ def run_silent_install(install_dir=None, create_desktop_shortcut=True):
 
     def write_log_and_return(app_name, exit_code):
         try:
-            log_path = os.path.join(os.environ.get("TEMP", "."), f"{app_name}_silent_install_log.txt")
+            log_path = os.path.join(tempfile.gettempdir(), f"{app_name}_silent_install_log.txt")
             with open(log_path, "w", encoding="utf-8") as f:
                 f.write("\n".join(log_lines))
         except Exception:

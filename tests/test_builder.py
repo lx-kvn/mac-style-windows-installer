@@ -101,6 +101,7 @@ class TestConfigAssembly(BuildAllTestBase):
                 png_path=self.png_path, ico_path=self.ico_path, main_exe="main.exe",
                 eula_text="EULA 全文", dependencies=["vcredist_x64"],
                 file_associations=[".xyz"], add_to_path=True,
+                restart_explorer_on_update=True,
                 workspace_dir=self.workspace_dir,
             )
 
@@ -113,6 +114,7 @@ class TestConfigAssembly(BuildAllTestBase):
         self.assertEqual(captured["dependencies"], ["vcredist_x64"])
         self.assertEqual(captured["file_associations"], [".xyz"])
         self.assertTrue(captured["add_to_path"])
+        self.assertTrue(captured["restart_explorer_on_update"])
         self.assertEqual(captured["doc_icon"], "", "沒傳 doc_icon_path 時，設定檔裡的 doc_icon 欄位應該是空字串")
 
     def test_folder_name_falls_back_to_app_name_when_blank(self):

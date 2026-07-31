@@ -25,6 +25,21 @@ uninstall.py
   真的清空了才整個 rmdir，資料夾裡還有其他東西（使用者自己的資料，或是找不到
   清單、退回整個清除的情況）就分開處理——保留資料夾的話只刪自己，
   真的要整個清空的話才連資料夾一起 rmdir。
+
+新增（打包時選填）：restart_explorer_on_update。有些應用程式會註冊 Windows
+檔案總管殼層擴充功能（Shell Extension DLL），只要 explorer.exe 還活著就會
+把這支 DLL 常駐鎖住，更新覆蓋安裝時刪不掉、也跟系統管理員權限無關。勾選
+這個選項後，無人值守（--silent）解除安裝在刪除檔案前會先關閉 explorer.exe，
+刪除完畢後（不論成功與否）自動重啟，見 _kill_explorer() / _restart_explorer()。
+
+修正紀錄（真實抓到的 bug）：這個設定原本只看這支 exe 自己的
+install_manifest.json，但「更新覆蓋安裝」情境下被呼叫的是舊版本的
+uninstall.exe，讀到的是舊版本安裝當下寫的舊 manifest，跟使用者這次重新
+打包時的新設定是兩回事，導致行為隨每次安裝嘗試留下的 manifest 版本不同而
+時好時壞。現在新增 --restart-explorer 命令列旗標：由呼叫端（新版本的
+installer_core.py）帶著自己這次的設定明確傳進來，覆蓋掉舊 manifest 的值；
+沒帶這個旗標時（手動雙擊解除安裝、或不是被更新流程觸發的純靜默解除安裝）
+才退回讀 manifest 自己的設定。
 """
 
 import os
@@ -33,6 +48,7 @@ import winreg
 import shutil
 import json
 import ctypes
+import tempfile
 import time
 import subprocess
 from datetime import datetime
@@ -85,6 +101,57 @@ def remove_shortcut(app_name, desktop=False):
     except Exception:
         pass
     return False
+
+
+def _kill_explorer():
+    """終止 explorer.exe，釋放它可能持有的殼層擴充功能 DLL 檔案鎖。
+
+    有些應用程式會註冊 Windows 檔案總管殼層擴充功能（Shell Extension，例如
+    右鍵選單擴充 DLL）——只要 explorer.exe 還在執行，就會把這支 DLL 常駐載入
+    在自己的記憶體裡，更新覆蓋安裝時想覆寫/刪除這支 DLL 會被擋下來（檔案正被
+    另一個處理程序使用中），而且這跟是不是系統管理員身分無關，重試也沒用，
+    只能真的把持有它的處理程序關掉。這是打包時的選填選項（見
+    install_manifest.json 的 restart_explorer_on_update），預設不啟用。
+    """
+    try:
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        subprocess.run(
+            ["taskkill", "/f", "/im", "explorer.exe"],
+            creationflags=creationflags, timeout=10,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        time.sleep(1)  # 給處理程序終止、控制代碼釋放一點緩衝時間
+    except Exception:
+        pass
+
+
+def _restart_explorer():
+    """重新啟動 explorer.exe，搭配 _kill_explorer() 使用。"""
+    try:
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        subprocess.Popen(["explorer.exe"], creationflags=creationflags)
+    except Exception:
+        pass
+
+
+def _should_restart_explorer(silent, manifest, argv):
+    """決定這次解除安裝要不要在刪除檔案前後關閉/重啟檔案總管。
+
+    優先看呼叫端有沒有透過 --restart-explorer 命令列旗標明確指定——這是
+    installer_core.py 的 run_upgrade_uninstall()（更新覆蓋安裝情境）會用的
+    傳遞方式，帶的是新版本這次的設定，不是這支舊版 uninstall.exe 自己那份
+    可能過期的 install_manifest.json。真實抓到的 bug：原本只看 manifest，
+    但更新覆蓋安裝呼叫的是舊版本的 uninstall.exe，讀到的是舊版本安裝當下的
+    設定，跟使用者這次重新打包的新設定是兩回事，導致行為隨每次安裝嘗試留下
+    的 manifest 版本不同而時好時壞。沒帶這個旗標時（手動雙擊解除安裝、或不是
+    被更新流程觸發的純靜默解除安裝）才退回讀 manifest 自己的設定。
+
+    只有無人值守（silent）情境才會套用，互動式解除安裝不該無預警把使用者的
+    檔案總管視窗全部關掉。
+    """
+    if not silent:
+        return False
+    return ("--restart-explorer" in argv) or bool(manifest.get("restart_explorer_on_update", False))
 
 
 def remove_from_path(install_path):
@@ -190,61 +257,77 @@ def main():
     # False = 資料夾裡還留有其他東西，只能刪自己、把資料夾留著。
     safe_to_remove_whole_dir = False
 
-    if files_to_remove:
-        # 有清單：只刪清單內記錄的檔案，使用者事後自己產生的檔案不會被誤刪
-        for rel in files_to_remove:
-            if os.path.basename(rel) == self_name:
-                continue  # 自己交給下面的自我刪除流程處理，執行中無法自刪
-            item_path = os.path.join(current_dir, rel)
-            try:
-                if os.path.exists(item_path):
-                    os.remove(item_path)
-            except Exception as e:
-                log_lines.append(f"[警告] 無法刪除 {rel}: {e}")
+    # 只有無人值守（--silent，來自更新覆蓋流程或企業批次部署）且打包時勾選了
+    # 這個選項，才會關閉檔案總管：一般使用者手動雙擊解除安裝屬於互動情境，
+    # 不該無預警把使用者的檔案總管視窗全部關掉。
+    restart_explorer = _should_restart_explorer(silent, manifest, sys.argv)
+    if restart_explorer:
+        print("[提示] 暫時關閉檔案總管以釋放可能鎖定的檔案（例如殼層擴充功能 DLL）...")
+        _kill_explorer()
 
-        # 清掉刪空的子目錄
-        for root, dirs, files in os.walk(current_dir, topdown=False):
-            for d in dirs:
-                dpath = os.path.join(root, d)
+    try:
+        if files_to_remove:
+            # 有清單：只刪清單內記錄的檔案，使用者事後自己產生的檔案不會被誤刪
+            for rel in files_to_remove:
+                if os.path.basename(rel) == self_name:
+                    continue  # 自己交給下面的自我刪除流程處理，執行中無法自刪
+                item_path = os.path.join(current_dir, rel)
                 try:
-                    if not os.listdir(dpath):
-                        os.rmdir(dpath)
-                except Exception:
-                    pass
-        log_lines.append(f"已依安裝清單刪除 {len(files_to_remove)} 個檔案")
+                    if os.path.exists(item_path):
+                        os.remove(item_path)
+                except Exception as e:
+                    log_lines.append(f"[警告] 無法刪除 {rel}: {e}")
 
-        # 清單刪完之後，看看資料夾裡除了自己還剩什麼——這才是真正決定能不能
-        # 整個 rmdir 的依據，不能像原本那樣不管三七二十一直接砍。
-        remaining = [item for item in os.listdir(current_dir) if item != self_name]
-        if remaining:
-            log_lines.append(
-                f"安裝目錄內還有清單之外的 {len(remaining)} 個項目（可能是使用者自行產生的資料），"
-                f"保留資料夾，只刪除解除安裝程式本身：{remaining}"
-            )
-            safe_to_remove_whole_dir = False
+            # 清掉刪空的子目錄
+            for root, dirs, files in os.walk(current_dir, topdown=False):
+                for d in dirs:
+                    dpath = os.path.join(root, d)
+                    try:
+                        if not os.listdir(dpath):
+                            os.rmdir(dpath)
+                    except Exception:
+                        pass
+            log_lines.append(f"已依安裝清單刪除 {len(files_to_remove)} 個檔案")
+
+            # 清單刪完之後，看看資料夾裡除了自己還剩什麼——這才是真正決定能不能
+            # 整個 rmdir 的依據，不能像原本那樣不管三七二十一直接砍。
+            remaining = [item for item in os.listdir(current_dir) if item != self_name]
+            if remaining:
+                log_lines.append(
+                    f"安裝目錄內還有清單之外的 {len(remaining)} 個項目（可能是使用者自行產生的資料），"
+                    f"保留資料夾，只刪除解除安裝程式本身：{remaining}"
+                )
+                safe_to_remove_whole_dir = False
+            else:
+                safe_to_remove_whole_dir = True
         else:
+            print("[警告] 找不到安裝清單，將移除整個安裝目錄（含目錄下所有檔案）。")
+            log_lines.append("[警告] 找不到安裝清單，改為整個安裝目錄清除")
+            for item in os.listdir(current_dir):
+                item_path = os.path.join(current_dir, item)
+                try:
+                    if item == self_name:
+                        continue
+                    if os.path.isdir(item_path):
+                        shutil.rmtree(item_path)
+                    else:
+                        os.remove(item_path)
+                except Exception as e:
+                    log_lines.append(f"[警告] 無法刪除 {item}: {e}")
+            # 找不到清單這個分支，設計上本來就是要整個清空，維持原行為
             safe_to_remove_whole_dir = True
-    else:
-        print("[警告] 找不到安裝清單，將移除整個安裝目錄（含目錄下所有檔案）。")
-        log_lines.append("[警告] 找不到安裝清單，改為整個安裝目錄清除")
-        for item in os.listdir(current_dir):
-            item_path = os.path.join(current_dir, item)
-            try:
-                if item == self_name:
-                    continue
-                if os.path.isdir(item_path):
-                    shutil.rmtree(item_path)
-                else:
-                    os.remove(item_path)
-            except Exception as e:
-                log_lines.append(f"[警告] 無法刪除 {item}: {e}")
-        # 找不到清單這個分支，設計上本來就是要整個清空，維持原行為
-        safe_to_remove_whole_dir = True
+    finally:
+        if restart_explorer:
+            _restart_explorer()
 
     # 安裝目錄即將被整個刪掉（或者只刪自己），log 改寫到 %TEMP%，
     # 不寫回安裝目錄底下，因為那個位置接下來可能會被清掉。
     try:
-        log_dir = os.environ.get("TEMP", current_dir)
+        # tempfile.gettempdir() 比自己讀 os.environ.get("TEMP", ...) 穩固：
+        # 後者只有 TEMP 這個環境變數整個不存在時才會用預設值，存在但是空字串
+        # 的情況（實測會在某些提權執行的情境下發生）不會被擋下來，算出來的
+        # 路徑會不小心變成相對路徑。
+        log_dir = tempfile.gettempdir()
         with open(os.path.join(log_dir, f"{app_name}_uninstall_log.txt"), "w", encoding="utf-8") as f:
             f.write("\n".join(log_lines))
     except Exception:

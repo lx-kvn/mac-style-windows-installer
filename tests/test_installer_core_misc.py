@@ -208,6 +208,34 @@ class TestUpgradeBackup(unittest.TestCase):
         backup_path = self.api._backup_existing_install("C:\\不存在的資料夾\\Nope")
         self.assertIsNone(backup_path)
 
+    def test_backup_uses_real_temp_dir_even_when_temp_env_var_is_empty_string(self):
+        """真實抓到的 bug：os.environ.get("TEMP", ".") 只有在 TEMP 這個環境變數
+        整個不存在時才會用預設值，存在但是空字串（實測發生在某些提權執行的
+        情境下）會直接算出相對路徑，落點變成安裝程式當下的工作目錄——如果
+        使用者剛好把新安裝檔放在舊安裝目錄本身執行更新，備份會被建到
+        install_path 底下，變成對自己複製。改用 tempfile.gettempdir() 之後
+        不該再有這個問題，即使 TEMP 環境變數是空字串也一樣。
+        """
+        with mock.patch.dict(os.environ, {"TEMP": ""}):
+            backup_path = self.api._backup_existing_install(self.old_install_dir)
+        self.assertIsNotNone(backup_path)
+        self.assertNotEqual(os.path.abspath(backup_path), os.path.abspath(self.old_install_dir))
+        self.assertFalse(
+            os.path.abspath(backup_path).startswith(os.path.abspath(self.old_install_dir) + os.sep),
+            "備份資料夾不該落在被備份的來源資料夾底下",
+        )
+        self.assertTrue(os.path.exists(os.path.join(backup_path, "app.exe")))
+
+    def test_backup_refuses_when_computed_path_would_nest_inside_source(self):
+        """就算 tempfile.gettempdir() 本身算出詭異結果，也要有第二道保險：
+        算出來的備份路徑如果還是落在 install_path 底下，直接拒絕備份，
+        不要冒險對自己複製（shutil.copytree 對這種情況沒有防呆機制，
+        會邊複製邊把剛建立的子資料夾也當成來源的一部分，越複製越亂）。
+        """
+        with mock.patch("installer_core.tempfile.gettempdir", return_value=self.old_install_dir):
+            backup_path = self.api._backup_existing_install(self.old_install_dir)
+        self.assertIsNone(backup_path)
+
     def test_restore_moves_backup_back_to_original_path(self):
         backup_path = self.api._backup_existing_install(self.old_install_dir)
         self.api._upgrade_backup_path = backup_path
@@ -253,11 +281,17 @@ class TestRunUpgradeUninstall(unittest.TestCase):
             "InstallLocation": self.old_install_dir,
             "DisplayVersion": "1.0.0",
         })
-        self.api = make_installer_api(app_name="MyApp", version="2.0.0")
+        # selected_path 特意指向暫存資料夾（可寫入、一定成功建立），不是預設的
+        # Program Files 路徑：_wait_for_selected_path_writable() 遇到真的沒有
+        # 寫入權限的路徑會重試到逾時，不能讓測試環境本身的權限狀態影響測試。
+        self.new_install_dir = tempfile.mkdtemp()
+        shutil.rmtree(self.new_install_dir)  # 讓 os.makedirs() 有東西可以建立
+        self.api = make_installer_api(app_name="MyApp", version="2.0.0", selected_path=self.new_install_dir)
 
     def tearDown(self):
         self.patcher.stop()
         shutil.rmtree(self.old_install_dir, ignore_errors=True)
+        shutil.rmtree(self.new_install_dir, ignore_errors=True)
         if self.api._upgrade_backup_path and os.path.exists(self.api._upgrade_backup_path):
             shutil.rmtree(self.api._upgrade_backup_path, ignore_errors=True)
 
@@ -272,12 +306,12 @@ class TestRunUpgradeUninstall(unittest.TestCase):
             call_order.append("uninstall_exe")
 
         with mock.patch.object(self.api, "_backup_existing_install", side_effect=fake_backup), \
-             mock.patch("installer_core.subprocess.run", side_effect=fake_subprocess_run), \
-             mock.patch("installer_core.time.sleep"):
+             mock.patch("installer_core.subprocess.run", side_effect=fake_subprocess_run):
             result = self.api.run_upgrade_uninstall()
 
         self.assertEqual(result["status"], "success")
         self.assertEqual(call_order, ["backup", "uninstall_exe"], "必須先備份，才能靜默移除舊版本")
+        self.assertTrue(os.path.exists(self.new_install_dir), "確認目標路徑真的等到可以建立")
 
     def test_restores_backup_when_uninstall_exe_fails(self):
         with open(os.path.join(self.old_install_dir, "extra.txt"), "w") as f:
@@ -289,6 +323,80 @@ class TestRunUpgradeUninstall(unittest.TestCase):
         self.assertEqual(result["status"], "error")
         self.assertTrue(os.path.exists(os.path.join(self.old_install_dir, "extra.txt")), "備份應該被復原回原位")
         self.assertIsNone(self.api._upgrade_backup_path)
+
+    def test_passes_restart_explorer_flag_to_old_uninstall_exe_when_enabled(self):
+        """真實抓到的 bug：這裡呼叫的是舊版本的 uninstall.exe，它是否關閉檔案
+        總管原本只看它自己那份（可能過期的）install_manifest.json，跟使用者
+        這次重新打包的新設定是兩回事，導致行為時好時壞。修正後這次的設定要
+        透過命令列參數明確傳給舊版 uninstall.exe，覆蓋掉它自己的 manifest。"""
+        self.api.restart_explorer_on_update = True
+        captured_cmd = {}
+
+        def fake_subprocess_run(cmd, **kwargs):
+            captured_cmd["cmd"] = cmd
+
+        with mock.patch("installer_core.subprocess.run", side_effect=fake_subprocess_run):
+            self.api.run_upgrade_uninstall()
+
+        self.assertIn("--restart-explorer", captured_cmd["cmd"])
+
+    def test_does_not_pass_restart_explorer_flag_when_disabled(self):
+        self.api.restart_explorer_on_update = False
+        captured_cmd = {}
+
+        def fake_subprocess_run(cmd, **kwargs):
+            captured_cmd["cmd"] = cmd
+
+        with mock.patch("installer_core.subprocess.run", side_effect=fake_subprocess_run):
+            self.api.run_upgrade_uninstall()
+
+        self.assertNotIn("--restart-explorer", captured_cmd["cmd"])
+
+
+class TestWaitForSelectedPathWritable(unittest.TestCase):
+    """_wait_for_selected_path_writable()：更新覆蓋安裝後，舊版本 uninstall.exe
+    背景延遲自我刪除不保證真的跑完，安裝目標路徑可能還卡在 Windows 的
+    pending-delete 狀態。這裡驗證用短暫重試取代原本固定 time.sleep() 賭運氣的
+    做法：遇到 PermissionError 要重試、真的可以寫入了要立刻停手、逾時也不拋例外。"""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        shutil.rmtree(self.tmp_dir)  # 讓 os.makedirs() 有東西可以建立
+        self.api = make_installer_api(selected_path=self.tmp_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_returns_immediately_when_path_already_writable(self):
+        with mock.patch("installer_core.time.sleep") as mock_sleep:
+            self.api._wait_for_selected_path_writable()
+        self.assertTrue(os.path.exists(self.tmp_dir))
+        mock_sleep.assert_not_called()
+
+    def test_retries_until_permission_error_clears(self):
+        real_makedirs = os.makedirs
+        call_count = {"n": 0}
+
+        def flaky_makedirs(path, exist_ok=False):
+            call_count["n"] += 1
+            if call_count["n"] < 3:
+                raise PermissionError("模擬 pending-delete 還沒釋放")
+            return real_makedirs(path, exist_ok=exist_ok)
+
+        with mock.patch("installer_core.os.makedirs", side_effect=flaky_makedirs), \
+             mock.patch("installer_core.time.sleep") as mock_sleep:
+            self.api._wait_for_selected_path_writable(timeout=10, interval=0.5)
+
+        self.assertEqual(call_count["n"], 3, "前兩次遇到 PermissionError 應該重試，第三次成功就停手")
+        self.assertEqual(mock_sleep.call_count, 2)
+        self.assertTrue(os.path.exists(self.tmp_dir))
+
+    def test_gives_up_after_timeout_without_raising(self):
+        with mock.patch(
+            "installer_core.os.makedirs", side_effect=PermissionError("一直卡住"),
+        ), mock.patch("installer_core.time.sleep"):
+            self.api._wait_for_selected_path_writable(timeout=0.01, interval=0.01)
+        # 不拋例外，把失敗處理權交還給呼叫端（trigger_installation() 後續會再踢出真正的錯誤）
 
 
 class TestCloseWindowRestoresPendingBackup(unittest.TestCase):

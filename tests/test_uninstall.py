@@ -24,6 +24,70 @@ from _fakes import FakeWinReg
 import uninstall as un
 
 
+class TestExplorerRestartHelpers(unittest.TestCase):
+    """_kill_explorer() / _restart_explorer()：更新覆蓋安裝時（打包時勾選
+    restart_explorer_on_update）用來釋放被 explorer.exe 鎖住的殼層擴充功能
+    DLL。main() 本身涉及 MessageBoxW/is_admin()/sys.argv 等 GUI/系統層面
+    的東西，這個檔案原本就沒有整合測試 main()，這裡只測可以獨立驗證的
+    這兩個 best-effort 函式本身。"""
+
+    def test_kill_explorer_calls_taskkill(self):
+        with mock.patch("uninstall.subprocess.run") as mock_run, \
+             mock.patch("uninstall.time.sleep"):
+            un._kill_explorer()
+        args, kwargs = mock_run.call_args
+        self.assertEqual(args[0], ["taskkill", "/f", "/im", "explorer.exe"])
+
+    def test_kill_explorer_swallows_failure(self):
+        with mock.patch("uninstall.subprocess.run", side_effect=RuntimeError("模擬失敗")), \
+             mock.patch("uninstall.time.sleep"):
+            un._kill_explorer()  # 不應該拋例外
+
+    def test_restart_explorer_launches_explorer_exe(self):
+        with mock.patch("uninstall.subprocess.Popen") as mock_popen:
+            un._restart_explorer()
+        args, kwargs = mock_popen.call_args
+        self.assertEqual(args[0], ["explorer.exe"])
+
+    def test_restart_explorer_swallows_failure(self):
+        with mock.patch("uninstall.subprocess.Popen", side_effect=RuntimeError("模擬失敗")):
+            un._restart_explorer()  # 不應該拋例外
+
+
+class TestShouldRestartExplorer(unittest.TestCase):
+    """_should_restart_explorer()：真實抓到的 bug——更新覆蓋安裝呼叫的是舊版本
+    的 uninstall.exe，它是否關閉檔案總管原本只看自己那份（可能過期的）
+    install_manifest.json，跟使用者這次重新打包的新設定是兩回事，導致行為
+    時好時壞。修正後 --restart-explorer 命令列旗標（由新版本明確傳入）要能
+    覆蓋掉 manifest 裡的舊設定。"""
+
+    def test_cli_flag_overrides_manifest_when_manifest_says_false(self):
+        result = un._should_restart_explorer(
+            silent=True, manifest={"restart_explorer_on_update": False}, argv=["uninstall.exe", "--silent", "--restart-explorer"],
+        )
+        self.assertTrue(result)
+
+    def test_manifest_used_as_fallback_when_no_cli_flag(self):
+        result = un._should_restart_explorer(
+            silent=True, manifest={"restart_explorer_on_update": True}, argv=["uninstall.exe", "--silent"],
+        )
+        self.assertTrue(result)
+
+    def test_false_when_neither_cli_flag_nor_manifest_set(self):
+        result = un._should_restart_explorer(
+            silent=True, manifest={"restart_explorer_on_update": False}, argv=["uninstall.exe", "--silent"],
+        )
+        self.assertFalse(result)
+
+    def test_never_true_for_interactive_uninstall_even_with_cli_flag(self):
+        """互動式解除安裝（沒帶 --silent）不該無預警把使用者的檔案總管視窗
+        全部關掉，就算誤帶了 --restart-explorer 也不套用。"""
+        result = un._should_restart_explorer(
+            silent=False, manifest={"restart_explorer_on_update": True}, argv=["uninstall.exe", "--restart-explorer"],
+        )
+        self.assertFalse(result)
+
+
 class TestRemoveFromPath(unittest.TestCase):
     def setUp(self):
         self.fake_reg = FakeWinReg()

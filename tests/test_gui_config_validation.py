@@ -39,6 +39,7 @@ class TestValidateAndBuildPackData(unittest.TestCase):
             "need_file_assoc": False,
             "use_custom_doc_icon": False,
             "add_to_path": False,
+            "restart_explorer_on_update": False,
         }
         data.update(overrides)
         return data
@@ -52,6 +53,12 @@ class TestValidateAndBuildPackData(unittest.TestCase):
         self.assertEqual(pack_data["app_name"], "TestApp")
         self.assertEqual(pack_data["folder_name"], "TestApp", "folder_name 留空時要 fallback 成 app_name")
         self.assertEqual(pack_data["file_associations"], [])
+        self.assertFalse(pack_data["restart_explorer_on_update"])
+
+    def test_restart_explorer_on_update_passes_through(self):
+        pack_data, error = self._validate(self._base_data(restart_explorer_on_update=True))
+        self.assertIsNone(error)
+        self.assertTrue(pack_data["restart_explorer_on_update"])
 
     def test_missing_required_text_field_is_rejected(self):
         _, error = self._validate(self._base_data(publisher=""))

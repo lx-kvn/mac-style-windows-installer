@@ -217,6 +217,7 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     need_file_assoc = bool(data.get("need_file_assoc", False))
     use_custom_doc_icon = bool(data.get("use_custom_doc_icon", False))
     add_to_path = bool(data.get("add_to_path", False))
+    restart_explorer_on_update = bool(data.get("restart_explorer_on_update", False))
 
     if not app_name or not version or not publisher or not exe_name:
         return None, "欄位驗證失敗：<br>所有文字欄位（名稱、版本、發行者、安裝檔名）皆為必填項目，請檢查是否有欄位遺漏。"
@@ -271,6 +272,7 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     pack_data["eula_text"] = eula_text
     pack_data["main_exe"] = main_exe
     pack_data["add_to_path"] = add_to_path
+    pack_data["restart_explorer_on_update"] = restart_explorer_on_update
     return pack_data, None
 
 
@@ -466,6 +468,7 @@ class ConfigAPI:
                 file_associations=data.get("file_associations", []),
                 doc_icon_path=data.get("doc_icon_path", ""),
                 add_to_path=data.get("add_to_path", False),
+                restart_explorer_on_update=data.get("restart_explorer_on_update", False),
                 workspace_dir=workspace_dir,
                 progress_callback=progress_handler,
             )
