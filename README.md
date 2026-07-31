@@ -1,7 +1,7 @@
 # mac-style-windows-installer
 
 **A tool that packages any Windows application into a macOS-DMG-style drag-to-install experience.**
-**把任何 Windows 應用程式打包成 macOS DMG 風格拖曳安裝體驗的工具。**
+**把任何 Windows 應用程式打包成 macOS DMG 風格、拖曳即可安裝的體驗。**
 
 ![platform](https://img.shields.io/badge/platform-Windows-blue)
 ![python](https://img.shields.io/badge/python-3.9%2B-blue)
@@ -16,67 +16,73 @@
 
 ### What is this?
 
-This project has two parts:
+One project, two parts:
 
-1. **The Builder Tool** — a desktop app (GUI) you use to configure and compile an installer for *your own* application.
-2. **The Output Installer** — the `.exe` the Builder Tool produces, which your end users double-click. It shows a macOS-style window: drag your app's icon onto a folder icon to install it — instead of a typical Windows "Next, Next, Next" wizard.
+1. **The Builder Tool** — a desktop app you run once, to configure and compile an installer for *your own* software.
+2. **The installer it produces** — the `.exe` your end users actually download and run. Instead of a Windows-style "Next → Next → Next" wizard, they get a macOS-style window: drag your app's icon onto a folder to install it.
 
-Both the Builder Tool and the installers it produces are standalone Windows desktop apps, built with Python + [pywebview](https://pywebview.flowrl.com/) (for the UI) and packaged with [PyInstaller](https://pyinstaller.org/).
+Both halves — the Builder Tool and every installer it produces — are standalone Windows desktop apps. The interface runs on [pywebview](https://pywebview.flowrl.com/), and everything is packaged into a single `.exe` with [PyInstaller](https://pyinstaller.org/).
 
-> **⚠️ This project was built with significant assistance from Claude (Anthropic's AI).** Architecture decisions, code, and this README were developed in collaboration with AI. If that matters to you when evaluating a project, now you know. Bug reports and code review are very welcome — AI-assisted doesn't mean bug-free.
+> **⚠️ Built with substantial help from Claude (Anthropic's AI).** The architecture, the code, and this README were all written in collaboration with an AI. If that matters to how you evaluate a project, now you know. Bug reports and code review are genuinely welcome — AI-assisted doesn't mean bug-free; if anything, it means an extra pair of eyes helps more, not less.
 
 ### Screenshots
 
-| Builder Tool — Main Screen | EULA Screen |
+| Drag to Install | EULA Screen |
 |---|---|
-| ![Builder main screen](docs/screenshots/builder-main.png) | ![EULA screen](docs/screenshots/eula.png) |
+| ![Drag to install](docs/screenshots/installer-drag.png) | ![EULA screen](docs/screenshots/eula.png) |
 
-| Installer — Drag to Install | Build Progress |
+| Builder Tool — Main Screen | Build Progress |
 |---|---|
-| ![Drag to install](docs/screenshots/installer-drag.png) | ![Build progress](docs/screenshots/build-progress.png) |
+| ![Builder main screen](docs/screenshots/builder-main.png) | ![Build progress](docs/screenshots/build-progress.png) |
+
+*Top row: what your end users see. Bottom row: what you see while building the installer.*
 
 ### Features
 
 **Building the installer (Builder Tool)**
-- Configure app name (display name, can be any language) separately from the install-folder name (recommended ASCII-safe)
-- Pick a main executable, PNG/ICO icons, EULA text (optional), dependency hints (VC++ Redistributable / .NET Desktop Runtime — detection only, not silent install), file associations, PATH registration
-- Environment check on launch — warns if `pyinstaller` / `python` / `pywebview` aren't found on the machine building the installer, with install commands
-- Runnable both as a raw `.py` script and as a compiled `.exe` (see [Requirements](#requirements) below)
-- Real-time build progress with staged, non-linear animation (not a fake linear bar)
-- Resizable, frameless window with a custom-implemented drag/resize (frameless windows lose native resize handles by default)
-- Built-in Help button with the full manual embedded in-app, not just an external doc
+
+Everything you configure lives in one form:
+- App display name (any language) is kept separate from the install-folder name (stick to ASCII here) — one is what users see, the other is a filesystem path.
+- Pick a main executable, PNG/ICO icons, optional EULA text, dependency hints (VC++ Redistributable / .NET Desktop Runtime — detected, not silently installed), file associations, and PATH registration.
+- Checks its own environment on launch and tells you plainly if `pyinstaller`, `python`, or `pywebview` are missing, install command included.
+- Works either way: run it straight as a `.py` script, or as a compiled `.exe` (see [Requirements](#requirements)).
+- Real, staged build progress — not a progress bar that lies to you with a fake linear crawl.
+- A resizable, frameless window with hand-built drag/resize handling (frameless windows lose the native resize grips by default, so this is implemented from scratch).
+- A Help button with the full manual built in, so you're not hunting for a separate doc.
 
 **The installer it produces**
-- macOS DMG-style drag-to-install window, custom-drawn window drag (no native-drag jump bug), DPI-aware rendering
-- EULA screen (skipped if not configured)
-- Existing-installation detection with **actual version comparison** (not just presence) — offers an upgrade only if the new version is genuinely newer, and warns instead if you're installing the same or an older version
-- Disk space check, running-process check, single-instance lock
-- Real copy progress + **post-copy integrity verification (CRC32 checksum, not just file size)**
-- **Automatic rollback on failure** — a failed install cleans up after itself, no half-installed leftovers
-- Desktop / Start Menu shortcuts, file associations, PATH registration
-- Registry entries for "Apps & Features": `DisplayName`, `Publisher`, `DisplayVersion`, `InstallLocation`, `EstimatedSize`, `InstallDate`, `UninstallString`, `QuietUninstallString`
-- **Silent / CLI install mode** for enterprise deployment: `Setup_XXX.exe /S /D=C:\Apps\MyApp /NODESKTOPSHORTCUT`. The installer is built `--noconsole`, so it has no console to print to even when run from `cmd` — check the result via the process **exit code** (`echo %errorlevel%` right after running, or `$LASTEXITCODE` in PowerShell; `0` = success), and see `%TEMP%\<app name>_silent_install_log.txt` for details
-- Manifest-based uninstaller — only removes what it installed, preserves user-generated files in the install folder; falls back to full-folder cleanup only when no manifest is found
+
+What your users actually experience:
+- A macOS DMG-style drag-to-install window, with custom drag handling (no native-drag jump glitch) and DPI-aware rendering.
+- An EULA screen, shown only if you configured one.
+- Real version comparison when an existing install is found — not just "is something there," but an actual old-vs-new check. Offers to upgrade only when the new version is genuinely newer, and clearly warns if you're about to install the same version or an older one.
+- Disk space check, a check for whether the app is already running, and a single-instance lock so users can't accidentally kick off two installs at once.
+- Real copy progress, plus **integrity verification after copying** (a CRC32 checksum, not just a file-size match).
+- **Automatic rollback on failure** — if an install fails partway through, it cleans up after itself instead of leaving a half-installed mess.
+- Desktop and Start Menu shortcuts, file associations, PATH registration.
+- Full registry entries for "Apps & Features": `DisplayName`, `Publisher`, `DisplayVersion`, `InstallLocation`, `EstimatedSize`, `InstallDate`, `UninstallString`, `QuietUninstallString`.
+- **A silent/CLI install mode** for enterprise deployment: `Setup_XXX.exe /S /D=C:\Apps\MyApp /NODESKTOPSHORTCUT`. The installer is built `--noconsole`, so it has nowhere to print to even from `cmd` — check the **exit code** instead (`echo %errorlevel%` right after running, or `$LASTEXITCODE` in PowerShell; `0` means success), and look at `%TEMP%\<app name>_silent_install_log.txt` for details.
+- A manifest-based uninstaller that only removes what it installed, leaving anything the user created inside the install folder alone. It falls back to clearing the whole folder only if no manifest can be found.
 
 ### Requirements
 
-To **run/build the Builder Tool** (`gui_config.py` or a compiled `InstallerBuilder.exe`), the machine needs:
+To **run or build the Builder Tool** (`gui_config.py`, or a compiled `InstallerBuilder.exe`), the machine needs:
 
 ```
 pip install pyinstaller pywebview pywin32
 ```
 
-- `pyinstaller` and `pywebview` are required — the Builder Tool checks for them on launch and warns you if missing.
-- `pywin32` is optional — only affects shortcut creation.
+- `pyinstaller` and `pywebview` are required — the Builder Tool checks for both on launch and tells you if either is missing.
+- `pywin32` is optional; it only affects whether shortcuts get created.
 
-The **installers it produces** are fully standalone — end users don't need Python installed. The only external dependency is the **WebView2 Runtime** (a Windows system component, usually pre-installed on Windows 11 and updated Windows 10; may be missing on older/un-updated Windows 10 machines).
+The **installers it produces** are fully standalone — your end users don't need Python at all. The only external dependency is the **WebView2 Runtime**, a Windows system component that's pre-installed on Windows 11 and most up-to-date Windows 10 machines; it may be missing on older, un-updated Windows 10 installs.
 
 ### Usage
 
 1. Install the requirements above.
-2. Run `python gui_config.py` (or double-click `InstallerBuilder.exe` if you've built it — see below).
-3. Fill in the form: app name, folder name, version, publisher, output filename, app folder, main executable, icons, and any optional settings.
-4. Click "Start Building" (開始編譯安裝檔). The output `.exe` lands in `dist/`.
+2. Run `python gui_config.py` (or double-click `InstallerBuilder.exe`, if you've already built it — see below).
+3. Fill in the form: app name, folder name, version, publisher, output filename, app folder, main executable, icons, and whichever optional settings you need.
+4. Click "Start Building" (開始編譯安裝檔). The finished `.exe` lands in `dist/`.
 
 To build `InstallerBuilder.exe` itself:
 
@@ -84,23 +90,23 @@ To build `InstallerBuilder.exe` itself:
 python build_config_tool.py
 ```
 
-This opens a small build GUI where you can pick a custom `.ico` and watch the PyInstaller output live.
+This opens a small build GUI where you can pick a custom `.ico` and watch the PyInstaller output as it runs.
 
 Full documentation: see [`使用說明書.md`](使用說明書.md) (Traditional Chinese).
 
 ### Roadmap
 
-- [ ] Code signing for `InstallerBuilder.exe` via [SignPath Foundation](https://signpath.io/solutions/open-source-community)'s free OSS program (requires this repo + GitHub Actions build pipeline — the compiled installers it *produces* would still be unsigned, since they're built locally, not through this repo's CI)
-- [ ] Multi-language support — **not started, feasibility TBD.** Low priority unless there's actual demand from non-Chinese-speaking users; see discussion in project history for the reasoning
-- [ ] Optional hash upgrade for integrity verification (currently CRC32; a stronger hash could be offered for higher-assurance use cases)
-- [ ] Digital-signature pass-through for the *output* installers (would require moving the build step into CI, a bigger architectural change)
+- [ ] Code signing for `InstallerBuilder.exe`, via [SignPath Foundation](https://signpath.io/solutions/open-source-community)'s free open-source program (requires this repo plus a GitHub Actions build pipeline — installers *produced* by the tool would still be unsigned, since they're compiled locally rather than through this repo's CI)
+- [ ] Multi-language UI — **not started, feasibility still under consideration.** Low priority unless there's real demand from non-Chinese-speaking users
+- [ ] An optional stronger hash for integrity verification (currently CRC32; a cryptographic hash could be offered for higher-assurance use cases)
+- [ ] A path to signing the *output* installers too (would mean moving the build step into CI — a bigger architectural change)
 
 ### Known Limitations
 
-- No digital signature yet on either the Builder Tool or the installers it produces (see Roadmap)
-- Dependency checks (VC++ Redistributable, .NET Desktop Runtime) are detection-only — no silent install of the dependency itself
-- No multi-language UI yet — everything is in Traditional Chinese
-- Requires WebView2 Runtime on very old/un-updated Windows 10 machines
+- Neither the Builder Tool nor the installers it produces are code-signed yet (see Roadmap).
+- Dependency checks (VC++ Redistributable, .NET Desktop Runtime) are detection-only; the tool won't silently install the dependency itself.
+- No multi-language UI yet — everything is in Traditional Chinese.
+- Very old, un-updated Windows 10 machines may need the WebView2 Runtime installed separately.
 
 ### License
 
@@ -112,67 +118,73 @@ MIT — see [`LICENSE`](LICENSE).
 
 ### 這是什麼
 
-這個專案分成兩個部分：
+一個專案，兩個部分：
 
-1. **打包工具**——一個桌面 GUI 應用程式，你用它來設定、編譯出**你自己軟體**的安裝檔。
-2. **輸出的安裝檔**——打包工具編譯出來、給你的終端使用者雙擊的那顆 `.exe`。畫面是 macOS 風格：把你的軟體圖示拖到資料夾圖示上就完成安裝，而不是傳統 Windows「下一步、下一步、下一步」那種精靈式安裝。
+1. **打包工具**——一個桌面應用程式，你執行它一次，設定並編譯出屬於**你自己軟體**的安裝檔。
+2. **打包工具產出的安裝檔**——終端使用者實際下載、執行的那顆 `.exe`。不是傳統 Windows「下一步、下一步、下一步」的精靈式安裝，而是 macOS 風格的視窗：把你的軟體圖示拖到資料夾上就完成安裝。
 
-打包工具本身跟它輸出的安裝檔，都是完全獨立的 Windows 桌面應用程式，用 Python + [pywebview](https://pywebview.flowrl.com/)（畫面）搭配 [PyInstaller](https://pyinstaller.org/)（打包成 exe）做出來的。
+打包工具本身，以及它產出的每一顆安裝檔，都是完全獨立的 Windows 桌面應用程式。介面用 [pywebview](https://pywebview.flowrl.com/) 呈現，整包再用 [PyInstaller](https://pyinstaller.org/) 打包成單一 `.exe`。
 
-> **⚠️ 這個專案是在 Claude（Anthropic 的 AI）大量協助下完成的。** 架構決策、程式碼、連這份 README 本身，都是跟 AI 協作寫出來的。如果這件事會影響你對這個專案的判斷，先讓你知道。歡迎回報 bug、歡迎 code review——AI 協助不等於沒有 bug。
+> **⚠️ 這個專案在 Claude（Anthropic 的 AI）大量協助下完成。** 架構、程式碼、連這份 README，都是跟 AI 協作寫出來的。如果這件事會影響你怎麼看待這個專案，現在你知道了。也歡迎回報 bug、歡迎 code review——AI 協助不代表沒有 bug；真要說有什麼差別，反而是更需要多一雙眼睛幫忙檢查。
 
 ### 截圖
 
-| 打包工具主畫面 | EULA 同意頁 |
+| 拖曳安裝畫面 | EULA 同意頁 |
 |---|---|
-| ![打包工具主畫面](docs/screenshots/builder-main.png) | ![EULA](docs/screenshots/eula.png) |
+| ![拖曳安裝](docs/screenshots/installer-drag.png) | ![EULA](docs/screenshots/eula.png) |
 
-| 安裝端拖曳安裝畫面 | 編譯進度 |
+| 打包工具主畫面 | 編譯進度 |
 |---|---|
-| ![拖曳安裝](docs/screenshots/installer-drag.png) | ![編譯進度](docs/screenshots/build-progress.png) |
+| ![打包工具主畫面](docs/screenshots/builder-main.png) | ![編譯進度](docs/screenshots/build-progress.png) |
+
+*上排：你的終端使用者會看到的畫面。下排：你打包安裝檔時會看到的畫面。*
 
 ### 功能
 
-**製作安裝檔(打包工具端)**
-- 應用程式顯示名稱（可以是任何語言）跟安裝資料夾名稱（建議英數字）分開設定
-- 選主要執行檔、PNG/ICO 圖示、EULA 文字（選填）、相依元件提示（VC++ Redistributable / .NET Desktop Runtime，只做偵測不做靜默安裝）、檔案關聯、加入 PATH
-- 開啟時自動環境檢查——沒裝 `pyinstaller` / `python` / `pywebview` 會直接跳提示附安裝指令
-- **`.py` 直接執行跟編譯成 `.exe` 都能用**（見下方〈環境需求〉）
-- 即時編譯進度，分階段的漸進動畫（不是假的線性進度條）
-- 無邊框視窗可自由調整大小（無邊框視窗預設沒有原生縮放邊界，這是自己刻的拖曳縮放）
-- 內建「使用說明」按鈕，完整手冊直接整合在工具裡，不用另外找文件
+**製作安裝檔（打包工具端）**
+
+所有設定都在同一張表單裡完成：
+- 應用程式顯示名稱（可以是任何語言）跟安裝資料夾名稱（建議用英數字）分開設定——一個是給使用者看的，一個是實際的檔案路徑。
+- 選主要執行檔、PNG/ICO 圖示、選填的 EULA 文字、相依元件提示（VC++ Redistributable / .NET Desktop Runtime，只偵測不靜默安裝）、檔案關聯，以及是否加入 PATH。
+- 開啟時會自動檢查執行環境，`pyinstaller`、`python`、`pywebview` 缺了哪一個都會直接告訴你，還附上安裝指令。
+- 兩種跑法都支援：直接執行 `.py`，或編譯成 `.exe` 後雙擊使用（見下方〈環境需求〉）。
+- 真實、分階段的編譯進度——不是一條會騙人的假線性進度條。
+- 無邊框視窗也能自由調整大小（無邊框視窗預設會失去原生的縮放邊界，這是自己刻的拖曳縮放邏輯）。
+- 內建「使用說明」按鈕，完整手冊就在工具裡，不用另外找文件。
 
 **輸出的安裝檔**
-- macOS DMG 風格拖曳安裝視窗，自訂拖曳邏輯（不用原生拖曳，沒有跳動 bug），DPI 感知渲染
-- EULA 同意頁（沒設定就自動跳過）
-- 偵測已安裝版本時會**真的比對版本新舊**（不是只看有沒有裝過）——只有新版本才會問是否更新，版本相同或更舊會另外提示警告
-- 磁碟空間檢查、執行中偵測、單一實例鎖
-- 真實複製進度 + **複製後完整性驗證（CRC32 checksum，不只是比檔案大小）**
-- **失敗自動回滾**——安裝失敗會自動清乾淨，不留下裝到一半的殘骸
-- 桌面/開始功能表捷徑、檔案關聯、加入 PATH
-- 「新增或移除程式」清單的完整登錄表欄位：`DisplayName`、`Publisher`、`DisplayVersion`、`InstallLocation`、`EstimatedSize`、`InstallDate`、`UninstallString`、`QuietUninstallString`
-- **靜默 / 命令列安裝模式**，給企業批次部署用：`Setup_XXX.exe /S /D=C:\Apps\MyApp /NODESKTOPSHORTCUT`。安裝檔是用 `--noconsole` 編譯的，即使從 `cmd` 執行也沒有主控台可以印字——用 process 的 **exit code** 檢查結果就好（執行完緊接著在 cmd 打 `echo %errorlevel%`，或 PowerShell 的 `$LASTEXITCODE`，`0` 代表成功），詳細訊息會寫進 `%TEMP%\<應用程式名稱>_silent_install_log.txt`
-- 清單式解除安裝——只刪自己裝的東西，保留使用者在安裝目錄裡自己產生的檔案；找不到清單才會退回整個資料夾清除
+
+使用者實際會體驗到的：
+- macOS DMG 風格的拖曳安裝視窗，自訂拖曳邏輯（沒有原生拖曳常見的跳動問題），DPI 感知渲染。
+- EULA 同意頁，只有你有設定才會出現。
+- 偵測到已安裝版本時，會**真的比對新舊版本**，不是只看「有沒有裝過」——只有新版本才會主動問要不要更新，版本相同或更舊會清楚提示警告。
+- 磁碟空間檢查、執行中偵測、單一實例鎖，避免使用者不小心同時開兩個安裝流程。
+- 真實的複製進度，加上**複製後的完整性驗證**（CRC32 checksum，不只是比對檔案大小）。
+- **失敗自動回滾**——安裝到一半失敗，會自動清乾淨，不留下裝一半的殘骸。
+- 桌面／開始功能表捷徑、檔案關聯、加入 PATH。
+- 「新增或移除程式」清單所需的完整登錄表欄位：`DisplayName`、`Publisher`、`DisplayVersion`、`InstallLocation`、`EstimatedSize`、`InstallDate`、`UninstallString`、`QuietUninstallString`。
+- **靜默／命令列安裝模式**，給企業批次部署用：`Setup_XXX.exe /S /D=C:\Apps\MyApp /NODESKTOPSHORTCUT`。安裝檔是用 `--noconsole` 編譯的，就算從 `cmd` 執行也沒有主控台可以顯示文字——改看 process 的 **exit code** 就好（執行完緊接著在 cmd 打 `echo %errorlevel%`，或 PowerShell 打 `$LASTEXITCODE`，`0` 代表成功），詳細訊息會寫進 `%TEMP%\<應用程式名稱>_silent_install_log.txt`。
+- 清單式解除安裝，只刪自己裝過的東西，使用者事後在安裝目錄裡自己產生的檔案不會被動到；真的找不到清單，才會退回清空整個資料夾。
 
 ### 環境需求
 
-**執行/打包「打包工具」**（`gui_config.py` 或編譯好的 `InstallerBuilder.exe`）的這台電腦需要：
+**執行或打包「打包工具」**（`gui_config.py`，或編譯好的 `InstallerBuilder.exe`）的這台電腦需要：
 
 ```
 pip install pyinstaller pywebview pywin32
 ```
 
-- `pyinstaller`、`pywebview` 是必要的——打包工具開啟時會檢查，沒裝會跳提示。
-- `pywin32` 選用，只影響捷徑功能。
+- `pyinstaller` 跟 `pywebview` 是必要的——打包工具開啟時會檢查兩者，缺了會告訴你。
+- `pywin32` 是選用的，只影響捷徑會不會被建立。
 
-**打包工具輸出的安裝檔**是完全獨立的，終端使用者不需要裝 Python。唯一的外部依賴是 **WebView2 Runtime**（Windows 系統元件，Windows 11 跟更新過的 Windows 10 通常已內建，較舊、沒更新的 Windows 10 可能會缺）。
+**打包工具產出的安裝檔**是完全獨立的，終端使用者完全不需要裝 Python。唯一的外部依賴是 **WebView2 Runtime**，這是 Windows 的系統元件，Windows 11 跟大多數更新過的 Windows 10 都已經內建；比較舊、沒更新過的 Windows 10 可能會缺這個元件。
 
 ### 使用方式
 
-1. 安裝上面的環境需求。
-2. 執行 `python gui_config.py`（或雙擊編譯好的 `InstallerBuilder.exe`，見下方）。
-3. 填表單：應用程式名稱、資料夾名稱、版本、發行者、輸出檔名、應用程式資料夾、主執行檔、圖示，以及其他選填設定。
-4. 按「開始編譯安裝檔」，輸出的 `.exe` 會在 `dist/` 資料夾底下。
+1. 安裝上面列的環境需求。
+2. 執行 `python gui_config.py`（或雙擊已經編譯好的 `InstallerBuilder.exe`，見下方）。
+3. 填寫表單：應用程式名稱、資料夾名稱、版本、發行者、輸出檔名、應用程式資料夾、主執行檔、圖示，以及你需要的其他選填設定。
+4. 按下「開始編譯安裝檔」，編好的 `.exe` 會出現在 `dist/` 資料夾底下。
 
 要打包 `InstallerBuilder.exe` 本身：
 
@@ -180,23 +192,23 @@ pip install pyinstaller pywebview pywin32
 python build_config_tool.py
 ```
 
-會跳出一個小型建置 GUI，可以選自訂 `.ico`、即時看 PyInstaller 輸出。
+會開啟一個小型建置 GUI，可以選自訂的 `.ico`，並即時看到 PyInstaller 的輸出過程。
 
-完整文件：見 [`使用說明書.md`](使用說明書.md)。
+完整文件請見 [`使用說明書.md`](使用說明書.md)。
 
 ### 未來方向
 
-- [ ] 幫 `InstallerBuilder.exe` 透過 [SignPath Foundation](https://signpath.io/solutions/open-source-community) 的免費開源方案做數位簽章（需要這個 repo 本身 + GitHub Actions 建置流程；它動態產生出來的安裝檔因為是本機編譯、不經過這個 repo 的 CI，暫時還是簽不到）
-- [ ] 多語言支援——**還沒開始，可行性待評估。** 除非真的有非中文使用者提出需求，不然優先度偏低，理由詳見專案討論過程
-- [ ] 完整性驗證的雜湊演算法升級選項（目前是 CRC32，未來可以考慮給更高安全需求的情境提供更強的雜湊）
-- [ ] 讓「輸出的安裝檔」也能被簽章（需要把編譯流程搬進 CI，是比較大的架構調整）
+- [ ] 幫 `InstallerBuilder.exe` 透過 [SignPath Foundation](https://signpath.io/solutions/open-source-community) 的免費開源方案做數位簽章（需要這個 repo 本身加上 GitHub Actions 建置流程；注意打包工具**產出**的安裝檔還是簽不到，因為那些是在使用者本機編譯出來的，不經過這個 repo 的 CI）
+- [ ] 多語言介面——**還沒開始，可行性仍在評估。** 除非真的有非中文使用者提出需求，否則優先度偏低
+- [ ] 完整性驗證的雜湊演算法升級選項（目前是 CRC32，未來可以考慮為更高安全需求的情境提供更強的密碼學雜湊）
+- [ ] 讓**輸出的安裝檔**也能被簽章（代表要把編譯流程搬進 CI，是比較大的架構調整）
 
 ### 已知限制
 
-- 打包工具本身跟它輸出的安裝檔目前都還沒有數位簽章（見〈未來方向〉）
-- 相依元件檢查（VC++ Redistributable、.NET Desktop Runtime）只做偵測，不會靜默安裝該元件本身
-- 目前沒有多語言介面，全部是繁體中文
-- 非常舊、沒更新過的 Windows 10 可能需要另外安裝 WebView2 Runtime
+- 打包工具本身、以及它產出的安裝檔，目前都還沒有數位簽章（見〈未來方向〉）。
+- 相依元件檢查（VC++ Redistributable、.NET Desktop Runtime）只做偵測，不會靜默安裝該元件本身。
+- 目前沒有多語言介面，全部是繁體中文。
+- 非常舊、沒更新過的 Windows 10 機器，可能需要另外安裝 WebView2 Runtime。
 
 ### 授權
 
