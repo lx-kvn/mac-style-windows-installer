@@ -163,6 +163,7 @@ class InstallerAPI:
         self.file_associations = []
         self.doc_icon = ""
         self.add_to_path = False
+        self.path_target_exe = ""
         self.restart_explorer_on_update = False
         self.ui_language = lang_detect.detect_system_language(SUPPORTED_UI_LANGUAGES, DEFAULT_UI_LANGUAGE)
 
@@ -210,6 +211,7 @@ class InstallerAPI:
                     self.file_associations = config.get("file_associations", [])
                     self.doc_icon = config.get("doc_icon", "")
                     self.add_to_path = bool(config.get("add_to_path", False))
+                    self.path_target_exe = config.get("path_target_exe", "")
                     self.restart_explorer_on_update = bool(config.get("restart_explorer_on_update", False))
         except Exception as e:
             print(f"[提示] 使用預設開發模式: {e}")
@@ -527,8 +529,24 @@ class InstallerAPI:
             return os.path.join(self.selected_path, self.doc_icon)
         return f"{main_exe_path},0"
 
+    def _path_target_dir(self):
+        """算出「加入 PATH」實際要加的目錄。
+
+        預設加整個安裝目錄（跟原本行為一致）；如果開發者在打包時另外指定了
+        一支執行檔（`path_target_exe`，例如跟主程式分開的 CLI 工具），改成
+        只加那支執行檔所在的目錄——如果它就在安裝根目錄，結果跟預設行為
+        相同；如果在子目錄，只有那個子目錄會被加進 PATH，不會讓整個安裝
+        目錄下所有 exe 都變成全域可呼叫。
+        """
+        if self.path_target_exe:
+            target_dir = os.path.dirname(os.path.join(self.selected_path, self.path_target_exe))
+            if target_dir:
+                return target_dir
+        return self.selected_path
+
     def _add_to_path_env(self):
         import winreg
+        target_dir = self._path_target_dir()
         # 不吞例外：理由同上，讓 PATH 寫入失敗時整個安裝流程失敗回滾。
         key = winreg.OpenKey(
             winreg.HKEY_LOCAL_MACHINE,
@@ -540,8 +558,8 @@ class InstallerAPI:
         except FileNotFoundError:
             current, reg_type = "", winreg.REG_EXPAND_SZ
         parts = [p for p in current.split(";") if p]
-        if not any(os.path.normcase(p) == os.path.normcase(self.selected_path) for p in parts):
-            parts.append(self.selected_path)
+        if not any(os.path.normcase(p) == os.path.normcase(target_dir) for p in parts):
+            parts.append(target_dir)
             winreg.SetValueEx(key, "Path", 0, reg_type, ";".join(parts))
         winreg.CloseKey(key)
 
@@ -550,6 +568,7 @@ class InstallerAPI:
         ctypes.windll.user32.SendMessageTimeoutW(
             HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment", SMTO_ABORTIFHUNG, 5000, ctypes.byref(result)
         )
+        return target_dir
 
     # ------------------------------------------------------------------
     # 主安裝流程
@@ -714,12 +733,13 @@ class InstallerAPI:
                 except Exception as e:
                     raise RuntimeError(f"檔案關聯註冊失敗：{e}") from e
                 log(f"已註冊檔案關聯: {self.file_associations}")
+            path_directory = ""
             if self.add_to_path:
                 try:
-                    self._add_to_path_env()
+                    path_directory = self._add_to_path_env()
                 except Exception as e:
                     raise RuntimeError(f"加入環境變數 PATH 失敗：{e}") from e
-                log("已加入環境變數 PATH")
+                log(f"已將 {path_directory} 加入環境變數 PATH")
 
             # 寫入安裝清單，供解除安裝時「照清單刪」使用
             self._report_progress(97, "正在寫入安裝紀錄...")
@@ -734,6 +754,7 @@ class InstallerAPI:
                 "start_menu_shortcut": True,
                 "file_associations": self.file_associations,
                 "path_added": self.add_to_path,
+                "path_directory": path_directory,
                 "restart_explorer_on_update": self.restart_explorer_on_update,
                 "installed_at": datetime.now().isoformat(),
             }

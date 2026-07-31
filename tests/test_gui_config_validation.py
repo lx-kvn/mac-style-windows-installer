@@ -40,6 +40,7 @@ class TestValidateAndBuildPackData(unittest.TestCase):
             "need_file_assoc": False,
             "use_custom_doc_icon": False,
             "add_to_path": False,
+            "path_target_exe": "",
             "restart_explorer_on_update": False,
         }
         data.update(overrides)
@@ -111,6 +112,28 @@ class TestValidateAndBuildPackData(unittest.TestCase):
         _, error = self._validate(self._base_data(main_exe="missing.exe"))
         self.assertIsNotNone(error)
         self.assertIn("不存在", error)
+
+    def test_path_target_exe_not_found_in_app_dir_is_rejected(self):
+        """backlog #1：「加入 PATH」指定的執行檔如果不在應用程式資料夾裡，
+        要擋下來，不能讓打包出去的 installer_config.json 記一個不存在的路徑。"""
+        _, error = self._validate(self._base_data(add_to_path=True, path_target_exe="missing_cli.exe"))
+        self.assertIsNotNone(error)
+
+    def test_path_target_exe_passes_through_when_add_to_path_enabled(self):
+        with open(os.path.join(self.app_dir, "cli.exe"), "wb") as f:
+            f.write(b"fake")
+        pack_data, error = self._validate(self._base_data(add_to_path=True, path_target_exe="cli.exe"))
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["path_target_exe"], "cli.exe")
+
+    def test_path_target_exe_cleared_when_add_to_path_disabled(self):
+        """add_to_path 沒勾選時，就算欄位裡殘留了值也不該送出去，
+        避免使用者取消勾選後、後端仍誤用上一次殘留的設定。"""
+        with open(os.path.join(self.app_dir, "cli.exe"), "wb") as f:
+            f.write(b"fake")
+        pack_data, error = self._validate(self._base_data(add_to_path=False, path_target_exe="cli.exe"))
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["path_target_exe"], "")
 
     def test_custom_doc_icon_checked_but_not_selected_is_rejected(self):
         _, error = self._validate(

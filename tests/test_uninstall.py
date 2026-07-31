@@ -111,6 +111,21 @@ class TestRemoveFromPath(unittest.TestCase):
         self.assertEqual(self.fake_reg.hklm(self._path_key())["Path"], "C:\\Windows;C:\\Other")
 
 
+class TestPathRemovalTarget(unittest.TestCase):
+    def test_uses_path_directory_when_present(self):
+        manifest = {"install_path": "C:\\Apps\\MyApp", "path_directory": "C:\\Apps\\MyApp\\tools"}
+        self.assertEqual(un._path_removal_target(manifest, "C:\\Apps\\MyApp"), "C:\\Apps\\MyApp\\tools")
+
+    def test_falls_back_to_install_path_when_path_directory_missing(self):
+        """舊版本安裝寫入的 manifest 沒有 path_directory 這個欄位，要退回
+        install_path，維持原本「整個安裝目錄」的行為。"""
+        manifest = {"install_path": "C:\\Apps\\MyApp"}
+        self.assertEqual(un._path_removal_target(manifest, "C:\\fallback"), "C:\\Apps\\MyApp")
+
+    def test_falls_back_to_current_dir_when_both_missing(self):
+        self.assertEqual(un._path_removal_target({}, "C:\\fallback"), "C:\\fallback")
+
+
 class TestUninstallManifestDrivenDeletion(unittest.TestCase):
     """對應 uninstall.py 檔案頭部記錄的那個真實 bug：不能『清單式刪除做得很仔細，
     最後卻無差別 rmdir 整個資料夾』。這裡直接重現 main() 裡那段判斷

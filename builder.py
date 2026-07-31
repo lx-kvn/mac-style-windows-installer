@@ -38,7 +38,7 @@ CONFIG_FILE_NAME = "installer_config.json"
 def build_all(
     app_dir, exe_name, app_name, folder_name, version, publisher, png_path, ico_path,
     main_exe, eula_texts=None, eula_default_lang="", dependencies=None, file_associations=None, doc_icon_path="",
-    add_to_path=False, restart_explorer_on_update=False, workspace_dir=".", progress_callback=None,
+    add_to_path=False, path_target_exe="", restart_explorer_on_update=False, workspace_dir=".", progress_callback=None,
 ):
     """流水線：產生配置 -> 編譯反安裝檔 -> 編譯主安裝檔
 
@@ -109,6 +109,7 @@ def build_all(
         "file_associations": file_associations,
         "doc_icon": "doc_icon.ico" if doc_icon_path else "",
         "add_to_path": bool(add_to_path),
+        "path_target_exe": path_target_exe,
         "restart_explorer_on_update": bool(restart_explorer_on_update),
     }
     config_path = os.path.join(workspace_dir, CONFIG_FILE_NAME)

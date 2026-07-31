@@ -199,7 +199,12 @@
         </div>
 
         <div class="form-group">
-            <div class="checkbox-row"><input type="checkbox" id="add_to_path"><label for="add_to_path" data-i18n="label_add_to_path">安裝後將程式路徑加入環境變數 PATH</label></div>
+            <div class="checkbox-row"><input type="checkbox" id="add_to_path" onchange="togglePathTargetField(this.checked)"><label for="add_to_path" data-i18n="label_add_to_path">安裝後將程式路徑加入環境變數 PATH</label></div>
+            <div id="path_target_section" style="display: none; margin-top: 8px;">
+                <label data-i18n="label_path_target_exe">加入 PATH 的執行檔（選填）</label>
+                <select id="path_target_exe"><option value="" data-i18n="path_target_default_option">（預設）整個安裝目錄</option></select>
+                <span class="note" data-i18n="note_path_target_exe">預設會把整個安裝目錄加進 PATH。如果應用程式除了主程式外，還附了一支獨立的命令列工具（例如放在子資料夾），可以在這裡另外指定那支執行檔，改成只把它所在的目錄加進 PATH。</span>
+            </div>
         </div>
 
         <div class="form-group">
@@ -306,6 +311,9 @@
                 檔案關聯與 PATH 設定需要以系統管理員權限執行安裝程式才會生效（本工具產生的安裝檔預設就會要求管理員權限）。
                 勾選檔案關聯後，可以另外勾選「自訂這個副檔名的文件圖示」指定一顆專屬 ICO；
                 不勾選的話，文件圖示會直接沿用應用程式本身的圖示。
+                勾選「加入 PATH」後預設會把整個安裝目錄加進 PATH；如果應用程式除了主程式外
+                還附了一支獨立的命令列工具（例如放在子資料夾），可以在下方另外指定那支執行檔，
+                改成只把它所在的目錄加進 PATH，避免整個安裝目錄下所有 exe 都變成全域可呼叫。
 
                 <h4>安裝端實際會做的事</h4>
                 單一實例鎖、EULA（有設定的話，語言依系統自動偵測）、覆蓋安裝偵測（偵測到已安裝版本會比較版本新舊，
@@ -381,6 +389,10 @@
                 installer to run with administrator rights (installers built by this tool request that by
                 default). After enabling file associations, you can optionally set a custom icon for that
                 file type; otherwise it falls back to the application's own icon.
+                Enabling "Add to PATH" adds the entire install directory by default; if the application
+                ships a separate command-line tool alongside the main program (e.g. in a subfolder), you can
+                specify that executable below to add only its own directory to PATH instead, so every exe in
+                the install directory doesn't become globally callable.
 
                 <h4>What the installer actually does</h4>
                 Single-instance lock, EULA (if configured, language auto-detected), upgrade detection
@@ -478,6 +490,9 @@
                 label_custom_doc_icon: "自訂這個副檔名的文件圖示",
                 note_custom_doc_icon: "不勾選的話，文件圖示會直接沿用應用程式本身的圖示。",
                 label_add_to_path: "安裝後將程式路徑加入環境變數 PATH",
+                label_path_target_exe: "加入 PATH 的執行檔（選填）",
+                path_target_default_option: "（預設）整個安裝目錄",
+                note_path_target_exe: "預設會把整個安裝目錄加進 PATH。如果應用程式除了主程式外，還附了一支獨立的命令列工具（例如放在子資料夾），可以在這裡另外指定那支執行檔，改成只把它所在的目錄加進 PATH。",
                 label_restart_explorer: "更新覆蓋安裝時，暫時關閉檔案總管以釋放被鎖定的檔案",
                 note_restart_explorer: "適用於應用程式有註冊 Windows 檔案總管殼層擴充功能（Shell Extension，例如右鍵選單擴充 DLL）的情況——只要檔案總管還在執行，就會鎖住這類 DLL，導致更新覆蓋時無法覆寫。勾選後，更新覆蓋安裝時會先關閉檔案總管、刪除完畢後自動重啟；使用者畫面會短暫閃爍、所有檔案總管視窗會關閉，非必要（沒有殼層擴充功能）不建議勾選。",
                 btn_submit: "開始編譯安裝檔",
@@ -552,6 +567,9 @@
                 label_custom_doc_icon: "Use a custom icon for this file type",
                 note_custom_doc_icon: "If left unchecked, the file icon falls back to the application's own icon.",
                 label_add_to_path: "Add the install path to the PATH environment variable",
+                label_path_target_exe: "Executable to add to PATH (optional)",
+                path_target_default_option: "(Default) Entire install directory",
+                note_path_target_exe: "By default the entire install directory is added to PATH. If the application ships a separate command-line tool alongside the main program (e.g. in a subfolder), you can specify it here to add only its own directory to PATH instead.",
                 label_restart_explorer: "Temporarily close File Explorer during update overwrites to release locked files",
                 note_restart_explorer: "For applications that register a Windows File Explorer shell extension (e.g. a right-click context menu DLL) — as long as Explorer is running, it keeps that DLL locked, which can block overwrites during an update. When enabled, Explorer is closed before deleting old files during an update overwrite and restarted afterward; the screen will flicker briefly and all Explorer windows will close. Not recommended unless you actually have a shell extension.",
                 btn_submit: "Build Installer",
@@ -762,6 +780,10 @@
         }
         window.addEventListener('pywebviewready', async () => { await initLanguage(); await checkEnvironmentOnLoad(); });
         function toggleTheme() { const body = document.body; const themeText = document.getElementById('theme-btn-text'); if (body.classList.contains('dark')) { body.classList.remove('dark'); themeText.innerText = t('theme_dark'); } else { body.classList.add('dark'); themeText.innerText = t('theme_light'); } }
+        function togglePathTargetField(checked) {
+            document.getElementById('path_target_section').style.display = checked ? 'block' : 'none';
+        }
+
         async function browseFolder() {
             const path = await pywebview.api.select_app_dir();
             if (path) {
@@ -774,6 +796,9 @@
                 } else {
                     select.innerHTML = `<option value="">${t('select_placeholder')}</option>` + exeList.map(p => `<option value="${p}">${p}</option>`).join('');
                 }
+
+                const pathTargetSelect = document.getElementById('path_target_exe');
+                pathTargetSelect.innerHTML = `<option value="">${t('path_target_default_option')}</option>` + exeList.map(p => `<option value="${p}">${p}</option>`).join('');
             }
         }
         async function browsePng() { const path = await pywebview.api.select_png_icon(); if(path) document.getElementById('png_icon_path').innerText = path; }
@@ -871,6 +896,7 @@
                 need_file_assoc: document.getElementById('need_file_assoc').checked,
                 use_custom_doc_icon: document.getElementById('need_file_assoc').checked && document.getElementById('custom_doc_icon').checked,
                 add_to_path: document.getElementById('add_to_path').checked,
+                path_target_exe: document.getElementById('add_to_path').checked ? document.getElementById('path_target_exe').value : '',
                 restart_explorer_on_update: document.getElementById('restart_explorer_on_update').checked,
             };
             const result = await pywebview.api.start_pack(data);

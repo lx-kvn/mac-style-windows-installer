@@ -154,6 +154,19 @@ def _should_restart_explorer(silent, manifest, argv):
     return ("--restart-explorer" in argv) or bool(manifest.get("restart_explorer_on_update", False))
 
 
+def _path_removal_target(manifest, current_dir):
+    """算出解除安裝時要從 PATH 移除的目錄字串。
+
+    `path_directory` 是安裝當下 installer_core.py 實際加進 PATH 的目錄：預設
+    是整個安裝目錄，但如果開發者打包時指定了 path_target_exe（例如跟主程式
+    分開的 CLI 工具），加進 PATH 的其實是那支執行檔所在的子目錄——必須刪
+    一模一樣的字串才能真的移除乾淨，刪 install_path 反而會刪不掉。
+    沒有這個欄位（舊版本安裝的 manifest，這個功能還不存在時寫入的）就退回
+    install_path，維持原本「整個安裝目錄」的行為。
+    """
+    return manifest.get("path_directory") or manifest.get("install_path", current_dir)
+
+
 def remove_from_path(install_path):
     try:
         key = winreg.OpenKey(
@@ -245,7 +258,7 @@ def main():
 
     if manifest.get("path_added"):
         print("[步驟 4] 正在從環境變數 PATH 移除安裝路徑...")
-        remove_from_path(manifest.get("install_path", current_dir))
+        remove_from_path(_path_removal_target(manifest, current_dir))
         log_lines.append("已從 PATH 移除安裝路徑")
 
     print("[步驟 5] 正在刪除安裝目錄下的檔案...")

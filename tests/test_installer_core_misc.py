@@ -182,6 +182,30 @@ class TestAddToPathEnv(unittest.TestCase):
         with self.assertRaises(PermissionError):
             api._add_to_path_env()
 
+    def test_adds_target_exe_subdirectory_when_path_target_exe_specified(self):
+        """backlog #1：path_target_exe 指定一支跟主程式分開的 CLI 工具時，
+        只把它所在的子目錄加進 PATH，不是整個安裝目錄。"""
+        self.fake_reg.set_hklm(self._path_key(), {})
+        api = make_installer_api(selected_path="C:\\Apps\\MyApp", path_target_exe="tools\\cli.exe")
+        with mock.patch("installer_core.ctypes.windll.user32.SendMessageTimeoutW"):
+            added_dir = api._add_to_path_env()
+        self.assertEqual(added_dir, "C:\\Apps\\MyApp\\tools")
+        self.assertEqual(self.fake_reg.hklm(self._path_key())["Path"], "C:\\Apps\\MyApp\\tools")
+
+    def test_falls_back_to_install_root_when_target_exe_in_root(self):
+        self.fake_reg.set_hklm(self._path_key(), {})
+        api = make_installer_api(selected_path="C:\\Apps\\MyApp", path_target_exe="main.exe")
+        with mock.patch("installer_core.ctypes.windll.user32.SendMessageTimeoutW"):
+            added_dir = api._add_to_path_env()
+        self.assertEqual(added_dir, "C:\\Apps\\MyApp")
+
+    def test_falls_back_to_install_root_when_no_path_target_exe(self):
+        self.fake_reg.set_hklm(self._path_key(), {})
+        api = make_installer_api(selected_path="C:\\Apps\\MyApp", path_target_exe="")
+        with mock.patch("installer_core.ctypes.windll.user32.SendMessageTimeoutW"):
+            added_dir = api._add_to_path_env()
+        self.assertEqual(added_dir, "C:\\Apps\\MyApp")
+
 
 class TestUpgradeBackup(unittest.TestCase):
     """_backup_existing_install() / _restore_upgrade_backup() /

@@ -229,6 +229,7 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     need_file_assoc = bool(data.get("need_file_assoc", False))
     use_custom_doc_icon = bool(data.get("use_custom_doc_icon", False))
     add_to_path = bool(data.get("add_to_path", False))
+    path_target_exe = data.get("path_target_exe", "").strip()
     restart_explorer_on_update = bool(data.get("restart_explorer_on_update", False))
 
     if not app_name or not version or not publisher or not exe_name:
@@ -254,6 +255,9 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
 
     if not os.path.exists(os.path.join(app_dir, main_exe)):
         return None, "欄位驗證失敗：<br>選擇的主要執行檔不存在於應用程式資料夾中，請重新選擇。"
+
+    if add_to_path and path_target_exe and not os.path.exists(os.path.join(app_dir, path_target_exe)):
+        return None, "欄位驗證失敗：<br>「加入 PATH」指定的執行檔不存在於應用程式資料夾中，請重新選擇。"
 
     doc_icon_path = ""
     if use_custom_doc_icon:
@@ -288,6 +292,7 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     pack_data["eula_default_lang"] = eula_default_lang
     pack_data["main_exe"] = main_exe
     pack_data["add_to_path"] = add_to_path
+    pack_data["path_target_exe"] = path_target_exe if add_to_path else ""
     pack_data["restart_explorer_on_update"] = restart_explorer_on_update
     return pack_data, None
 
@@ -491,6 +496,7 @@ class ConfigAPI:
                 file_associations=data.get("file_associations", []),
                 doc_icon_path=data.get("doc_icon_path", ""),
                 add_to_path=data.get("add_to_path", False),
+                path_target_exe=data.get("path_target_exe", ""),
                 restart_explorer_on_update=data.get("restart_explorer_on_update", False),
                 workspace_dir=workspace_dir,
                 progress_callback=progress_handler,
