@@ -88,6 +88,28 @@ class TestShouldRestartExplorer(unittest.TestCase):
         self.assertFalse(result)
 
 
+class TestUpgradeSelfDeleteGating(unittest.TestCase):
+    """真實抓到的 bug：main() 尾端的自我刪除是 fire-and-forget（背景、不等待
+    的 cmd.exe，先 ping 製造約 1 秒延遲才真正 del/rmdir）。更新覆蓋安裝時，
+    installer_core.py 用 subprocess.run() 同步呼叫舊版 uninstall.exe，行程
+    一結束就繼續複製新版本檔案——這時候背景那個延遲後才執行的 rmdir /s /q
+    根本還沒發生，如果複製時間跨過那個延遲視窗，會把整個資料夾（含新複製
+    好的檔案）一起砍掉，導致「安裝回報成功但檔案沒有複製完整」。修正：
+    --upgrade 旗標讓舊版 uninstall.exe 完全不排這段背景指令。"""
+
+    def test_is_upgrade_call_detects_flag(self):
+        self.assertTrue(un._is_upgrade_call(["uninstall.exe", "--silent", "--upgrade"]))
+
+    def test_is_upgrade_call_false_without_flag(self):
+        self.assertFalse(un._is_upgrade_call(["uninstall.exe", "--silent"]))
+
+    def test_self_delete_skipped_when_upgrade(self):
+        self.assertFalse(un._should_schedule_self_delete(is_upgrade=True))
+
+    def test_self_delete_scheduled_when_not_upgrade(self):
+        self.assertTrue(un._should_schedule_self_delete(is_upgrade=False))
+
+
 class TestRemoveFromPath(unittest.TestCase):
     def setUp(self):
         self.fake_reg = FakeWinReg()

@@ -40,6 +40,21 @@ uninstall.exe，讀到的是舊版本安裝當下寫的舊 manifest，跟使用�
 installer_core.py）帶著自己這次的設定明確傳進來，覆蓋掉舊 manifest 的值；
 沒帶這個旗標時（手動雙擊解除安裝、或不是被更新流程觸發的純靜默解除安裝）
 才退回讀 manifest 自己的設定。
+
+修正紀錄（真實抓到的 bug，導致「安裝程式回報成功，但檔案沒有複製完整」，
+多發生在更新覆蓋安裝）：main() 尾端的自我刪除是 fire-and-forget（先前景
+清理完，最後才呼叫不等待的 subprocess.Popen() 開一個背景 cmd.exe，
+用 ping 製造約 1 秒延遲後才真正 del/rmdir）。installer_core.py 的
+run_upgrade_uninstall() 是用 subprocess.run() 同步呼叫這支舊版
+uninstall.exe，行程一結束就繼續複製新版本檔案——這時候背景那個延遲後
+才會執行的 rmdir /s /q 根本還沒發生，如果複製時間跨過那個延遲視窗，
+背景指令觸發時會把整個資料夾（含已經複製好的新檔案）砍掉。現在新增
+--upgrade 命令列旗標：run_upgrade_uninstall() 呼叫時一律帶上，
+_should_schedule_self_delete() 判斷為 True 時完全不排這段背景指令——
+這支舊版 exe 的行程已經確定結束、不需要延遲刪除，資料夾跟 uninstall.exe
+本身都會被新版本安裝流程直接複製覆蓋，不需要也不該被刪除或重建。
+一般手動雙擊解除安裝、或不是被更新流程觸發的純靜默解除安裝，沒有這個
+旗標，行為完全不變。
 """
 
 import os
@@ -154,6 +169,42 @@ def _should_restart_explorer(silent, manifest, argv):
     return ("--restart-explorer" in argv) or bool(manifest.get("restart_explorer_on_update", False))
 
 
+def _is_upgrade_call(argv):
+    """是否由 installer_core.py 的 run_upgrade_uninstall()（更新覆蓋安裝流程）
+    呼叫，而不是一般的（互動式或企業批次靜默）解除安裝。見
+    _should_schedule_self_delete() 的說明，這個旗標決定要不要完全跳過
+    main() 尾端那段背景自我刪除指令。
+    """
+    return "--upgrade" in argv
+
+
+def _should_schedule_self_delete(is_upgrade):
+    """決定要不要排出 main() 尾端那段延遲執行的背景自我刪除指令
+    （`ping` 製造延遲 + `del` 刪除自己的 exe + 視情況 `rmdir /s /q` 整個
+    安裝目錄）。
+
+    真實抓到的 bug：這段指令是 fire-and-forget（`subprocess.Popen()`
+    呼叫完立刻回傳，不等待），`installer_core.py` 的
+    `run_upgrade_uninstall()` 是用 `subprocess.run()` **同步**呼叫這支
+    舊版 uninstall.exe，行程一結束就繼續往下跑，這時候背景那個延遲約
+    1 秒後才會真正執行的 `rmdir /s /q` 根本還沒發生。新版本安裝流程
+    緊接著就會開始把檔案複製進同一個目錄——如果複製時間跨過那個延遲
+    視窗，背景指令觸發時會把「整個資料夾」（含已經複製好的新檔案）
+    砍掉，導致安裝程式回報成功、但實際檔案沒有複製完整，且只發生在
+    更新覆蓋安裝（唯一會同時存在「舊版本背景自刪」跟「新版本複製檔案」
+    競爭同一個資料夾的情境）。
+
+    修法：`is_upgrade`（呼叫端帶了 `--upgrade` 旗標）為真時，完全不排
+    這段背景指令——這支舊版 uninstall.exe 的行程本身已經確定執行完畢
+    即將結束，它自己的 exe 檔案已經沒有任何行程占用，不需要靠延遲的
+    背景指令才能刪除；`installer_core.py` 稍後本來就會把新版本自己的
+    `uninstall.exe` 複製到同一個路徑蓋過去，資料夾本身也會被新版本
+    重用，不需要也不該被刪除或重建。一般手動雙擊解除安裝、或不是被
+    更新流程觸發的純靜默解除安裝，`is_upgrade` 是 False，行為不變。
+    """
+    return not is_upgrade
+
+
 def _path_removal_target(manifest, current_dir):
     """算出解除安裝時要從 PATH 移除的目錄字串。
 
@@ -190,6 +241,7 @@ def remove_from_path(install_path):
 
 def main():
     silent = "--silent" in sys.argv
+    is_upgrade = _is_upgrade_call(sys.argv)
 
     if not is_admin():
         print("[錯誤] 請以系統管理員身分執行此程式。")
@@ -345,6 +397,16 @@ def main():
             f.write("\n".join(log_lines))
     except Exception:
         pass
+
+    if not _should_schedule_self_delete(is_upgrade):
+        # 更新覆蓋安裝流程呼叫的是「舊版本」的 uninstall.exe，接下來
+        # installer_core.py 馬上就要在同一個目錄裡寫入新版本的檔案
+        # （包含覆蓋這支 uninstall.exe 自己）——不排背景自我刪除指令，
+        # 見 _should_schedule_self_delete() 的完整說明。
+        print("\n" + "=" * 40)
+        print("解除安裝完成（更新覆蓋安裝流程），交由新版本接手安裝。")
+        print("=" * 40)
+        return
 
     print("\n" + "=" * 40)
     print("解除安裝完成！")

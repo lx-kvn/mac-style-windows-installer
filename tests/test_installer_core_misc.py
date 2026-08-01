@@ -376,6 +376,23 @@ class TestRunUpgradeUninstall(unittest.TestCase):
 
         self.assertNotIn("--restart-explorer", captured_cmd["cmd"])
 
+    def test_always_passes_upgrade_flag_to_old_uninstall_exe(self):
+        """真實抓到的 bug：舊版 uninstall.exe 尾端的自我刪除是背景、不等待的
+        cmd.exe（先延遲約 1 秒才真正 del/rmdir）。這裡用 subprocess.run()
+        同步呼叫完就繼續複製新版本檔案，如果複製時間跨過那個延遲視窗，
+        背景指令觸發時會把整個資料夾（含新複製好的檔案）一起砍掉，導致
+        「安裝回報成功但檔案沒有複製完整」。修正後一律帶 --upgrade 旗標，
+        讓舊版 uninstall.exe 完全不排那段背景指令。"""
+        captured_cmd = {}
+
+        def fake_subprocess_run(cmd, **kwargs):
+            captured_cmd["cmd"] = cmd
+
+        with mock.patch("installer_core.subprocess.run", side_effect=fake_subprocess_run):
+            self.api.run_upgrade_uninstall()
+
+        self.assertIn("--upgrade", captured_cmd["cmd"])
+
 
 class TestWaitForSelectedPathWritable(unittest.TestCase):
     """_wait_for_selected_path_writable()：更新覆蓋安裝後，舊版本 uninstall.exe

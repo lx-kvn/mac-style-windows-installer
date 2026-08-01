@@ -363,18 +363,26 @@ class InstallerAPI:
         self._upgrade_backup_original_path = None
 
     def _wait_for_selected_path_writable(self, timeout=10, interval=0.5):
-        """更新覆蓋安裝後，安裝目標路徑可能還卡在 Windows 的 pending-delete
-        狀態：舊版本 uninstall.exe 是用背景、不等待（fire-and-forget）的
-        cmd.exe 延遲自我刪除、視情況把整個資料夾一起 rmdir（見 uninstall.py），
-        run_upgrade_uninstall() 呼叫完不保證那個背景流程已經真的跑完——資料夾
-        可能還有沒放掉的 handle，這時候在同一個路徑建立新目錄會被系統擋下來、
-        丟出 PermissionError，而且這跟是不是系統管理員身分完全無關（不是權限
-        被拒絕，是那個目錄物件還沒真的從檔案系統移除）。
+        """更新覆蓋安裝後，安裝目標路徑理論上偶爾仍可能短暫卡在 Windows 的
+        pending-delete 狀態（例如防毒軟體正在掃描剛被刪除/剛被觸碰的檔案、
+        NTFS 中繼資料更新有些微延遲），這時候在同一個路徑建立新目錄會被
+        系統擋下來、丟出 PermissionError，而且這跟是不是系統管理員身分
+        完全無關（不是權限被拒絕，是那個目錄物件還沒真的從檔案系統移除）。
 
         這裡用短暫重試等它真的釋放，取代原本賭一個固定等待時間夠不夠的做法。
         重試期間遇到的 PermissionError 都是預期中的過渡狀態，吞掉繼續等即可；
         逾時還是不行，就不再攔，讓後面真正的複製流程去踢出原本的失敗處理
         （回滾 + 回報使用者）。
+
+        修正紀錄：這裡原本的主要成因是舊版本 uninstall.exe 用背景、不等待
+        （fire-and-forget）的 cmd.exe 延遲自我刪除、視情況把整個資料夾一起
+        rmdir，run_upgrade_uninstall() 呼叫完全不保證那個背景流程已經真的
+        跑完——這其實是個更嚴重的競態（那個背景 rmdir 事後觸發時會把新版本
+        已經複製好的檔案一起砍掉，導致「安裝回報成功但檔案不完整」），已經
+        改用 --upgrade 命令列旗標請舊版 uninstall.exe 完全不排這段背景指令
+        來根治（見 uninstall.py 的 _should_schedule_self_delete()），不是
+        靠這裡的重試等待解決。這個函式現在只需要處理殘餘的、影響小得多的
+        單一檔案層級 pending-delete 情況。
         """
         deadline = time.time() + timeout
         while True:
@@ -402,6 +410,21 @@ class InstallerAPI:
         restart_explorer_on_update 設定透過命令列參數明確傳給舊版
         uninstall.exe，覆蓋掉它自己那份可能過期的 manifest 設定
         （見 uninstall.py 對 --restart-explorer 的處理）。
+
+        修正紀錄（真實抓到的 bug，導致「安裝回報成功但檔案沒有複製完整」，
+        只發生在更新覆蓋安裝）：呼叫舊版 uninstall.exe 時一律加上 --upgrade
+        旗標，讓它跳過尾端那段延遲執行、不等待的背景自我刪除／整個資料夾
+        rmdir 指令——那段指令原本會在這裡的 subprocess.run() 已經返回、
+        新版本已經開始複製檔案之後的某個時間點才真正觸發，如果複製時間
+        跨過那個延遲視窗，會把整個資料夾（含新複製好的檔案）一起砍掉。
+        詳細根因見 uninstall.py 的 _should_schedule_self_delete()。
+
+        已知限制：如果目前安裝的舊版本本身是用更早、還沒有 --upgrade 支援
+        的舊版 uninstall.exe，這個旗標對它沒有意義（舊版 exe 根本不認得
+        這個參數，會被當成一般未知引數忽略，仍然照舊排出那段有競態風險的
+        背景自我刪除指令）——跟 --restart-explorer 的已知限制是同一類情況，
+        第一次從這麼舊的版本更新可能仍會遇到這個問題，等新版本安裝完成、
+        往後再次更新時才會是「新版本呼叫新版本」，這個修正才能確實生效。
         """
         info = self.check_existing_install()
         if not info.get("exists"):
@@ -417,7 +440,12 @@ class InstallerAPI:
 
         try:
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            cmd = [uninstall_exe, "--silent"]
+            # --upgrade：告訴舊版 uninstall.exe 這是更新覆蓋安裝呼叫的，
+            # 不要排出它尾端那段延遲執行的背景自我刪除／整個資料夾 rmdir
+            # 指令，避免那段非同步指令事後把這次新複製的檔案一起砍掉
+            # （見 _wait_for_selected_path_writable() docstring 與
+            # uninstall.py 的 _should_schedule_self_delete()）。
+            cmd = [uninstall_exe, "--silent", "--upgrade"]
             if self.restart_explorer_on_update:
                 cmd.append("--restart-explorer")
             subprocess.run(cmd, timeout=30, creationflags=creationflags)
