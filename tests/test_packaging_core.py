@@ -322,6 +322,39 @@ class TestValidateAndBuildPackData(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(pack_data["doc_icon_path"], "custom.ico")
 
+    def test_doc_icons_per_extension_passes_through(self):
+        pack_data, error = self._validate(self._base_data(
+            need_file_assoc=True, file_associations=".a, .b",
+            doc_icons={".a": "icon_a.ico", ".b": "icon_b.ico"},
+        ))
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["doc_icons"], {".a": "icon_a.ico", ".b": "icon_b.ico"})
+
+    def test_doc_icons_extension_not_in_file_associations_is_rejected(self):
+        _, error = self._validate(self._base_data(
+            need_file_assoc=True, file_associations=".a", doc_icons={".b": "icon_b.ico"},
+        ))
+        self.assertIsNotNone(error)
+        self.assertIn(".b", error)
+
+    def test_doc_icons_normalizes_missing_dot_and_case(self):
+        pack_data, error = self._validate(self._base_data(
+            need_file_assoc=True, file_associations=".a", doc_icons={"A": "icon_a.ico"},
+        ))
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["doc_icons"], {".a": "icon_a.ico"})
+
+    def test_doc_icons_non_ico_value_is_rejected(self):
+        _, error = self._validate(self._base_data(
+            need_file_assoc=True, file_associations=".a", doc_icons={".a": "icon_a.png"},
+        ))
+        self.assertIsNotNone(error)
+
+    def test_doc_icons_defaults_to_empty_dict(self):
+        pack_data, error = self._validate(self._base_data())
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["doc_icons"], {})
+
     def test_empty_app_dir_is_rejected(self):
         """驗證順序上，main_exe 是否存在的檢查排在「資料夾是否為空」之前，
         所以只要 main_exe 找不到（空資料夾一定找不到），錯誤訊息會是

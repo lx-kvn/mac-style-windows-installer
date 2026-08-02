@@ -75,7 +75,8 @@ python builder_cli.py pack --config app.json [--其他 flag 覆蓋個別欄位..
 | `app_dir` | `--app-dir` | 是 | 應用程式內容資料夾 |
 | `png_icon` | `--png-icon` | 是 | 拖拽介面用的 PNG 圖示 |
 | `ico_icon` | `--ico-icon` | 是 | 安裝檔封面用的 ICO 圖示 |
-| `doc_icon` | `--doc-icon` | 否 | 檔案關聯的自訂文件圖示（ICO）；有填就等同 GUI 版「勾選自訂文件圖示」 |
+| `doc_icon` | `--doc-icon` | 否 | 檔案關聯的自訂文件圖示（ICO），套用到所有 `file_associations` 裡沒有在 `doc_icons` 個別指定的副檔名；有填就等同 GUI 版「勾選自訂文件圖示」 |
+| `doc_icons` | （只能透過 JSON） | 否 | 字典 `{副檔名: ICO 路徑}`，讓不同副檔名各自套用不同圖示（例如 `.a` 用一張、`.b` 用另一張），優先於 `doc_icon`；沒列出的副檔名 fallback 用 `doc_icon`，兩者都沒有就沿用主程式圖示。跟 `eula_texts` 一樣是字典結構，沒有對應的命令列 flag |
 | `app_name` | `--app-name` | 是 | 顯示給使用者看的應用程式名稱，可以是中文 |
 | `folder_name` | `--folder-name` | 否 | 安裝路徑用的名稱，建議英數字，留空沿用 `app_name` |
 | `version` | `--version` | 是 | 應用程式版本號，例如 `1.0.0` |

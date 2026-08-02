@@ -23,8 +23,17 @@ def prog_id(ext):
     return f"AppFile{ext.replace('.', '')}"
 
 
-def register(extensions, main_exe_path, app_name, icon_ref, log=None, registry=_real_winreg):
+def register(extensions, main_exe_path, app_name, icon_refs, log=None, registry=_real_winreg):
     """把 extensions 清單裡每個副檔名關聯到 main_exe_path。
+
+    icon_refs：字典 {副檔名: DefaultIcon 要寫的值}，讓每個副檔名可以各自
+    設定不同的圖示（例如 .a 跟 .b 用不同 ICO）——每個副檔名本來就有自己
+    獨立的 ProgID（見 prog_id()），DefaultIcon 是掛在 ProgID 底下的子機碼，
+    天生就互不影響，這裡只是把「所有副檔名共用同一個圖示」這個呼叫端假設
+    拿掉。缺少某個副檔名的對應項目時，退回 "{main_exe_path},0"（沿用主
+    程式圖示），呼叫端（installer_core.py）通常會先把「共用圖示」/「沒設
+    定就用主程式圖示」這幾層 fallback 算好、每個副檔名都給一個值，這裡的
+    退回只是最後一道保險。
 
     不吞例外：ProgID/DefaultIcon/command 這幾個核心機碼寫失敗會直接往外拋，
     交給呼叫端判斷是否要整個安裝失敗回滾，不要讓使用者以為關聯成功了。
@@ -34,6 +43,7 @@ def register(extensions, main_exe_path, app_name, icon_ref, log=None, registry=_
         return
     for ext in extensions:
         pid = prog_id(ext)
+        icon_ref = icon_refs.get(ext, f"{main_exe_path},0")
         with registry.CreateKey(registry.HKEY_LOCAL_MACHINE, f"Software\\Classes\\{ext}") as key:
             registry.SetValueEx(key, "", 0, registry.REG_SZ, pid)
         with registry.CreateKey(registry.HKEY_LOCAL_MACHINE, f"Software\\Classes\\{pid}") as key:

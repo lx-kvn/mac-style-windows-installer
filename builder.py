@@ -30,6 +30,13 @@ builder.py
     用途是讓 CLI 工具不需要系統管理員權限就能執行；實際的落地/回滾/解除
     安裝邏輯都在 installer_core.py/uninstall.py，這裡只是把清單原封不動
     寫進 installer_config.json）。
+  - 新增欄位：doc_icons（字典 {副檔名: 圖示來源路徑}，讓不同副檔名的檔案
+    關聯可以各自套用不同 ICO，例如 .a 跟 .b 用不同圖示，不是全部共用同一張
+    doc_icon）。每個副檔名各自複製一份固定命名的圖示（doc_icon_<副檔名>.ico）
+    內嵌進安裝檔，寫進 installer_config.json 的 "doc_icons" 是
+    {副檔名: 內嵌檔名} 這個轉換後的對照表；installer_core.py 的
+    _resolve_doc_icon_refs() 負責決定每個副檔名實際要用哪張圖示（優先順序：
+    這個副檔名自己的 doc_icons 設定 -> 共用的 doc_icon -> 主程式圖示）。
 """
 
 import os
@@ -43,7 +50,7 @@ CONFIG_FILE_NAME = "installer_config.json"
 def build_all(
     app_dir, exe_name, app_name, folder_name, version, publisher, png_path, ico_path,
     main_exe, eula_texts=None, eula_default_lang="", dependencies=None, file_associations=None, doc_icon_path="",
-    add_to_path=False, path_target_exe="", local_appdata_files=None,
+    doc_icons=None, add_to_path=False, path_target_exe="", local_appdata_files=None,
     restart_explorer_on_update=False, workspace_dir=".", progress_callback=None,
 ):
     """流水線：產生配置 -> 編譯反安裝檔 -> 編譯主安裝檔
@@ -77,6 +84,7 @@ def build_all(
 
     dependencies = dependencies or []
     file_associations = file_associations or []
+    doc_icons = doc_icons or {}
     local_appdata_files = local_appdata_files or []
     folder_name = folder_name or app_name
 
@@ -103,6 +111,10 @@ def build_all(
 
     # 步驟 1：動態生成設定配置（安裝端與解除安裝端都會讀這份檔案）
     report(10, "正在配置封裝參數與複製介面圖示...", cap=15, time_constant=2)
+    # 每個副檔名各自的專屬圖示（見 doc_icons 參數）用固定命名規則
+    # doc_icon_<副檔名去掉點>.ico 內嵌，跟共用的 doc_icon.ico 是分開的檔案，
+    # 彼此不會互相覆蓋，installer_core.py 也是靠這個固定檔名去複製/引用。
+    doc_icons_embedded = {ext: f"doc_icon_{ext.lstrip('.')}.ico" for ext in doc_icons}
     config_content = {
         "app_name": app_name,
         "display_name": app_name,
@@ -115,6 +127,7 @@ def build_all(
         "dependencies": dependencies,
         "file_associations": file_associations,
         "doc_icon": "doc_icon.ico" if doc_icon_path else "",
+        "doc_icons": doc_icons_embedded,
         "add_to_path": bool(add_to_path),
         "path_target_exe": path_target_exe,
         "local_appdata_files": local_appdata_files,
@@ -187,6 +200,14 @@ def build_all(
         temp_doc_icon = os.path.join(workspace_dir, "doc_icon.ico")
         shutil.copy(doc_icon_path, temp_doc_icon)
         cmd.append(f"--add-data={temp_doc_icon};.")
+    temp_doc_icons = []
+    for ext, src_path in doc_icons.items():
+        # 同上，每個副檔名各自複製一份固定命名的圖示，避免不同副檔名剛好
+        # 選了同名但內容不同的原始檔案時互相覆蓋。
+        temp_path = os.path.join(workspace_dir, doc_icons_embedded[ext])
+        shutil.copy(src_path, temp_path)
+        temp_doc_icons.append(temp_path)
+        cmd.append(f"--add-data={temp_path};.")
     cmd.append("installer_core.py")
 
     res_installer = subprocess.run(
@@ -203,6 +224,9 @@ def build_all(
     temp_doc_icon = os.path.join(workspace_dir, "doc_icon.ico")
     if os.path.exists(temp_doc_icon):
         os.remove(temp_doc_icon)
+    for temp_path in temp_doc_icons:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
     if res_installer.returncode != 0:
         tail = ((res_installer.stdout or "") + "\n" + (res_installer.stderr or ""))[-1500:]

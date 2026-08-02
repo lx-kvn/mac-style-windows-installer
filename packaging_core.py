@@ -264,10 +264,32 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
                 ext = "." + ext
             file_associations.append(ext.lower())
 
+    # 每個副檔名各自的專屬文件圖示（選填）：{副檔名: 圖示絕對路徑}，
+    # 不在這裡指定的副檔名會 fallback 用共用的 doc_icon，兩者都沒有就沿用
+    # 主程式圖示（實際的 fallback 順序在 installer_core.py 的
+    # _resolve_doc_icon_ref()）。
+    doc_icons_raw = data.get("doc_icons", {}) or {}
+    doc_icons = {}
+    for raw_ext, icon_path in doc_icons_raw.items():
+        ext = str(raw_ext).strip().lower()
+        if not ext:
+            continue
+        if not ext.startswith("."):
+            ext = "." + ext
+        icon_path = str(icon_path or "").strip()
+        if not icon_path:
+            continue
+        if ext not in file_associations:
+            return None, f"欄位驗證失敗：<br>幫副檔名「{ext}」設定了專屬圖示，但它不在檔案關聯清單裡，請先把它加進檔案關聯清單，或移除這個圖示設定。"
+        if not icon_path.lower().endswith(".ico"):
+            return None, f"欄位驗證失敗：<br>副檔名「{ext}」指定的專屬圖示不是有效的 ICO 檔案，請重新選擇。"
+        doc_icons[ext] = icon_path
+
     pack_data = dict(data)
     pack_data["folder_name"] = folder_name
     pack_data["file_associations"] = file_associations
     pack_data["doc_icon_path"] = doc_icon_path
+    pack_data["doc_icons"] = doc_icons
     pack_data["dependencies"] = dependencies
     pack_data["eula_texts"] = eula_texts
     pack_data["eula_default_lang"] = eula_default_lang

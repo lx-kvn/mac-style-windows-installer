@@ -166,6 +166,63 @@ class TestConfigAssembly(BuildAllTestBase):
         self._call_build_all(doc_icon_path=doc_icon_src)
         self.assertFalse(os.path.exists(os.path.join(self.workspace_dir, "doc_icon.ico")))
 
+    def test_doc_icons_per_extension_produce_named_config_entries_and_add_data(self):
+        """.a 跟 .b 用不同 ICO：每個副檔名各自複製一份固定命名的圖示，
+        installer_config.json 的 doc_icons 要記對照表，PyInstaller 指令
+        要把每一張都內嵌進去。"""
+        icon_a_src = os.path.join(self.app_dir, "a.ico")
+        icon_b_src = os.path.join(self.app_dir, "b.ico")
+        with open(icon_a_src, "wb") as f:
+            f.write(b"ICON_A")
+        with open(icon_b_src, "wb") as f:
+            f.write(b"ICON_B")
+        captured = {}
+        captured_cmd = {}
+
+        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+            if "uninstall.py" in cmd:
+                os.makedirs(self.dist_dir, exist_ok=True)
+                with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
+                    f.write(b"FAKE")
+            else:
+                with open(os.path.join(self.workspace_dir, "installer_config.json"), encoding="utf-8") as f:
+                    captured.update(json.load(f))
+                captured_cmd["cmd"] = cmd
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        self._call_build_all(
+            run_side_effect=fake_run,
+            file_associations=[".a", ".b"],
+            doc_icons={".a": icon_a_src, ".b": icon_b_src},
+        )
+
+        self.assertEqual(captured["doc_icons"], {".a": "doc_icon_a.ico", ".b": "doc_icon_b.ico"})
+        self.assertTrue(any("doc_icon_a.ico;." in part for part in captured_cmd["cmd"]))
+        self.assertTrue(any("doc_icon_b.ico;." in part for part in captured_cmd["cmd"]))
+
+    def test_doc_icons_temp_files_are_cleaned_up_after_build(self):
+        icon_a_src = os.path.join(self.app_dir, "a.ico")
+        with open(icon_a_src, "wb") as f:
+            f.write(b"ICON_A")
+        self._call_build_all(file_associations=[".a"], doc_icons={".a": icon_a_src})
+        self.assertFalse(os.path.exists(os.path.join(self.workspace_dir, "doc_icon_a.ico")))
+
+    def test_no_doc_icons_produces_empty_config_entry(self):
+        captured = {}
+
+        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+            if "uninstall.py" in cmd:
+                os.makedirs(self.dist_dir, exist_ok=True)
+                with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
+                    f.write(b"FAKE")
+            else:
+                with open(os.path.join(self.workspace_dir, "installer_config.json"), encoding="utf-8") as f:
+                    captured.update(json.load(f))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        self._call_build_all(run_side_effect=fake_run)
+        self.assertEqual(captured["doc_icons"], {})
+
 
 class TestErrorPaths(BuildAllTestBase):
     def test_missing_ui_dir_raises(self):

@@ -33,6 +33,7 @@ TEMPLATE = {
     "png_icon": "C:\\path\\to\\drag_icon.png",
     "ico_icon": "C:\\path\\to\\cover_icon.ico",
     "doc_icon": "",
+    "doc_icons": {},
     "app_name": "MyCustomApp",
     "folder_name": "",
     "version": "1.0.0",
@@ -152,6 +153,7 @@ def _load_pack_input(args):
     data.setdefault("need_file_assoc", bool(data.get("file_associations")))
     data.setdefault("use_custom_doc_icon", bool(doc_icon_path_selected))
     data.setdefault("eula_texts", data.get("eula_texts", {}))
+    data.setdefault("doc_icons", data.get("doc_icons", {}))
     data.setdefault("eula_default_lang", data.get("eula_default_lang", ""))
 
     return data, app_dir, png_path, ico_path, doc_icon_path_selected
@@ -205,6 +207,7 @@ def cmd_pack(args):
             dependencies=pack_data.get("dependencies", []),
             file_associations=pack_data.get("file_associations", []),
             doc_icon_path=pack_data.get("doc_icon_path", ""),
+            doc_icons=pack_data.get("doc_icons", {}),
             add_to_path=pack_data.get("add_to_path", False),
             path_target_exe=pack_data.get("path_target_exe", ""),
             local_appdata_files=pack_data.get("local_appdata_files", []),

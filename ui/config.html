@@ -187,7 +187,7 @@
 
         <div class="form-group">
             <div class="checkbox-row"><input type="checkbox" id="need_file_assoc" onchange="toggleFileAssocFields(this.checked)"><label for="need_file_assoc" data-i18n="label_file_assoc">需要註冊檔案關聯</label></div>
-            <input type="text" id="file_assoc_input" placeholder="輸入副檔名，以逗號分隔，例如: .xyz, .abc" data-i18n-placeholder="ph_file_assoc" style="display: none; margin-top: 6px;">
+            <input type="text" id="file_assoc_input" placeholder="輸入副檔名，以逗號分隔，例如: .xyz, .abc" data-i18n-placeholder="ph_file_assoc" style="display: none; margin-top: 6px;" oninput="renderPerExtIconRows()">
             <div id="doc_icon_section" style="display: none; margin-top: 10px;">
                 <div class="checkbox-row"><input type="checkbox" id="custom_doc_icon" onchange="onToggleCustomDocIcon(this.checked)"><label for="custom_doc_icon" data-i18n="label_custom_doc_icon">自訂這個副檔名的文件圖示</label></div>
                 <div class="file-selector" id="doc_icon_row" style="display: none; margin-top: 6px;">
@@ -195,6 +195,12 @@
                     <span class="path-display" id="doc_icon_path" data-i18n="no_file_selected">未選擇檔案</span>
                 </div>
                 <span class="note" data-i18n="note_custom_doc_icon">不勾選的話，文件圖示會直接沿用應用程式本身的圖示。</span>
+
+                <div id="per_ext_icon_section" style="margin-top: 12px;">
+                    <label data-i18n="label_per_ext_icons">個別副檔名的專屬圖示（選填，優先於上面的圖示）</label>
+                    <div id="per_ext_icon_rows"></div>
+                    <span class="note" data-i18n="note_per_ext_icons">上面輸入多個副檔名時，這裡會列出每一個，可以各自選擇不同的 ICO 圖示；不選就沿用上面設定的圖示（或主程式圖示）。例如 .a 用一張圖示、.b 用另一張。</span>
+                </div>
             </div>
         </div>
 
@@ -495,6 +501,9 @@
                 label_file_assoc: "需要註冊檔案關聯", ph_file_assoc: "輸入副檔名，以逗號分隔，例如: .xyz, .abc",
                 label_custom_doc_icon: "自訂這個副檔名的文件圖示",
                 note_custom_doc_icon: "不勾選的話，文件圖示會直接沿用應用程式本身的圖示。",
+                label_per_ext_icons: "個別副檔名的專屬圖示（選填，優先於上面的圖示）",
+                note_per_ext_icons: "上面輸入多個副檔名時，這裡會列出每一個，可以各自選擇不同的 ICO 圖示；不選就沿用上面設定的圖示（或主程式圖示）。例如 .a 用一張圖示、.b 用另一張。",
+                btn_clear_icon: "清除",
                 label_add_to_path: "安裝後將程式路徑加入環境變數 PATH",
                 label_path_target_exe: "加入 PATH 的執行檔（選填）",
                 path_target_default_option: "（預設）整個安裝目錄",
@@ -575,6 +584,9 @@
                 label_file_assoc: "Register file associations", ph_file_assoc: "Enter file extensions, comma-separated, e.g. .xyz, .abc",
                 label_custom_doc_icon: "Use a custom icon for this file type",
                 note_custom_doc_icon: "If left unchecked, the file icon falls back to the application's own icon.",
+                label_per_ext_icons: "Per-extension icons (optional, takes priority over the icon above)",
+                note_per_ext_icons: "When you enter multiple extensions above, each one is listed here so you can pick a different ICO icon for each; if left unset, it falls back to the icon configured above (or the app's own icon). For example, .a can use one icon and .b another.",
+                btn_clear_icon: "Clear",
                 label_add_to_path: "Add the install path to the PATH environment variable",
                 label_path_target_exe: "Executable to add to PATH (optional)",
                 path_target_default_option: "(Default) Entire install directory",
@@ -824,7 +836,9 @@
                 // 避免使用者取消關聯後，殘留的圖示設定還被送出去
                 document.getElementById('custom_doc_icon').checked = false;
                 onToggleCustomDocIcon(false);
+                perExtDocIcons = {};
             }
+            renderPerExtIconRows();
         }
 
         function onToggleCustomDocIcon(checked) {
@@ -837,6 +851,73 @@
         }
 
         async function browseDocIcon() { const path = await pywebview.api.select_doc_icon(); if(path) document.getElementById('doc_icon_path').innerText = path; }
+
+        // ---------------- 個別副檔名的專屬圖示 ----------------
+        // ext -> 使用者選的 ICO 絕對路徑；沒選的副檔名就不會出現在這個物件裡，
+        // 送出表單時只送真的有選的那幾個，其餘由後端 fallback 到共用圖示/主程式圖示。
+        let perExtDocIcons = {};
+
+        function parseFileAssocExtensions() {
+            const raw = document.getElementById('file_assoc_input').value || '';
+            const exts = [];
+            raw.replace(/，/g, ',').split(',').forEach(part => {
+                let ext = part.trim();
+                if (!ext) return;
+                if (!ext.startsWith('.')) ext = '.' + ext;
+                ext = ext.toLowerCase();
+                if (!exts.includes(ext)) exts.push(ext);
+            });
+            return exts;
+        }
+
+        function renderPerExtIconRows() {
+            const exts = document.getElementById('need_file_assoc').checked ? parseFileAssocExtensions() : [];
+            // 副檔名從輸入框裡被刪掉的話，之前幫它選的圖示也一併丟棄，
+            // 不要送出一個使用者已經看不到、也無法再取消的殘留設定
+            Object.keys(perExtDocIcons).forEach(ext => { if (!exts.includes(ext)) delete perExtDocIcons[ext]; });
+
+            const container = document.getElementById('per_ext_icon_rows');
+            container.innerHTML = '';
+            exts.forEach(ext => {
+                const row = document.createElement('div');
+                row.className = 'file-selector';
+                row.style.marginTop = '6px';
+
+                const label = document.createElement('span');
+                label.textContent = ext;
+                label.style.minWidth = '70px';
+                label.style.fontWeight = '600';
+
+                const pathSpan = document.createElement('span');
+                pathSpan.className = 'path-display';
+                pathSpan.innerText = perExtDocIcons[ext] || t('no_file_selected');
+
+                const browseBtn = document.createElement('button');
+                browseBtn.className = 'btn-browse';
+                browseBtn.textContent = t('btn_browse_ico');
+                browseBtn.onclick = async () => {
+                    const path = await pywebview.api.select_extension_icon();
+                    if (path) {
+                        perExtDocIcons[ext] = path;
+                        pathSpan.innerText = path;
+                    }
+                };
+
+                const clearBtn = document.createElement('button');
+                clearBtn.className = 'btn-browse';
+                clearBtn.textContent = t('btn_clear_icon');
+                clearBtn.onclick = () => {
+                    delete perExtDocIcons[ext];
+                    pathSpan.innerText = t('no_file_selected');
+                };
+
+                row.appendChild(label);
+                row.appendChild(browseBtn);
+                row.appendChild(pathSpan);
+                row.appendChild(clearBtn);
+                container.appendChild(row);
+            });
+        }
 
         // ---------------- 多語言 EULA ----------------
         let eulaRowCounter = 0;
@@ -907,6 +988,7 @@
                 file_associations: document.getElementById('need_file_assoc').checked ? document.getElementById('file_assoc_input').value : '',
                 need_file_assoc: document.getElementById('need_file_assoc').checked,
                 use_custom_doc_icon: document.getElementById('need_file_assoc').checked && document.getElementById('custom_doc_icon').checked,
+                doc_icons: document.getElementById('need_file_assoc').checked ? perExtDocIcons : {},
                 add_to_path: document.getElementById('add_to_path').checked,
                 path_target_exe: document.getElementById('add_to_path').checked ? document.getElementById('path_target_exe').value : '',
                 local_appdata_files: document.getElementById('local_appdata_files_input').value,

@@ -181,6 +181,20 @@ class ConfigAPI:
             return self.doc_icon_path
         return ""
 
+    def select_extension_icon(self):
+        """選擇某個副檔名專屬的文件圖示（見 config.html 的個別副檔名圖示區塊）。
+
+        故意不寫回 self.doc_icon_path——那是「所有副檔名共用的預設圖示」
+        單獨欄位用的後端狀態，這裡只是單純的檔案選擇對話框，選到的路徑
+        直接回傳給前端，由前端自己記在對應副檔名的 JS 物件裡，兩邊狀態
+        不會互相污染。
+        """
+        window = webview.active_window()
+        res = window.create_file_dialog(webview.OPEN_DIALOG, file_types=['ICO Icon (*.ico)'])
+        if res:
+            return res[0]
+        return ""
+
     def clear_doc_icon(self):
         """取消勾選「自訂文件圖示」時呼叫，把後端記住的路徑也一併清空。
 
@@ -264,6 +278,7 @@ class ConfigAPI:
                 dependencies=data.get("dependencies", []),
                 file_associations=data.get("file_associations", []),
                 doc_icon_path=data.get("doc_icon_path", ""),
+                doc_icons=data.get("doc_icons", {}),
                 add_to_path=data.get("add_to_path", False),
                 path_target_exe=data.get("path_target_exe", ""),
                 local_appdata_files=data.get("local_appdata_files", []),

@@ -162,6 +162,7 @@ class InstallerAPI:
         self.dependencies = []
         self.file_associations = []
         self.doc_icon = ""
+        self.doc_icons = {}
         self.add_to_path = False
         self.path_target_exe = ""
         self.local_appdata_files = []
@@ -211,6 +212,7 @@ class InstallerAPI:
                     self.dependencies = config.get("dependencies", [])
                     self.file_associations = config.get("file_associations", [])
                     self.doc_icon = config.get("doc_icon", "")
+                    self.doc_icons = config.get("doc_icons", {})
                     self.add_to_path = bool(config.get("add_to_path", False))
                     self.path_target_exe = config.get("path_target_exe", "")
                     self.local_appdata_files = config.get("local_appdata_files", [])
@@ -550,14 +552,29 @@ class InstallerAPI:
                 log(f"[提示] 未建立捷徑（可忽略）: {e}")
             return False
 
-    def _resolve_doc_icon_ref(self, main_exe_path):
-        """決定檔案關聯要用哪個圖示：有自訂就指向安裝時複製過去的那顆 ico，
-        沒有就直接沿用主程式圖示。原本完全沒寫 DefaultIcon 時，檔案總管會顯示
-        Windows 給「不知道用什麼圖示」的檔案類型的通用預設圖示，不是預期的樣子。
+    def _resolve_doc_icon_ref(self, main_exe_path, ext=None):
+        """決定某個副檔名要用哪個圖示，依序 fallback：
+        1. `ext` 自己在 `doc_icons` 裡的專屬圖示（例如 .a 跟 .b 各自不同的 ICO）
+        2. 所有副檔名共用的 `doc_icon`
+        3. 主程式圖示
+
+        原本完全沒寫 DefaultIcon 時，檔案總管會顯示 Windows 給「不知道用
+        什麼圖示」的檔案類型的通用預設圖示，不是預期的樣子。`ext` 留空
+        （沒有個別副檔名這個概念的呼叫情境）就跳過第 1 層，行為等同原本
+        只有「共用圖示 / 主程式圖示」兩層 fallback 的版本。
         """
+        per_ext_icon = self.doc_icons.get(ext) if ext else None
+        if per_ext_icon:
+            return os.path.join(self.selected_path, per_ext_icon)
         if self.doc_icon:
             return os.path.join(self.selected_path, self.doc_icon)
         return f"{main_exe_path},0"
+
+    def _resolve_doc_icon_refs(self, main_exe_path):
+        """幫 self.file_associations 裡每個副檔名各自算好要用的圖示，
+        組成 file_assoc.register() 需要的 {副檔名: icon_ref} 字典。
+        """
+        return {ext: self._resolve_doc_icon_ref(main_exe_path, ext) for ext in self.file_associations}
 
     def _local_appdata_root(self):
         """`local_appdata_files` 指定的檔案要落地的目錄：
@@ -797,6 +814,15 @@ class InstallerAPI:
                     log(f"[警告] 找不到內嵌的文件圖示 {self.doc_icon}，檔案關聯將沿用主程式圖示。")
                     self.doc_icon = ""
 
+            for ext, icon_rel in list(self.doc_icons.items()):
+                icon_src = get_resource_path(icon_rel)
+                if os.path.exists(icon_src):
+                    shutil.copy2(icon_src, os.path.join(self.selected_path, icon_rel))
+                    copied_rel_paths.append(icon_rel)
+                else:
+                    log(f"[警告] 找不到內嵌的文件圖示 {icon_rel}（副檔名 {ext}），改用共用的文件圖示或主程式圖示。")
+                    del self.doc_icons[ext]
+
             # 登錄表 + 捷徑 + 檔案關聯 + PATH
             self._report_progress(90, "正在註冊系統項目...")
             try:
@@ -807,10 +833,10 @@ class InstallerAPI:
             if create_desktop_shortcut:
                 self._create_shortcut(desktop=True, log=log)
             if self.file_associations:
-                main_exe_path = os.path.join(self.selected_path, self.main_exe)
-                icon_ref = self._resolve_doc_icon_ref(main_exe_path)
+                main_exe_path = self._resolve_installed_path(self.main_exe)
+                icon_refs = self._resolve_doc_icon_refs(main_exe_path)
                 try:
-                    file_assoc.register(self.file_associations, main_exe_path, self.app_name, icon_ref, log=log)
+                    file_assoc.register(self.file_associations, main_exe_path, self.app_name, icon_refs, log=log)
                 except Exception as e:
                     raise RuntimeError(f"檔案關聯註冊失敗：{e}") from e
                 log(f"已註冊檔案關聯: {self.file_associations}")

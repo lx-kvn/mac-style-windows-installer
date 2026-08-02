@@ -130,6 +130,51 @@ class TestResolveDocIconRef(unittest.TestCase):
             "C:\\Apps\\MyApp\\MyApp.exe,0",
         )
 
+    def test_per_extension_icon_takes_priority_over_shared_doc_icon(self):
+        """.a 跟 .b 用不同 ICO：doc_icons 裡列出的副檔名要用自己的專屬圖示，
+        不是共用的 doc_icon。"""
+        api = make_installer_api(
+            doc_icon="shared.ico", doc_icons={".a": "icon_a.ico", ".b": "icon_b.ico"},
+            selected_path="C:\\Apps\\MyApp",
+        )
+        self.assertEqual(
+            api._resolve_doc_icon_ref("C:\\Apps\\MyApp\\MyApp.exe", ext=".a"),
+            "C:\\Apps\\MyApp\\icon_a.ico",
+        )
+        self.assertEqual(
+            api._resolve_doc_icon_ref("C:\\Apps\\MyApp\\MyApp.exe", ext=".b"),
+            "C:\\Apps\\MyApp\\icon_b.ico",
+        )
+
+    def test_extension_without_per_extension_icon_falls_back_to_shared_doc_icon(self):
+        api = make_installer_api(
+            doc_icon="shared.ico", doc_icons={".a": "icon_a.ico"},
+            selected_path="C:\\Apps\\MyApp",
+        )
+        self.assertEqual(
+            api._resolve_doc_icon_ref("C:\\Apps\\MyApp\\MyApp.exe", ext=".c"),
+            "C:\\Apps\\MyApp\\shared.ico",
+        )
+
+    def test_extension_without_per_extension_icon_or_shared_icon_falls_back_to_main_exe(self):
+        api = make_installer_api(
+            doc_icon="", doc_icons={".a": "icon_a.ico"}, selected_path="C:\\Apps\\MyApp",
+        )
+        self.assertEqual(
+            api._resolve_doc_icon_ref("C:\\Apps\\MyApp\\MyApp.exe", ext=".c"),
+            "C:\\Apps\\MyApp\\MyApp.exe,0",
+        )
+
+    def test_resolve_doc_icon_refs_builds_map_for_all_file_associations(self):
+        api = make_installer_api(
+            doc_icon="shared.ico", doc_icons={".a": "icon_a.ico"},
+            file_associations=[".a", ".b"], selected_path="C:\\Apps\\MyApp",
+        )
+        self.assertEqual(
+            api._resolve_doc_icon_refs("C:\\Apps\\MyApp\\MyApp.exe"),
+            {".a": "C:\\Apps\\MyApp\\icon_a.ico", ".b": "C:\\Apps\\MyApp\\shared.ico"},
+        )
+
 
 class TestFileAssociationRegistration(unittest.TestCase):
     """_create_shortcut() 沒有隨這輪收斂搬動，還是留在 installer_core.py。"""

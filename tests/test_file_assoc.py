@@ -31,7 +31,7 @@ class TestRegister(unittest.TestCase):
     def test_writes_expected_registry_shape(self):
         with mock.patch("file_assoc.ctypes.windll.shell32.SHChangeNotify"):
             file_assoc.register(
-                [".xyz"], "C:\\Apps\\MyApp\\MyApp.exe", "MyApp", "C:\\Apps\\MyApp\\MyApp.exe,0",
+                [".xyz"], "C:\\Apps\\MyApp\\MyApp.exe", "MyApp", {".xyz": "C:\\Apps\\MyApp\\MyApp.exe,0"},
                 registry=self.reg,
             )
 
@@ -46,8 +46,8 @@ class TestRegister(unittest.TestCase):
 
     def test_no_op_when_extensions_or_main_exe_missing(self):
         with mock.patch("file_assoc.ctypes.windll.shell32.SHChangeNotify") as notify:
-            file_assoc.register([], "C:\\Apps\\MyApp\\MyApp.exe", "MyApp", "icon.ico", registry=self.reg)
-            file_assoc.register([".xyz"], "", "MyApp", "icon.ico", registry=self.reg)
+            file_assoc.register([], "C:\\Apps\\MyApp\\MyApp.exe", "MyApp", {}, registry=self.reg)
+            file_assoc.register([".xyz"], "", "MyApp", {}, registry=self.reg)
         notify.assert_not_called()
         self.assertEqual(self.reg.store, {})
 
@@ -57,7 +57,7 @@ class TestRegister(unittest.TestCase):
         self.reg.fail_on_substring = ".xyz"
         with mock.patch("file_assoc.ctypes.windll.shell32.SHChangeNotify"):
             with self.assertRaises(PermissionError):
-                file_assoc.register([".xyz"], "MyApp.exe", "MyApp", "MyApp.exe,0", registry=self.reg)
+                file_assoc.register([".xyz"], "MyApp.exe", "MyApp", {".xyz": "MyApp.exe,0"}, registry=self.reg)
         self.assertIsNone(self.reg.hklm("Software\\Classes\\.xyz"), "確認登錄表真的沒寫成功")
 
     def test_clears_existing_user_choice_override(self):
@@ -67,7 +67,7 @@ class TestRegister(unittest.TestCase):
 
         with mock.patch("file_assoc.ctypes.windll.shell32.SHChangeNotify"):
             file_assoc.register(
-                [".xyz"], "MyApp.exe", "MyApp", "MyApp.exe,0", log=logged.append, registry=self.reg,
+                [".xyz"], "MyApp.exe", "MyApp", {".xyz": "MyApp.exe,0"}, log=logged.append, registry=self.reg,
             )
 
         self.assertIsNone(self.reg.hkcu(user_choice_path))
@@ -78,7 +78,7 @@ class TestRegister(unittest.TestCase):
         self.reg.set_hkcu("Software\\Classes\\.xyz\\OpenWithProgids", {"SomeOldApp.xyzfile": b""})
 
         with mock.patch("file_assoc.ctypes.windll.shell32.SHChangeNotify"):
-            file_assoc.register([".xyz"], "MyApp.exe", "MyApp", "MyApp.exe,0", registry=self.reg)
+            file_assoc.register([".xyz"], "MyApp.exe", "MyApp", {".xyz": "MyApp.exe,0"}, registry=self.reg)
 
         self.assertIsNone(self.reg.hkcu("Software\\Classes\\.xyz"), "HKCU 的殘留覆寫應該被清掉")
         self.assertIsNone(self.reg.hkcu("Software\\Classes\\.xyz\\OpenWithProgids"))
@@ -93,7 +93,7 @@ class TestRegister(unittest.TestCase):
         self.reg.set_hkcu(f"{fileexts_prefix}\\OpenWithList", {"a": "old.exe", "MRUList": "a"})
 
         with mock.patch("file_assoc.ctypes.windll.shell32.SHChangeNotify"):
-            file_assoc.register([".xyz"], "MyApp.exe", "MyApp", "MyApp.exe,0", registry=self.reg)
+            file_assoc.register([".xyz"], "MyApp.exe", "MyApp", {".xyz": "MyApp.exe,0"}, registry=self.reg)
 
         self.assertIsNone(self.reg.hkcu(f"{fileexts_prefix}\\OpenWithProgids"))
         self.assertIsNone(self.reg.hkcu(f"{fileexts_prefix}\\OpenWithList"))
@@ -102,7 +102,7 @@ class TestRegister(unittest.TestCase):
         """最常見的情況：這個副檔名從沒被手動選過，殘留機碼根本不存在，
         清除動作本來就該是「盡量做」，不存在就跳過，不能讓整個關聯因此失敗。"""
         with mock.patch("file_assoc.ctypes.windll.shell32.SHChangeNotify"):
-            file_assoc.register([".xyz"], "MyApp.exe", "MyApp", "MyApp.exe,0", registry=self.reg)
+            file_assoc.register([".xyz"], "MyApp.exe", "MyApp", {".xyz": "MyApp.exe,0"}, registry=self.reg)
 
 
 class TestUnregister(unittest.TestCase):
