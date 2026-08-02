@@ -25,23 +25,17 @@ import uninstall as un
 
 
 class TestExplorerRestartHelpers(unittest.TestCase):
-    """_kill_explorer() / _restart_explorer()：更新覆蓋安裝時（打包時勾選
-    restart_explorer_on_update）用來釋放被 explorer.exe 鎖住的殼層擴充功能
-    DLL。main() 本身涉及 MessageBoxW/is_admin()/sys.argv 等 GUI/系統層面
-    的東西，這個檔案原本就沒有整合測試 main()，這裡只測可以獨立驗證的
-    這兩個 best-effort 函式本身。"""
+    """_restart_explorer() / _process_image_name() / _kill_processes()：
+    更新覆蓋安裝或解除安裝時（打包時勾選 restart_explorer_on_update）用來
+    釋放被鎖住的檔案。main() 本身涉及 MessageBoxW/is_admin()/sys.argv 等
+    GUI/系統層面的東西，這個檔案原本就沒有整合測試 main()，這裡只測可以
+    獨立驗證的這幾個 best-effort 函式本身。
 
-    def test_kill_explorer_calls_taskkill(self):
-        with mock.patch("uninstall.subprocess.run") as mock_run, \
-             mock.patch("uninstall.time.sleep"):
-            un._kill_explorer()
-        args, kwargs = mock_run.call_args
-        self.assertEqual(args[0], ["taskkill", "/f", "/im", "explorer.exe"])
-
-    def test_kill_explorer_swallows_failure(self):
-        with mock.patch("uninstall.subprocess.run", side_effect=RuntimeError("模擬失敗")), \
-             mock.patch("uninstall.time.sleep"):
-            un._kill_explorer()  # 不應該拋例外
+    真實抓到的 bug：舊版 _kill_explorer() 寫死「一定是 explorer.exe 鎖住」，
+    只涵蓋殼層擴充功能這一種情境。現在改用 restart_manager（包 Windows
+    Restart Manager API）實際偵測是哪些進程鎖住了要刪除的檔案，
+    _kill_processes() 逐一結束真正的鎖定者（不是無差別 taskkill /im
+    explorer.exe），只有結束掉的進程剛好是 explorer.exe 才會自動重啟。"""
 
     def test_restart_explorer_launches_explorer_exe(self):
         with mock.patch("uninstall.subprocess.Popen") as mock_popen:
@@ -53,39 +47,108 @@ class TestExplorerRestartHelpers(unittest.TestCase):
         with mock.patch("uninstall.subprocess.Popen", side_effect=RuntimeError("模擬失敗")):
             un._restart_explorer()  # 不應該拋例外
 
+    def test_process_image_name_parses_tasklist_csv_output(self):
+        fake_output = '"explorer.exe","1234","Console","1","12,345 K"\r\n'
+        with mock.patch("uninstall.subprocess.check_output", return_value=fake_output):
+            result = un._process_image_name(1234)
+        self.assertEqual(result, "explorer.exe")
 
-class TestShouldRestartExplorer(unittest.TestCase):
-    """_should_restart_explorer()：真實抓到的 bug——更新覆蓋安裝呼叫的是舊版本
-    的 uninstall.exe，它是否關閉檔案總管原本只看自己那份（可能過期的）
+    def test_process_image_name_swallows_failure(self):
+        with mock.patch("uninstall.subprocess.check_output", side_effect=RuntimeError("模擬失敗")):
+            result = un._process_image_name(1234)
+        self.assertEqual(result, "")
+
+    def test_kill_processes_taskkills_each_pid_and_returns_image_names(self):
+        with mock.patch("uninstall.subprocess.run") as mock_run, \
+             mock.patch("uninstall.subprocess.check_output", return_value='"explorer.exe","111",""\r\n'), \
+             mock.patch("uninstall.time.sleep"):
+            killed = un._kill_processes([(111, "Windows 檔案總管")])
+        args, kwargs = mock_run.call_args
+        self.assertEqual(args[0], ["taskkill", "/f", "/pid", "111"])
+        self.assertEqual(killed, [(111, "explorer.exe")])
+
+    def test_kill_processes_swallows_per_pid_failure_and_continues(self):
+        with mock.patch("uninstall.subprocess.run", side_effect=RuntimeError("模擬失敗")), \
+             mock.patch("uninstall.subprocess.check_output", return_value=""), \
+             mock.patch("uninstall.time.sleep"):
+            killed = un._kill_processes([(111, "app")])  # 不應該拋例外
+        self.assertEqual(killed, [])
+
+    def test_kill_processes_empty_list_does_not_sleep(self):
+        with mock.patch("uninstall.subprocess.run") as mock_run, \
+             mock.patch("uninstall.time.sleep") as mock_sleep:
+            killed = un._kill_processes([])
+        mock_run.assert_not_called()
+        mock_sleep.assert_not_called()
+        self.assertEqual(killed, [])
+
+
+class TestWantsLockRelease(unittest.TestCase):
+    """_wants_lock_release()：真實抓到的 bug——更新覆蓋安裝呼叫的是舊版本
+    的 uninstall.exe，它是否要偵測鎖定進程原本只看自己那份（可能過期的）
     install_manifest.json，跟使用者這次重新打包的新設定是兩回事，導致行為
     時好時壞。修正後 --restart-explorer 命令列旗標（由新版本明確傳入）要能
-    覆蓋掉 manifest 裡的舊設定。"""
+    覆蓋掉 manifest 裡的舊設定。
+
+    另一個真實抓到的 bug：這個函式原本互動式（沒帶 --silent）解除安裝一律
+    回傳 False，導致手動解除安裝永遠不會釋放被鎖住的檔案。現在改成不分
+    互動或無人值守，只看設定本身；互動情境是否要先跟使用者確認，改由
+    main() 呼叫 _confirm_kill_locking_processes() 另外把關，這裡不再接收
+    silent 參數。"""
 
     def test_cli_flag_overrides_manifest_when_manifest_says_false(self):
-        result = un._should_restart_explorer(
-            silent=True, manifest={"restart_explorer_on_update": False}, argv=["uninstall.exe", "--silent", "--restart-explorer"],
+        result = un._wants_lock_release(
+            manifest={"restart_explorer_on_update": False}, argv=["uninstall.exe", "--silent", "--restart-explorer"],
         )
         self.assertTrue(result)
 
     def test_manifest_used_as_fallback_when_no_cli_flag(self):
-        result = un._should_restart_explorer(
-            silent=True, manifest={"restart_explorer_on_update": True}, argv=["uninstall.exe", "--silent"],
+        result = un._wants_lock_release(
+            manifest={"restart_explorer_on_update": True}, argv=["uninstall.exe", "--silent"],
         )
         self.assertTrue(result)
 
     def test_false_when_neither_cli_flag_nor_manifest_set(self):
-        result = un._should_restart_explorer(
-            silent=True, manifest={"restart_explorer_on_update": False}, argv=["uninstall.exe", "--silent"],
+        result = un._wants_lock_release(
+            manifest={"restart_explorer_on_update": False}, argv=["uninstall.exe", "--silent"],
         )
         self.assertFalse(result)
 
-    def test_never_true_for_interactive_uninstall_even_with_cli_flag(self):
-        """互動式解除安裝（沒帶 --silent）不該無預警把使用者的檔案總管視窗
-        全部關掉，就算誤帶了 --restart-explorer 也不套用。"""
-        result = un._should_restart_explorer(
-            silent=False, manifest={"restart_explorer_on_update": True}, argv=["uninstall.exe", "--restart-explorer"],
+    def test_true_for_interactive_uninstall_when_manifest_set(self):
+        """互動式解除安裝（沒帶 --silent）現在也套用同一個設定——是否要先
+        跟使用者確認是 main() 的事，這個函式只回答「設定上想不想要」。"""
+        result = un._wants_lock_release(
+            manifest={"restart_explorer_on_update": True}, argv=["uninstall.exe"],
         )
+        self.assertTrue(result)
+
+
+class TestConfirmKillLockingProcesses(unittest.TestCase):
+    """_confirm_kill_locking_processes()：互動式解除安裝真的結束鎖定進程前，
+    跳出確認對話框取得使用者同意——避免無預警強制關閉使用者正在用的其他
+    程式。列出 restart_manager 實際偵測到的進程名稱，不是像舊版一律寫死
+    「檔案總管」。"""
+
+    def test_returns_true_when_user_clicks_yes(self):
+        IDYES = 6
+        with mock.patch("uninstall.ctypes.windll.user32.MessageBoxW", return_value=IDYES) as mock_box:
+            result = un._confirm_kill_locking_processes("測試應用程式", [(111, "某個殼層擴充功能")])
+        self.assertTrue(result)
+        args, kwargs = mock_box.call_args
+        self.assertIn("測試應用程式", args[1])
+        self.assertIn("某個殼層擴充功能", args[1])
+
+    def test_returns_false_when_user_clicks_no(self):
+        IDNO = 7
+        with mock.patch("uninstall.ctypes.windll.user32.MessageBoxW", return_value=IDNO):
+            result = un._confirm_kill_locking_processes("測試應用程式", [(111, "某個殼層擴充功能")])
         self.assertFalse(result)
+
+    def test_returns_false_without_prompting_when_no_processes_detected(self):
+        with mock.patch("uninstall.ctypes.windll.user32.MessageBoxW") as mock_box:
+            result = un._confirm_kill_locking_processes("測試應用程式", [])
+        self.assertFalse(result)
+        mock_box.assert_not_called()
 
 
 class TestUpgradeSelfDeleteGating(unittest.TestCase):

@@ -7,8 +7,9 @@ installer_core.py
   - 單一實例鎖（Mutex）：避免使用者手滑點兩次，同時跑兩個安裝流程互相干擾。
   - 覆蓋安裝偵測：透過登錄表判斷是否已裝過，讓前端跳出「更新覆蓋 / 取消」選擇。
   - 磁碟空間檢查：裝之前先確認目標磁碟剩餘空間夠不夠。
-  - 相依元件偵測（VC++ Redist / .NET Desktop Runtime）：只做偵測 + 提示官方下載連結，
-    不做靜默安裝（那需要額外綁定官方安裝檔，風險與體積都大，先不做）。
+  - 相依元件偵測（VC++ Redist / .NET Desktop Runtime）：偵測缺少時，使用者可以選擇
+    直接從官方下載點自動下載＋靜默安裝，也可以略過（不阻擋主程式安裝），見
+    install_dependency() 與 DEPENDENCY_CHECKERS 開頭的說明。
   - 主程式執行中偵測：避免複製到一半被檔案鎖定卡住。
   - 真實複製進度：以「已複製檔案數 / 總檔案數」回報百分比，取代原本的假文字。
   - 複製後完整性驗證：比對來源與目的地檔案大小是否一致。
@@ -28,6 +29,7 @@ import tempfile
 import time
 import ctypes
 import subprocess
+import urllib.request
 import zlib
 import webview
 from datetime import datetime
@@ -35,6 +37,7 @@ from window_drag import WindowDragController
 from disk_space import required_install_size, check_disk_space
 import file_assoc
 import lang_detect
+import restart_manager
 
 # 目前介面 chrome（ui/index.html 裡固定的標籤、按鈕、提示文字）支援的語言，
 # 跟 ui/index.html 內嵌的 I18N 翻譯表一一對應。EULA 文字語言不受此限制——
@@ -92,9 +95,34 @@ def _check_dotnet_desktop():
         return False
 
 
+# {key: (check_fn, 顯示名稱, 官方靜默安裝檔下載連結, 靜默安裝命令列參數)}。
+# 下載連結目前都指向可以直接執行的安裝檔（不是網頁），install_dependency()
+# 靠這個直接下載＋執行。
+#
+# vcredist_x64 的連結是 Microsoft 官方文件明講的永久 permalink
+# （https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist
+# 的「Permalink for latest supported x64 version」），永遠指向最新版，
+# 不需要維護。
+#
+# dotnet_desktop 沒有這種版本無關的永久連結——aka.ms/dotnet/<版本>/... 這個
+# 格式一定要指定確切的 major.minor 頻道。這裡先固定用「10.0」（2026 年寫下
+# 這行時的最新 LTS 版本，.NET 8/9 已於 2026-11-10 到期）。等 .NET 10 也到期
+# （官方支援到約 2028-11）時，這個版本號要手動更新成下一個 LTS，否則舊連結
+# 雖然還能用，但裝到的會是一個過期的舊版本。這是刻意接受的維護負擔，不是
+# 遺漏——見規格文件.md 對應章節的已知限制說明。
 DEPENDENCY_CHECKERS = {
-    "vcredist_x64": (_check_vcredist_x64, "Visual C++ Redistributable (x64)", "https://aka.ms/vs/17/release/vc_redist.x64.exe"),
-    "dotnet_desktop": (_check_dotnet_desktop, ".NET Desktop Runtime", "https://dotnet.microsoft.com/download/dotnet"),
+    "vcredist_x64": (
+        _check_vcredist_x64,
+        "Visual C++ Redistributable (x64)",
+        "https://aka.ms/vc14/vc_redist.x64.exe",
+        ["/install", "/quiet", "/norestart"],
+    ),
+    "dotnet_desktop": (
+        _check_dotnet_desktop,
+        ".NET Desktop Runtime",
+        "https://aka.ms/dotnet/10.0/windowsdesktop-runtime-win-x64.exe",
+        ["/install", "/quiet", "/norestart"],
+    ),
 }
 
 
@@ -252,16 +280,91 @@ class InstallerAPI:
         return next(iter(self.eula_texts.values()), "")
 
     def get_dependency_warnings(self):
-        """回傳目前系統缺少的相依元件清單（顯示名稱 + 下載連結），不阻擋安裝"""
+        """回傳目前系統缺少的相依元件清單（key + 顯示名稱 + 下載連結），
+        不阻擋安裝。前端用 key 呼叫 install_dependency(key) 觸發自動安裝，
+        url 保留給自動安裝失敗時的手動下載備援連結。
+        """
         warnings = []
         for key in self.dependencies:
             checker = DEPENDENCY_CHECKERS.get(key)
             if not checker:
                 continue
-            check_fn, display_name, url = checker
+            check_fn, display_name, url, _silent_args = checker
             if not check_fn():
-                warnings.append({"name": display_name, "url": url})
+                warnings.append({"key": key, "name": display_name, "url": url})
         return warnings
+
+    def _report_dependency_progress(self, percent, message):
+        """相依元件自動安裝期間的進度推播，寫法比照 _report_progress()，
+        但推到前端另一個獨立的進度條（window.updateDependencyInstallProgress），
+        因為相依元件安裝跟主程式安裝是兩個不同的畫面，不能共用同一組進度條
+        元素。
+        """
+        global window
+        safe_msg = json.dumps(message, ensure_ascii=False)
+        try:
+            if window:
+                window.evaluate_js(f"window.updateDependencyInstallProgress({percent}, {safe_msg})")
+        except Exception:
+            pass
+
+    def install_dependency(self, key):
+        """使用者在相依元件彈窗按下「自動安裝」時，依序對每個缺少的元件呼叫
+        這個方法：下載官方安裝檔到暫存目錄、靜默執行，結束後不管子程序的
+        結束碼，一律重新呼叫這個元件自己的登錄表偵測函式（check_fn）確認
+        「現在到底裝好了沒」才是最終依據。
+
+        真實情境：Visual C++ Redistributable 的官方文件明講，如果偵測到
+        機器上已經裝了更新版本，`/quiet` 模式下的子程序會回傳非 0 的錯誤碼，
+        但這其實不是真正的失敗——只看結束碼判斷會誤判成失敗。這支安裝程式
+        本身是 --uac-admin 編譯、執行到這裡一定已經是系統管理員權杖，子
+        程序繼承同一個權杖直接靜默安裝，不會再跳一次 UAC。
+        """
+        checker = DEPENDENCY_CHECKERS.get(key)
+        if not checker:
+            return {"status": "error", "message": "未知的相依元件。"}
+        check_fn, display_name, url, silent_args = checker
+
+        tmp_path = os.path.join(tempfile.gettempdir(), f"dep_installer_{key}.exe")
+        try:
+            self._report_dependency_progress(5, f"正在下載 {display_name}...")
+            with urllib.request.urlopen(url, timeout=30) as resp:
+                total = resp.getheader("Content-Length")
+                total = int(total) if total else None
+                downloaded = 0
+                with open(tmp_path, "wb") as f:
+                    while True:
+                        chunk = resp.read(1024 * 256)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total:
+                            percent = 5 + int(downloaded / total * 50)  # 下載階段佔 5%-55%
+                            self._report_dependency_progress(percent, f"正在下載 {display_name}...")
+        except Exception as e:
+            return {"status": "error", "message": f"下載 {display_name} 失敗：{e}"}
+
+        try:
+            self._report_dependency_progress(60, f"正在安裝 {display_name}...")
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            subprocess.run([tmp_path] + silent_args, creationflags=creationflags, timeout=600)
+        except Exception as e:
+            return {"status": "error", "message": f"執行 {display_name} 安裝程式失敗：{e}"}
+        finally:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+        self._report_dependency_progress(95, "正在確認安裝結果...")
+        if check_fn():
+            return {"status": "success", "name": display_name}
+        return {
+            "status": "error",
+            "message": f"{display_name} 安裝流程已經結束，但仍偵測不到已安裝——"
+                       f"可能需要手動安裝，或重新啟動電腦後再試一次。",
+        }
 
     def open_url(self, url):
         """讓前端可以開啟預設瀏覽器前往下載頁"""
@@ -704,6 +807,7 @@ class InstallerAPI:
     def trigger_installation(self, create_desktop_shortcut=True):
         log_lines = [f"=== {self.app_name} 安裝紀錄 {datetime.now().isoformat()} ==="]
         copied_rel_paths = []  # 提前宣告：任何階段失敗都要能安全參照這個變數做回滾
+        current_copy_target = None  # 目前正在寫入的目的地路徑，複製失敗時用來查是誰鎖住它
 
         def log(msg):
             log_lines.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
@@ -767,6 +871,7 @@ class InstallerAPI:
                 src_f = os.path.join(src_dir, rel)
                 dest_f = self._resolve_installed_path(rel)
                 os.makedirs(os.path.dirname(dest_f), exist_ok=True)
+                current_copy_target = dest_f
                 shutil.copy2(src_f, dest_f)
 
                 # 完整性驗證：先比大小（快），大小一致才進一步比 checksum（較慢但更可靠，
@@ -797,18 +902,21 @@ class InstallerAPI:
             self._report_progress(85, "正在寫入設定與解除安裝助手...")
             uninstall_src = get_resource_path("uninstall.exe")
             if os.path.exists(uninstall_src):
-                shutil.copy2(uninstall_src, os.path.join(self.selected_path, "uninstall.exe"))
+                current_copy_target = os.path.join(self.selected_path, "uninstall.exe")
+                shutil.copy2(uninstall_src, current_copy_target)
                 copied_rel_paths.append("uninstall.exe")
 
             config_src = get_resource_path("installer_config.json")
             if os.path.exists(config_src):
-                shutil.copy2(config_src, os.path.join(self.selected_path, "installer_config.json"))
+                current_copy_target = os.path.join(self.selected_path, "installer_config.json")
+                shutil.copy2(config_src, current_copy_target)
                 copied_rel_paths.append("installer_config.json")
 
             if self.doc_icon:
                 doc_icon_src = get_resource_path(self.doc_icon)
                 if os.path.exists(doc_icon_src):
-                    shutil.copy2(doc_icon_src, os.path.join(self.selected_path, self.doc_icon))
+                    current_copy_target = os.path.join(self.selected_path, self.doc_icon)
+                    shutil.copy2(doc_icon_src, current_copy_target)
                     copied_rel_paths.append(self.doc_icon)
                 else:
                     log(f"[警告] 找不到內嵌的文件圖示 {self.doc_icon}，檔案關聯將沿用主程式圖示。")
@@ -817,7 +925,8 @@ class InstallerAPI:
             for ext, icon_rel in list(self.doc_icons.items()):
                 icon_src = get_resource_path(icon_rel)
                 if os.path.exists(icon_src):
-                    shutil.copy2(icon_src, os.path.join(self.selected_path, icon_rel))
+                    current_copy_target = os.path.join(self.selected_path, icon_rel)
+                    shutil.copy2(icon_src, current_copy_target)
                     copied_rel_paths.append(icon_rel)
                 else:
                     log(f"[警告] 找不到內嵌的文件圖示 {icon_rel}（副檔名 {ext}），改用共用的文件圖示或主程式圖示。")
@@ -879,24 +988,79 @@ class InstallerAPI:
             main_exe_path = self._resolve_installed_path(self.main_exe) if self.main_exe else ""
             return {"status": "success", "message": "安裝成功", "main_exe_path": main_exe_path}
 
-        except PermissionError:
+        except OSError as e:
             self._rollback(copied_rel_paths, log)
             self._restore_upgrade_backup()
-            return {
-                "status": "error",
-                "message": "安裝失敗：權限不足。請安裝到桌面或 D 槽，或以管理員身分執行。\n"
-                           "（若已經是系統管理員身分仍失敗，也可能是舊版本尚未移除完畢，"
-                           "請關閉安裝程式稍後再試一次。）",
-            }
+            return {"status": "error", "message": self._describe_install_os_error(e, current_copy_target)}
         except Exception as e:
             self._rollback(copied_rel_paths, log)
             self._restore_upgrade_backup()
             return {"status": "error", "message": f"發生未知錯誤：\n{str(e)}"}
 
+    def _describe_install_os_error(self, error, dest_file=None):
+        """把安裝過程中複製/寫入檔案時真正發生的 OSError 轉換成使用者看得懂
+        的訊息，取代原本「不管什麼原因，一律歸類成權限不足」的做法。
+
+        真實情境：這支安裝程式本身是用 PyInstaller 的 --uac-admin 編譯的，
+        Windows 執行時已經先跳出 UAC 要求使用者同意用系統管理員身分執行，
+        執行到這裡的程式碼一定已經是系統管理員權杖——換句話說，這裡真的
+        遇到 PermissionError，幾乎不可能是「使用者忘記用系統管理員身分
+        執行」（Windows 根本不會讓它跑到這裡）。實際上最常見的原因是檔案
+        正被其他進程鎖住（Windows 的 sharing violation，Python 一樣會包成
+        PermissionError，但成因跟系統管理員權限完全無關，「以管理員身分
+        重試」這個建議對這種情況沒有用，只會誤導使用者反覆做沒有用的事）。
+
+        用 error.winerror（Windows 特有，OSError 的 errno 之外還會帶原始
+        的 Win32 錯誤碼）分辨真正的成因：
+          - ERROR_SHARING_VIOLATION (32) / ERROR_LOCK_VIOLATION (33)：
+            檔案被其他進程開著——用 restart_manager（跟 uninstall.py 解除
+            安裝時偵測鎖定進程用的是同一套 Restart Manager API）實際查出
+            是哪個進程鎖住的，能查到就直接點名，讓使用者知道要關掉什麼。
+          - ERROR_ACCESS_DENIED (5)：安裝程式已經是系統管理員身分，還被
+            拒絕存取，比較可能是防毒軟體、Windows 防勒索軟體的「受控
+            資料夾存取」，或企業原則限制了這個安裝路徑，不是使用者能單靠
+            「重新以管理員身分執行」解決的。
+          - ERROR_WRITE_PROTECT (19)：目標磁碟或媒體本身是唯讀狀態。
+          - 其他/查不到 winerror：退回一個沒有過度承諾特定原因的通用訊息，
+            仍然明確提醒使用者這不是系統管理員權限的問題。
+        """
+        winerror = getattr(error, "winerror", None)
+
+        if winerror in (32, 33):
+            locker_hint = ""
+            if dest_file:
+                processes = restart_manager.find_locking_processes([dest_file])
+                if processes:
+                    names = "、".join(sorted({name for _pid, name in processes if name})) or "未知程式"
+                    locker_hint = f"目前偵測到鎖定這個檔案的程式：{names}。"
+            file_label = f"「{os.path.basename(dest_file)}」" if dest_file else "某個檔案"
+            return (
+                f"安裝失敗：{file_label}正被其他程式使用中，暫時無法覆寫。{locker_hint}"
+                f"請先關閉相關程式後再重試安裝。\n"
+                f"（這跟系統管理員權限無關——這支安裝程式本身已經是以系統管理員身分執行，"
+                f"用系統管理員身分重試不會有幫助。）"
+            )
+        if winerror == 5:
+            return (
+                "安裝失敗：存取被拒。這支安裝程式已經是以系統管理員身分執行，"
+                "通常不是「權限不足」造成的，比較可能是防毒軟體、Windows 防勒索軟體的"
+                "「受控資料夾存取」，或企業網域原則限制了這個安裝路徑的寫入權限。\n"
+                "請暫時停用相關防護，或改安裝到其他路徑（例如桌面或 D 槽）後再試。"
+            )
+        if winerror == 19:
+            return "安裝失敗：目標磁碟或媒體目前是唯讀（寫入保護）狀態，請改安裝到其他磁碟。"
+        if isinstance(error, PermissionError):
+            return (
+                "安裝失敗：權限不足，但這支安裝程式已經是以系統管理員身分執行，"
+                "不太可能是使用者權限的問題（可能是舊版本尚未移除完畢，請關閉安裝程式"
+                "稍後再試一次；或安裝路徑有其他特殊的存取限制）。"
+            )
+        return f"安裝失敗：{error}"
+
     def close_running_main_exe(self):
         """使用者在「偵測到主程式執行中」的彈窗按下「關閉程式並繼續安裝」時
         呼叫：強制關閉正在執行的主程式，讓前端可以接著重新呼叫
-        trigger_installation()。寫法比照 uninstall.py 既有的 _kill_explorer()
+        trigger_installation()。寫法比照 uninstall.py 既有的慣例
         （taskkill /f、CREATE_NO_WINDOW、吞例外回傳布林值），不做「先禮貌
         關閉、失敗才強制」這種分層。
         """

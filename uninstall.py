@@ -26,11 +26,32 @@ uninstall.py
   清單、退回整個清除的情況）就分開處理——保留資料夾的話只刪自己，
   真的要整個清空的話才連資料夾一起 rmdir。
 
-新增（打包時選填）：restart_explorer_on_update。有些應用程式會註冊 Windows
-檔案總管殼層擴充功能（Shell Extension DLL），只要 explorer.exe 還活著就會
-把這支 DLL 常駐鎖住，更新覆蓋安裝時刪不掉、也跟系統管理員權限無關。勾選
-這個選項後，無人值守（--silent）解除安裝在刪除檔案前會先關閉 explorer.exe，
-刪除完畢後（不論成功與否）自動重啟，見 _kill_explorer() / _restart_explorer()。
+新增（打包時選填）：restart_explorer_on_update。有些應用程式會在檔案總管
+的殼層擴充功能（Shell Extension DLL）或其他背景進程裡持有安裝目錄下的
+檔案控制代碼，更新覆蓋安裝或解除安裝時刪不掉、也跟系統管理員權限無關。
+勾選這個選項後，解除安裝在刪除檔案前會用 Windows 官方的 Restart Manager
+API（restart_manager.py，跟 Windows Installer/PowerToys File Locksmith
+判斷「這個檔案被誰鎖住」用的是同一套機制）實際偵測是哪些進程鎖住了要刪除
+的檔案，逐一結束那些進程（不是無差別假設一定是 explorer.exe），刪除完畢
+後如果結束掉的進程裡有 explorer.exe 才會自動重啟它，見
+_kill_processes() / _restart_explorer()。無人值守（--silent）情境直接
+套用；互動式（使用者手動解除安裝）額外跳確認對話框，列出實際偵測到的
+進程名稱，取得同意才真的結束，見 _confirm_kill_locking_processes()。
+
+修正紀錄（真實抓到的 bug）：這個選項原本只在無人值守（--silent）情境套用，
+互動式手動解除安裝一律略過，理由是「不該無預警把使用者的檔案總管視窗全部
+關掉」——但這麼一來，只要應用程式有殼層擴充功能，使用者手動解除安裝永遠
+不會釋放被鎖住的 DLL，檔案留在安裝目錄刪不掉（刪除失敗被靜默吞掉，只寫進
+log），下次重新安裝到同一路徑覆寫這個仍被鎖住的 DLL 就會失敗，還顯示成
+「權限不足」，容易誤導使用者以為要用系統管理員身分重試（其實無關）。現在
+改成互動情境也套用同一個設定，只是額外跳確認對話框，而不是完全略過。
+
+修正紀錄（真實抓到的 bug）：這個選項原本寫死「一定是 explorer.exe 鎖住」，
+直接 taskkill /im explorer.exe，只涵蓋殼層擴充功能這一種特定情境——如果
+卡住檔案的其實是別的進程，完全偵測不到也處理不了，治標不治本。現在改用
+Restart Manager API 實際偵測是哪些進程持有這些檔案的控制代碼，逐一結束
+真正的鎖定者；只有偵測到的進程剛好是 explorer.exe 才會自動重啟它，其他
+進程（通常是使用者自己的應用程式）不會被自動重新開啟。
 
 修正紀錄（真實抓到的 bug）：這個設定原本只看這支 exe 自己的
 install_manifest.json，但「更新覆蓋安裝」情境下被呼叫的是舊版本的
@@ -68,6 +89,7 @@ import time
 import subprocess
 from datetime import datetime
 import file_assoc
+import restart_manager
 
 
 def is_admin():
@@ -118,30 +140,8 @@ def remove_shortcut(app_name, desktop=False):
     return False
 
 
-def _kill_explorer():
-    """終止 explorer.exe，釋放它可能持有的殼層擴充功能 DLL 檔案鎖。
-
-    有些應用程式會註冊 Windows 檔案總管殼層擴充功能（Shell Extension，例如
-    右鍵選單擴充 DLL）——只要 explorer.exe 還在執行，就會把這支 DLL 常駐載入
-    在自己的記憶體裡，更新覆蓋安裝時想覆寫/刪除這支 DLL 會被擋下來（檔案正被
-    另一個處理程序使用中），而且這跟是不是系統管理員身分無關，重試也沒用，
-    只能真的把持有它的處理程序關掉。這是打包時的選填選項（見
-    install_manifest.json 的 restart_explorer_on_update），預設不啟用。
-    """
-    try:
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        subprocess.run(
-            ["taskkill", "/f", "/im", "explorer.exe"],
-            creationflags=creationflags, timeout=10,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        time.sleep(1)  # 給處理程序終止、控制代碼釋放一點緩衝時間
-    except Exception:
-        pass
-
-
 def _restart_explorer():
-    """重新啟動 explorer.exe，搭配 _kill_explorer() 使用。"""
+    """重新啟動 explorer.exe，搭配 _kill_locking_processes() 使用。"""
     try:
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         subprocess.Popen(["explorer.exe"], creationflags=creationflags)
@@ -149,8 +149,69 @@ def _restart_explorer():
         pass
 
 
-def _should_restart_explorer(silent, manifest, argv):
-    """決定這次解除安裝要不要在刪除檔案前後關閉/重啟檔案總管。
+def _process_image_name(pid):
+    """回傳 pid 對應的執行檔檔名（例如 "explorer.exe"），查不到回傳空字串。
+
+    Restart Manager（見 restart_manager.find_locking_processes()）回傳的
+    是使用者友善名稱（explorer.exe 常會顯示成「Windows 檔案總管」之類的
+    localized 字串），不能拿來判斷「這是不是 explorer.exe」，要另外用
+    pid 查真正的執行檔檔名。
+    """
+    try:
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        output = subprocess.check_output(
+            f'tasklist /FI "PID eq {pid}" /NH /FO CSV',
+            shell=True, text=True, stderr=subprocess.DEVNULL, creationflags=creationflags,
+        )
+        first_line = output.strip().splitlines()[0] if output.strip() else ""
+        return first_line.split(",")[0].strip('"')
+    except Exception:
+        return ""
+
+
+def _kill_processes(processes):
+    """逐一 taskkill /f /pid 結束 processes（通常來自
+    restart_manager.find_locking_processes()，[(pid, friendly_name), ...]，
+    真正是誰鎖住就結束誰，不是無差別地假設一定是 explorer.exe）。
+
+    真實情境：應用程式如果註冊了 Windows 檔案總管殼層擴充功能（Shell
+    Extension DLL，例如右鍵選單擴充），只要 explorer.exe 還活著就會把這支
+    DLL 常駐載入在自己的記憶體裡，刪除/覆寫會被擋下來——這跟系統管理員
+    權限完全無關，重試也沒用，只能真的把持有它的處理程序關掉。舊做法是
+    寫死 taskkill /im explorer.exe，只涵蓋這一種情境；改用
+    restart_manager（包 Windows Restart Manager API）實際偵測，涵蓋任何
+    真正鎖住這些檔案的進程，不只是 explorer.exe。這是打包時的選填選項
+    （見 install_manifest.json 的 restart_explorer_on_update），預設不啟用。
+
+    回傳被結束的進程清單 [(pid, image_name), ...]（image_name 用
+    _process_image_name() 另外查真正的執行檔檔名，不是 Restart Manager
+    回傳的使用者友善名稱），供呼叫端決定後續要不要重啟：目前只有
+    explorer.exe 值得自動重啟（殺掉它會讓使用者的桌面/工作列消失），其他
+    被偵測到鎖定檔案的進程通常是使用者自己的應用程式（或其他跟這次解除
+    安裝無關的第三方程式），不該自動幫使用者重新開啟。
+    """
+    killed = []
+    for pid, _friendly_name in processes:
+        image_name = _process_image_name(pid)
+        try:
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            subprocess.run(
+                ["taskkill", "/f", "/pid", str(pid)],
+                creationflags=creationflags, timeout=10,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            killed.append((pid, image_name))
+        except Exception:
+            pass
+    if killed:
+        time.sleep(1)  # 給處理程序終止、控制代碼釋放一點緩衝時間
+    return killed
+
+
+def _wants_lock_release(manifest, argv):
+    """決定這次解除安裝『設定上』要不要偵測並結束鎖定檔案的進程——不分
+    互動或無人值守，只回答「這個應用程式有沒有勾選需要」，實際互動情境下
+    要不要真的執行、要不要先跟使用者確認，是呼叫端（main()）自己的事。
 
     優先看呼叫端有沒有透過 --restart-explorer 命令列旗標明確指定——這是
     installer_core.py 的 run_upgrade_uninstall()（更新覆蓋安裝情境）會用的
@@ -158,15 +219,45 @@ def _should_restart_explorer(silent, manifest, argv):
     可能過期的 install_manifest.json。真實抓到的 bug：原本只看 manifest，
     但更新覆蓋安裝呼叫的是舊版本的 uninstall.exe，讀到的是舊版本安裝當下的
     設定，跟使用者這次重新打包的新設定是兩回事，導致行為隨每次安裝嘗試留下
-    的 manifest 版本不同而時好時壞。沒帶這個旗標時（手動雙擊解除安裝、或不是
-    被更新流程觸發的純靜默解除安裝）才退回讀 manifest 自己的設定。
+    的 manifest 版本不同而時好時壞。沒帶這個旗標時才退回讀 manifest 自己的設定。
 
-    只有無人值守（silent）情境才會套用，互動式解除安裝不該無預警把使用者的
-    檔案總管視窗全部關掉。
+    真實抓到的另一個 bug：這裡原本只要不是 --silent（互動式手動解除安裝）
+    就直接回傳 False，理由是「不該無預警把使用者的檔案總管視窗全部關掉」——
+    但這麼一來，只要應用程式有鎖定相關的檔案，使用者手動解除安裝永遠不會
+    真的把它釋放掉，檔案留在安裝目錄刪不掉（刪除失敗被靜默吞掉，只寫進
+    log），下次重新安裝到同一個路徑覆寫這個仍被鎖住的檔案就會失敗，而且
+    錯誤訊息顯示成「權限不足」，容易誤導使用者以為要用系統管理員身分重試
+    （其實無關，重試也沒用）。現在改成不分互動或無人值守，只要設定上想要
+    就回傳 True；互動情境該不該先問過使用者，改由 main() 呼叫
+    _confirm_kill_locking_processes() 額外把關。
     """
-    if not silent:
-        return False
     return ("--restart-explorer" in argv) or bool(manifest.get("restart_explorer_on_update", False))
+
+
+def _confirm_kill_locking_processes(app_name, processes):
+    """互動式解除安裝在真的結束鎖定進程前，跳出確認對話框取得使用者同意。
+
+    更新覆蓋安裝（無人值守）不需要問，因為那是使用者先前安裝新版本時就
+    已經同意的流程。但手動解除安裝是使用者當下主動的操作，強制結束其他
+    正在執行的程式是有感的副作用，選「否」的話解除安裝仍會繼續，只是
+    被鎖住的檔案可能刪不掉。
+
+    列出 restart_manager 實際偵測到的進程名稱，而不是像舊版一律寫死
+    「檔案總管」——現在是真的偵測鎖定者是誰，不再假設一定是 explorer.exe。
+    processes 為空（沒偵測到任何鎖定）時直接回傳 False，不用打擾使用者。
+    """
+    if not processes:
+        return False
+    names = "、".join(sorted({name for _pid, name in processes if name})) or "未知程式"
+    MB_YESNO, IDYES, MB_ICONWARNING = 4, 6, 48
+    result = ctypes.windll.user32.MessageBoxW(
+        0,
+        f"偵測到「{app_name}」的部分檔案目前被下列程式鎖定：{names}。\n"
+        f"需要先結束這些程式才能完整移除相關檔案，是否繼續？\n\n"
+        f"（選「否」解除安裝仍會繼續，但可能有檔案因為還在使用中而無法刪除。）",
+        "解除安裝助手", MB_YESNO | MB_ICONWARNING,
+    )
+    return result == IDYES
 
 
 def _is_upgrade_call(argv):
@@ -356,13 +447,36 @@ def main():
     # False = 資料夾裡還留有其他東西，只能刪自己、把資料夾留著。
     safe_to_remove_whole_dir = False
 
-    # 只有無人值守（--silent，來自更新覆蓋流程或企業批次部署）且打包時勾選了
-    # 這個選項，才會關閉檔案總管：一般使用者手動雙擊解除安裝屬於互動情境，
-    # 不該無預警把使用者的檔案總管視窗全部關掉。
-    restart_explorer = _should_restart_explorer(silent, manifest, sys.argv)
-    if restart_explorer:
-        print("[提示] 暫時關閉檔案總管以釋放可能鎖定的檔案（例如殼層擴充功能 DLL）...")
-        _kill_explorer()
+    is_local_appdata_file = _local_appdata_resolver(manifest)
+    local_appdata_dir = manifest.get("local_appdata_dir") or ""
+
+    def _target_path(rel):
+        base_dir = local_appdata_dir if (local_appdata_dir and is_local_appdata_file(rel)) else current_dir
+        return os.path.join(base_dir, rel)
+
+    if files_to_remove:
+        candidate_paths = [_target_path(rel) for rel in files_to_remove if os.path.basename(rel) != self_name]
+    else:
+        # 找不到安裝清單的舊版遺留情況：沒有明確的檔案清單可以餵給鎖定偵測，
+        # 退回掃描整個安裝目錄，盡量維持跟有清單時同等的偵測涵蓋範圍。
+        candidate_paths = [
+            os.path.join(current_dir, f)
+            for f in os.listdir(current_dir)
+            if f != self_name and os.path.isfile(os.path.join(current_dir, f))
+        ]
+
+    # 打包時勾選了這個選項，才需要偵測並結束鎖定檔案的進程；無人值守
+    # （--silent，來自更新覆蓋流程或企業批次部署）偵測到就直接結束，
+    # 互動式（使用者手動解除安裝）額外跳確認對話框，列出實際偵測到的
+    # 進程名稱，取得同意後才真的結束，避免無預警強制關閉使用者正在用的
+    # 其他程式。
+    killed_processes = []
+    if _wants_lock_release(manifest, sys.argv):
+        locking_processes = restart_manager.find_locking_processes(candidate_paths)
+        proceed = silent or _confirm_kill_locking_processes(app_name, locking_processes)
+        if locking_processes and proceed:
+            print("[提示] 正在結束鎖定安裝檔案的程式，以釋放檔案（例如殼層擴充功能 DLL）...")
+            killed_processes = _kill_processes(locking_processes)
 
     try:
         if files_to_remove:
@@ -370,13 +484,10 @@ def main():
             # 部分檔案打包時可能被指定落地到 %LOCALAPPDATA%\Programs\<folder_name>
             # （見 installer_core.py 的 local_appdata_files），要從那邊刪，
             # 不是安裝目錄（current_dir）。
-            is_local_appdata_file = _local_appdata_resolver(manifest)
-            local_appdata_dir = manifest.get("local_appdata_dir") or ""
             for rel in files_to_remove:
                 if os.path.basename(rel) == self_name:
                     continue  # 自己交給下面的自我刪除流程處理，執行中無法自刪
-                base_dir = local_appdata_dir if (local_appdata_dir and is_local_appdata_file(rel)) else current_dir
-                item_path = os.path.join(base_dir, rel)
+                item_path = _target_path(rel)
                 try:
                     if os.path.exists(item_path):
                         os.remove(item_path)
@@ -424,7 +535,10 @@ def main():
             # 找不到清單這個分支，設計上本來就是要整個清空，維持原行為
             safe_to_remove_whole_dir = True
     finally:
-        if restart_explorer:
+        # 只有真的結束掉的進程裡剛好有 explorer.exe，才自動重啟它——殺掉它
+        # 會讓使用者的桌面/工作列消失；其他被偵測到鎖定檔案而結束掉的進程
+        # 通常是使用者自己的應用程式，不該自動幫使用者重新開啟。
+        if any(image_name.lower() == "explorer.exe" for _pid, image_name in killed_processes):
             _restart_explorer()
 
     # 安裝目錄即將被整個刪掉（或者只刪自己），log 改寫到 %TEMP%，

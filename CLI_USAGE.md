@@ -85,12 +85,12 @@ python builder_cli.py pack --config app.json [--其他 flag 覆蓋個別欄位..
 | `main_exe` | `--main-exe` | 是 | 主要執行檔，相對於 `app_dir` 的路徑 |
 | `eula_texts` | （只能透過 JSON） | 否 | 多語言 EULA，語言代碼對應文字的字典，例如 `{"zh-TW": "...", "en": "..."}`；空字典代表不顯示同意頁 |
 | `eula_default_lang` | `--eula-default-lang` | `eula_texts` 非空時必填 | 終端使用者系統語言沒有對應版本時的回退語言 |
-| `dependencies` | `--dependencies` | 否 | 逗號分隔，可用值：`vcredist_x64`、`dotnet_desktop` |
+| `dependencies` | `--dependencies` | 否 | 逗號分隔，可用值：`vcredist_x64`、`dotnet_desktop`。安裝介面載入時會用登錄表偵測這些執行環境是否已安裝，缺少的話彈窗提示，使用者可以選「自動安裝」（從官方下載點下載安裝檔並靜默執行，裝完後重新偵測、切回拖曳頁面並顯示提示），也可以選「仍要繼續安裝」略過（不會阻擋主程式安裝，只是主程式之後可能無法正常執行）。見規格文件 §8.22 |
 | `file_associations` | `--file-associations` | 否 | 逗號分隔的副檔名，例如 `.xyz,.abc`；有填就等同 GUI 版「勾選需要註冊檔案關聯」 |
 | `add_to_path` | `--add-to-path` / `--no-add-to-path` | 否 | 安裝後是否把路徑加入環境變數 PATH |
 | `path_target_exe` | `--path-target-exe` | 否 | `add_to_path` 開啟時，指定只把這支執行檔所在的目錄加入 PATH（不填就是整個安裝目錄，見規格文件 §8.14） |
 | `local_appdata_files` | `--local-appdata-files` | 否 | 逗號分隔，相對於 `app_dir` 的路徑，指定這些檔案改裝到 `%LOCALAPPDATA%\Programs\<folder_name>`（使用者自己的目錄，不需要系統管理員權限）而不是主安裝目錄；典型用途是跟主程式分開的 CLI 工具，讓使用者事後單純執行它不用每次都提權。如果 `path_target_exe` 也列在這裡，加進 PATH 的會自動變成這個別位目錄，見規格文件 §8.19 |
-| `restart_explorer_on_update` | `--restart-explorer-on-update` / `--no-restart-explorer-on-update` | 否 | 更新覆蓋安裝時是否暫時關閉檔案總管釋放被鎖定的檔案（見規格文件 §8.12） |
+| `restart_explorer_on_update` | `--restart-explorer-on-update` / `--no-restart-explorer-on-update` | 否 | 更新覆蓋安裝或解除安裝時是否偵測並結束鎖定安裝檔案的進程（不只是 explorer.exe，用 Windows Restart Manager API 實際偵測是哪些進程持有控制代碼）；更新覆蓋（無人值守）直接套用，手動解除安裝會先跳確認對話框列出偵測到的進程（見規格文件 §8.12） |
 
 `eula_texts` 是字典結構，只能透過 JSON 設定檔提供，沒有對應的命令列 flag
 （塞一整包多語言文字進命令列參數不實際）。

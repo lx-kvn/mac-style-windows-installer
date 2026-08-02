@@ -89,12 +89,14 @@ ERROR = "#FF6B6B"
 
 # 兩顆 exe（GUI 版、CLI 版）都要內嵌的共用深模組：packaging_core.py 讀取
 # installer_core.py/uninstall.py 的 ensure_workspace_files()，跟這兩支各自
-# 匯入的 window_drag.py/disk_space.py/file_assoc.py/lang_detect.py，
-# 必須實際存在於磁碟上才能在 builder.py 另外呼叫的 pyinstaller 子行程裡
-# 被找到。splash_helper.py 只有 GUI 版需要（CLI 沒有 Tkinter 載入畫面）。
+# 匯入的 window_drag.py/disk_space.py/file_assoc.py/lang_detect.py/
+# restart_manager.py，必須實際存在於磁碟上才能在 builder.py 另外呼叫的
+# pyinstaller 子行程裡被找到。splash_helper.py 只有 GUI 版需要（CLI 沒有
+# Tkinter 載入畫面）。
 _SHARED_ADD_DATA = [
     "installer_core.py", "uninstall.py",
     "window_drag.py", "disk_space.py", "file_assoc.py", "lang_detect.py",
+    "restart_manager.py",
 ]
 _GUI_ADD_DATA = _SHARED_ADD_DATA + ["splash_helper.py", "packaging_core.py"]
 _CLI_ADD_DATA = _SHARED_ADD_DATA + ["packaging_core.py", "builder.py"]
@@ -113,6 +115,7 @@ _REQUIRED_FILES = [
     ("disk_space.py", "disk_space.py"),
     ("file_assoc.py", "file_assoc.py"),
     ("lang_detect.py", "lang_detect.py"),
+    ("restart_manager.py", "restart_manager.py"),
 ]
 
 

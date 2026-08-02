@@ -559,8 +559,8 @@ class TestCloseWindowRestoresPendingBackup(unittest.TestCase):
 
 class TestCloseRunningMainExe(unittest.TestCase):
     """close_running_main_exe()：使用者在「偵測到主程式執行中」的彈窗按下
-    「關閉程式並繼續安裝」時呼叫，寫法比照 uninstall.py 既有的
-    _kill_explorer()（taskkill /f、吞例外回傳布林值）。"""
+    「關閉程式並繼續安裝」時呼叫，寫法比照 uninstall.py 既有的慣例
+    （taskkill /f、吞例外回傳布林值）。"""
 
     def test_calls_taskkill_with_main_exe_basename(self):
         api = make_installer_api(main_exe="sub\\app.exe")
@@ -751,6 +751,202 @@ class TestGetEulaTextFallbackChain(unittest.TestCase):
             eula_default_lang="ja-JP", ui_language="ko-KR",
         )
         self.assertEqual(api.get_eula_text(), "中文合約", "開發者忘記設定有效的預設語言時，至少要保底顯示一個版本，而不是整個消失")
+
+
+class _FakeWinError(OSError):
+    """建構帶有 winerror 屬性的 OSError，模擬 Windows 特有的錯誤碼——
+    真實的 PermissionError/OSError 在 Windows 上會自動帶 winerror，這裡
+    純 Python 測試環境要手動附加才能重現。"""
+
+    def __init__(self, winerror, message="模擬錯誤"):
+        super().__init__(message)
+        self.winerror = winerror
+
+
+class TestDescribeInstallOsError(unittest.TestCase):
+    """_describe_install_os_error()：真實抓到的 bug——trigger_installation()
+    原本不管什麼原因，只要是 PermissionError 就一律顯示「權限不足，請以
+    管理員身分執行」，但這支安裝程式本身是用 --uac-admin 編譯的，Windows
+    執行前就已經要求過使用者用系統管理員身分執行，執行到這裡的程式碼一定
+    已經是系統管理員權杖——「以管理員身分重試」對這裡真正常見的成因（檔案
+    被其他程式鎖住）完全沒有幫助，反而會誤導使用者。現在改用 winerror
+    分辨真正的成因，給出對應的訊息。"""
+
+    def test_sharing_violation_names_the_locking_process_when_detected(self):
+        api = make_installer_api()
+        error = _FakeWinError(32)
+        with mock.patch(
+            "installer_core.restart_manager.find_locking_processes",
+            return_value=[(111, "某個殼層擴充功能")],
+        ):
+            message = api._describe_install_os_error(error, r"C:\app\locked.dll")
+        self.assertIn("locked.dll", message)
+        self.assertIn("某個殼層擴充功能", message)
+        self.assertIn("系統管理員身分執行", message)
+        self.assertNotIn("以管理員身分重試", message)
+
+    def test_lock_violation_without_detected_process_still_explains_cause(self):
+        api = make_installer_api()
+        error = _FakeWinError(33)
+        with mock.patch("installer_core.restart_manager.find_locking_processes", return_value=[]):
+            message = api._describe_install_os_error(error, r"C:\app\locked.dll")
+        self.assertIn("正被其他程式使用中", message)
+        self.assertIn("系統管理員身分", message)
+
+    def test_access_denied_does_not_suggest_running_as_admin(self):
+        api = make_installer_api()
+        error = _FakeWinError(5)
+        message = api._describe_install_os_error(error, r"C:\app\file.dll")
+        self.assertIn("已經是以系統管理員身分執行", message)
+        self.assertIn("受控資料夾存取", message)
+
+    def test_write_protect_reports_readonly_media(self):
+        api = make_installer_api()
+        error = _FakeWinError(19)
+        message = api._describe_install_os_error(error, r"D:\file.dll")
+        self.assertIn("唯讀", message)
+
+    def test_unknown_winerror_permission_error_falls_back_to_generic_message(self):
+        api = make_installer_api()
+        error = PermissionError("其他沒見過的原因")
+        message = api._describe_install_os_error(error, r"C:\app\file.dll")
+        self.assertIn("已經是以系統管理員身分執行", message)
+
+    def test_non_permission_os_error_uses_generic_message(self):
+        api = make_installer_api()
+        error = OSError("磁碟走完了之類的其他錯誤")
+        message = api._describe_install_os_error(error, None)
+        self.assertIn("磁碟走完了之類的其他錯誤", message)
+
+
+class TestGetDependencyWarnings(unittest.TestCase):
+    """get_dependency_warnings()：現在額外回傳 key（前端要用它呼叫
+    install_dependency(key) 觸發自動安裝），跟 DEPENDENCY_CHECKERS 從
+    3-tuple 擴充成 4-tuple（多了自動安裝要用的靜默參數）配套。"""
+
+    def test_missing_dependency_includes_key_name_and_url(self):
+        api = make_installer_api(dependencies=["vcredist_x64"])
+        with mock.patch.dict(
+            ic.DEPENDENCY_CHECKERS,
+            {"vcredist_x64": (lambda: False, "Visual C++ Redistributable (x64)", "https://example.test/vc.exe", ["/quiet"])},
+        ):
+            warnings = api.get_dependency_warnings()
+        self.assertEqual(warnings, [{
+            "key": "vcredist_x64",
+            "name": "Visual C++ Redistributable (x64)",
+            "url": "https://example.test/vc.exe",
+        }])
+
+    def test_installed_dependency_produces_no_warning(self):
+        api = make_installer_api(dependencies=["vcredist_x64"])
+        with mock.patch.dict(
+            ic.DEPENDENCY_CHECKERS,
+            {"vcredist_x64": (lambda: True, "Visual C++ Redistributable (x64)", "https://example.test/vc.exe", ["/quiet"])},
+        ):
+            warnings = api.get_dependency_warnings()
+        self.assertEqual(warnings, [])
+
+
+class TestInstallDependency(unittest.TestCase):
+    """install_dependency()：下載官方安裝檔＋靜默執行＋重新檢查登錄表。
+
+    真實情境：Visual C++ Redistributable 官方文件記載，如果機器上已經裝了
+    更新版本，/quiet 模式下子程序會回傳非 0 的錯誤碼，但這其實不是真正的
+    失敗——所以「這次安裝到底成功了沒」不能看子程序結束碼，必須裝完後
+    重新呼叫 check_fn() 才是最終依據，底下的測試專門驗證這一點。"""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.fake_key = "fake_dep"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _register_fake_checker(self, check_fn):
+        return mock.patch.dict(
+            ic.DEPENDENCY_CHECKERS,
+            {self.fake_key: (check_fn, "Fake Dependency", "https://example.test/fake.exe", ["/quiet"])},
+        )
+
+    def _fake_url_response(self, body=b"fake-exe-bytes"):
+        response = mock.MagicMock()
+        response.__enter__ = mock.Mock(return_value=response)
+        response.__exit__ = mock.Mock(return_value=False)
+        response.getheader.return_value = str(len(body))
+        chunks = [body, b""]
+        response.read.side_effect = chunks
+        return response
+
+    def test_unknown_key_returns_error_without_downloading(self):
+        api = make_installer_api()
+        with mock.patch("installer_core.urllib.request.urlopen") as mock_urlopen:
+            result = api.install_dependency("not_a_real_key")
+        self.assertEqual(result["status"], "error")
+        mock_urlopen.assert_not_called()
+
+    def test_success_when_recheck_confirms_installed(self):
+        api = make_installer_api()
+        with self._register_fake_checker(lambda: True), \
+             mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response()), \
+             mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=0)):
+            result = api.install_dependency(self.fake_key)
+        self.assertEqual(result, {"status": "success", "name": "Fake Dependency"})
+
+    def test_nonzero_exit_code_still_succeeds_if_recheck_confirms_installed(self):
+        """真實抓到的坑：vcredist 偵測到已裝更新版本時，/quiet 模式下會回傳
+        非 0 結束碼，但這其實不是失敗——不能只看結束碼判斷。"""
+        api = make_installer_api()
+        with self._register_fake_checker(lambda: True), \
+             mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response()), \
+             mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=1638)):
+            result = api.install_dependency(self.fake_key)
+        self.assertEqual(result["status"], "success")
+
+    def test_download_failure_returns_error_without_running_installer(self):
+        api = make_installer_api()
+        with self._register_fake_checker(lambda: False), \
+             mock.patch("installer_core.urllib.request.urlopen", side_effect=OSError("模擬連線失敗")), \
+             mock.patch("installer_core.subprocess.run") as mock_run:
+            result = api.install_dependency(self.fake_key)
+        self.assertEqual(result["status"], "error")
+        self.assertIn("下載", result["message"])
+        mock_run.assert_not_called()
+
+    def test_installer_process_failure_returns_error(self):
+        api = make_installer_api()
+        with self._register_fake_checker(lambda: False), \
+             mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response()), \
+             mock.patch("installer_core.subprocess.run", side_effect=OSError("模擬子程序啟動失敗")):
+            result = api.install_dependency(self.fake_key)
+        self.assertEqual(result["status"], "error")
+        self.assertIn("執行", result["message"])
+
+    def test_recheck_still_missing_after_install_returns_error(self):
+        api = make_installer_api()
+        with self._register_fake_checker(lambda: False), \
+             mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response()), \
+             mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=0)):
+            result = api.install_dependency(self.fake_key)
+        self.assertEqual(result["status"], "error")
+        self.assertIn("Fake Dependency", result["message"])
+
+    def test_temp_installer_file_is_removed_after_success(self):
+        api = make_installer_api()
+        expected_tmp_path = os.path.join(tempfile.gettempdir(), f"dep_installer_{self.fake_key}.exe")
+        with self._register_fake_checker(lambda: True), \
+             mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response()), \
+             mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=0)):
+            api.install_dependency(self.fake_key)
+        self.assertFalse(os.path.exists(expected_tmp_path))
+
+    def test_temp_installer_file_is_removed_even_when_installer_process_fails(self):
+        expected_tmp_path = os.path.join(tempfile.gettempdir(), f"dep_installer_{self.fake_key}.exe")
+        api = make_installer_api()
+        with self._register_fake_checker(lambda: False), \
+             mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response()), \
+             mock.patch("installer_core.subprocess.run", side_effect=OSError("模擬子程序啟動失敗")):
+            api.install_dependency(self.fake_key)
+        self.assertFalse(os.path.exists(expected_tmp_path))
 
 
 if __name__ == "__main__":

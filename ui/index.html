@@ -154,6 +154,23 @@
         .eula-title { font-size: 16px; font-weight: 600; color: #1d1d1f; margin-bottom: 10px; text-align: center; }
         .eula-text-box { flex: 1; overflow-y: auto; background: white; border: 1px solid #e5e5ea; border-radius: 10px; padding: 16px; font-size: 12px; color: #3a3a3c; line-height: 1.7; white-space: pre-wrap; max-height: 320px; }
         .eula-actions { display: flex; justify-content: center; gap: 10px; margin-top: 16px; }
+
+        /* 相依元件自動安裝頁：跟 eula-view 一樣是獨立畫面（不是 modal），
+           安裝期間取代 mainView 顯示，裝完/失敗後切回去。 */
+        .dep-install-view { display: none; flex-direction: column; align-items: center; width: 360px; margin-top: 8px; }
+        .dep-install-view.active { display: flex; }
+        .dep-install-title { font-size: 15px; font-weight: 600; color: #1d1d1f; margin-bottom: 16px; text-align: center; }
+        .dep-install-view .install-progress-wrap { display: block; margin-top: 0; }
+
+        /* 底部小提示 toast：裝完相依元件、切回拖曳頁面後短暫顯示 */
+        .dep-toast {
+            position: fixed; bottom: 60px; left: 50%; transform: translateX(-50%) translateY(8px);
+            background: rgba(29, 29, 31, 0.9); color: white; font-size: 12px;
+            padding: 8px 18px; border-radius: 20px; z-index: 20000;
+            opacity: 0; pointer-events: none; transition: opacity 0.3s ease, transform 0.3s ease;
+            white-space: nowrap;
+        }
+        .dep-toast.active { opacity: 1; transform: translateX(-50%) translateY(0); }
     </style>
 </head>
 <body>
@@ -173,6 +190,18 @@
             <button class="nice-btn" onclick="acceptEula()" data-i18n="btn_accept">同意並繼續</button>
         </div>
     </div>
+
+    <!-- 相依元件自動安裝頁：跟 eulaView 同一層級的獨立畫面，不是彈窗 -->
+    <div class="dep-install-view" id="depInstallView">
+        <div class="dep-install-title" id="depInstallTitle" data-i18n="dep_installing_title">正在安裝相依元件</div>
+        <div class="install-progress-wrap" id="depInstallProgressWrap" style="display: block;">
+            <div class="install-progress-text" id="depInstallProgressText"></div>
+            <div class="install-progress-track"><div class="install-progress-fill" id="depInstallProgressFill"></div></div>
+        </div>
+    </div>
+
+    <!-- 底部小提示：相依元件自動安裝完成後短暫顯示 -->
+    <div class="dep-toast" id="depToast"></div>
 
     <!-- 主安裝畫面 -->
     <div class="main-view" id="mainView">
@@ -226,13 +255,14 @@
         </div>
     </div>
 
-    <!-- 相依元件警告（非阻擋） -->
+    <!-- 相依元件警告：可以選擇自動安裝，或略過（不阻擋主程式安裝） -->
     <div class="nice-modal-overlay" id="depModal">
         <div class="nice-modal-box">
             <div class="nice-icon warn"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L14.7 3.86a2 2 0 0 0-3.4 0z"></path></svg></div>
             <div class="nice-title" data-i18n="dep_modal_title">建議先安裝以下元件</div>
             <div class="nice-message" id="depMessage"></div>
             <button class="nice-btn secondary" onclick="closeDepModal()" data-i18n="btn_continue_anyway">仍要繼續安裝</button>
+            <button class="nice-btn" id="installDepBtn" onclick="installMissingDependencies()" data-i18n="btn_install_dependency">自動安裝</button>
         </div>
     </div>
 
@@ -286,6 +316,11 @@
                 btn_continue_anyway: "仍要繼續安裝",
                 dep_modal_title: "建議先安裝以下元件",
                 dep_download_link: "前往下載",
+                btn_install_dependency: "自動安裝",
+                dep_installing_title: "正在安裝相依元件",
+                dep_installing_text: "正在安裝 {{name}}...",
+                dep_installed_toast: "已自動安裝：{{names}}",
+                dep_install_failed_toast: "{{names}} 自動安裝未成功，請參考上方連結手動安裝",
                 install_success_title: "安裝成功",
                 install_failed_title: "安裝失敗",
                 launch_after_install_label: "安裝完成後立即執行程式",
@@ -317,6 +352,11 @@
                 btn_continue_anyway: "Continue Anyway",
                 dep_modal_title: "Recommended components missing",
                 dep_download_link: "Download",
+                btn_install_dependency: "Install Automatically",
+                dep_installing_title: "Installing dependencies",
+                dep_installing_text: "Installing {{name}}...",
+                dep_installed_toast: "Installed: {{names}}",
+                dep_install_failed_toast: "{{names}} could not be installed automatically — please use the link above to install manually",
                 install_success_title: "Installation Complete",
                 install_failed_title: "Installation Failed",
                 launch_after_install_label: "Launch the app after installation",
@@ -449,7 +489,57 @@
         }
 
         // ---------------- 相依元件警告 ----------------
+        // 記住這次偵測到缺少的相依元件清單，「自動安裝」按鈕按下去時要依序
+        // 處理這份清單裡的每一個（見 installMissingDependencies()）。
+        let pendingDependencyWarnings = [];
+
         function closeDepModal() { document.getElementById('depModal').classList.remove('active'); }
+
+        function showDepToast(message) {
+            const toast = document.getElementById('depToast');
+            toast.innerText = message;
+            toast.classList.add('active');
+            setTimeout(() => { toast.classList.remove('active'); }, 4000);
+        }
+
+        window.updateDependencyInstallProgress = function (percent, message) {
+            document.getElementById('depInstallProgressText').innerText = message;
+            document.getElementById('depInstallProgressFill').style.width = percent + '%';
+        };
+
+        // 使用者在相依元件彈窗按下「自動安裝」：依序下載＋靜默安裝每一個
+        // 缺少的元件（見 installer_core.py 的 install_dependency()，backend
+        // 用既有的 evaluate_js 推播模式回報進度，這裡單純 await 每一次呼叫、
+        // 拿到最終結果才繼續下一個，不需要另外寫輪詢）。全部處理完，不論
+        // 成功與否都切回拖曳頁面，底部用小提示告知結果。
+        async function installMissingDependencies() {
+            const warnings = pendingDependencyWarnings;
+            document.getElementById('depModal').classList.remove('active');
+            setMainViewVisible(false);
+            document.getElementById('depInstallView').classList.add('active');
+
+            const installed = [];
+            const failed = [];
+            for (const w of warnings) {
+                document.getElementById('depInstallProgressText').innerText = t('dep_installing_text', { name: w.name });
+                document.getElementById('depInstallProgressFill').style.width = '0%';
+                const result = await pywebview.api.install_dependency(w.key);
+                if (result.status === 'success') {
+                    installed.push(w.name);
+                } else {
+                    failed.push(w.name);
+                }
+            }
+
+            document.getElementById('depInstallView').classList.remove('active');
+            setMainViewVisible(true);
+
+            if (installed.length > 0 && failed.length === 0) {
+                showDepToast(t('dep_installed_toast', { names: installed.join('、') }));
+            } else if (failed.length > 0) {
+                showDepToast(t('dep_install_failed_toast', { names: failed.join('、') }));
+            }
+        }
 
         const dragItem = document.getElementById('drag-item');
         const dropTarget = document.getElementById('drop-target');
@@ -518,6 +608,7 @@
         async function afterUpgradeCheck() {
             const warnings = await pywebview.api.get_dependency_warnings();
             if (warnings && warnings.length > 0) {
+                pendingDependencyWarnings = warnings;
                 document.getElementById('depMessage').innerHTML = warnings
                     .map(w => `• ${w.name}（<a href="#" onclick="pywebview.api.open_url('${w.url}'); return false;">${t('dep_download_link')}</a>）`)
                     .join('<br>');

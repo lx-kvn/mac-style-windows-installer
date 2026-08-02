@@ -134,11 +134,12 @@ def ensure_workspace_files(workspace_dir):
 
     # installer_core.py / uninstall.py 是要被 builder.py 各自拉去重新編譯成
     # 獨立 exe 的進入點；window_drag.py / disk_space.py / file_assoc.py /
-    # lang_detect.py 是它們匯入的共用深模組，同樣要在工作目錄裡才能被那兩次
-    # pyinstaller 呼叫找到。
+    # lang_detect.py / restart_manager.py 是它們匯入的共用深模組，同樣要在
+    # 工作目錄裡才能被那兩次 pyinstaller 呼叫找到。
     required_scripts = [
         "installer_core.py", "uninstall.py",
         "window_drag.py", "disk_space.py", "file_assoc.py", "lang_detect.py",
+        "restart_manager.py",
     ]
 
     try:
