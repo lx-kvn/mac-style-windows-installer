@@ -40,6 +40,14 @@ The old uninstaller (`uninstall.py`) used a fire-and-forget self-delete trick (s
 
 Discovered while actually running the new `--cli` dual-build mode for this release: the stale-artifact cleanup step used to `shutil.rmtree("dist")` wholesale before each build, so compiling the CLI edition right after the GUI edition deleted the GUI exe that had just been built. Fixed to only remove the specific target's own leftover artifacts (`dist/{name}.exe`, `build/{name}/`, `{name}.spec`), leaving other already-built outputs in `dist/` untouched.
 
+### Release Process Improvements
+
+Found while actually running the full `/released` flow end-to-end for the first time (no code changes, process/documentation only):
+
+- `build_config_tool.py --cli` requires `--icon` to be passed explicitly to embed a custom icon in the GUI/CLI exes — easy to forget since the flag is optional. `/released` now always passes it.
+- Packaging the two Builder Tool exes into one installer (`builder_cli.py pack`) requires the staging `--app-dir` to live outside the repo's own `dist/` folder, since `builder.py`'s own build process clears `dist/` too. `/released` now stages in a temp directory instead.
+- The GUI/CLI exe files installed onto a user's machine are now renamed to fixed, version-free names (`mswi-gui.exe` / `mswi-cli.exe`) before being packaged, distinct from the versioned build artifact names in `dist/`. This means the CLI command a user types after installing (`mswi-cli ...`) stays the same across every future version upgrade, instead of changing every release.
+
 ### Testing
 
 170 → 172 tests (net +2 after removing two files whose content was migrated into `tests/test_packaging_core.py`, and adding `tests/test_builder_cli.py`, `tests/test_build_config_tool.py`, plus a regression test proving two sequential `build_one_exe()` calls no longer clobber each other's output), all passing.
@@ -79,6 +87,14 @@ Discovered while actually running the new `--cli` dual-build mode for this relea
 **`build_one_exe()` 每次建置前會清空整個 `dist/` 資料夾**
 
 這次實際執行新的 `--cli` 雙 exe 建置模式時發現：舊產物清理邏輯原本是整個 `shutil.rmtree("dist")`，導致編完 GUI 版緊接著編 CLI 版時，把剛編好的 GUI exe 一起刪掉。修正成只清除這次要編的目標自己殘留的產物（`dist/{name}.exe`、`build/{name}/`、`{name}.spec`），不動 `dist/` 底下其他已經編好的產出。
+
+### 發布流程改善
+
+第一次完整實際跑過 `/released` 流程才發現的問題（不涉及程式碼變更，純流程／文件調整）：
+
+- `build_config_tool.py --cli` 要明確帶 `--icon` 才會套用自訂圖示到 GUI/CLI exe，這個旗標是選填，很容易忘記帶。`/released` 現在固定會帶上。
+- 把兩顆 Builder Tool exe 打包成一份安裝檔（`builder_cli.py pack`）時，暫存用的 `--app-dir` 不能放在 repo 自己的 `dist/` 底下，因為 `builder.py` 自己的建置流程也會清空 `dist/`。`/released` 現在改成放到系統暫存目錄。
+- 安裝到使用者電腦上的 GUI/CLI 執行檔，打包前會先改名成不帶版本號的固定名稱（`mswi-gui.exe`／`mswi-cli.exe`），跟 `dist/` 底下含版本號的建置產物檔名區分開來。這樣使用者裝完後在命令列打的指令（`mswi-cli ...`）往後每次升版都維持不變，不會每次都要跟著改。
 
 ### 測試
 
