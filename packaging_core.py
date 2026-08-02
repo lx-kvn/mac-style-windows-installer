@@ -203,6 +203,7 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     use_custom_doc_icon = bool(data.get("use_custom_doc_icon", False))
     add_to_path = bool(data.get("add_to_path", False))
     path_target_exe = data.get("path_target_exe", "").strip()
+    local_appdata_files_raw = data.get("local_appdata_files", []) or []
     restart_explorer_on_update = bool(data.get("restart_explorer_on_update", False))
 
     if not app_name or not version or not publisher or not exe_name:
@@ -231,6 +232,13 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
 
     if add_to_path and path_target_exe and not os.path.exists(os.path.join(app_dir, path_target_exe)):
         return None, "欄位驗證失敗：<br>「加入 PATH」指定的執行檔不存在於應用程式資料夾中，請重新選擇。"
+
+    if isinstance(local_appdata_files_raw, str):
+        local_appdata_files_raw = local_appdata_files_raw.replace("，", ",").split(",")
+    local_appdata_files = [str(f).strip().replace("\\", "/") for f in local_appdata_files_raw if str(f).strip()]
+    for rel in local_appdata_files:
+        if not os.path.exists(os.path.join(app_dir, rel)):
+            return None, f"欄位驗證失敗：<br>指定改裝到 %LOCALAPPDATA% 的檔案「{rel}」不存在於應用程式資料夾中，請重新選擇。"
 
     doc_icon_path = ""
     if use_custom_doc_icon:
@@ -266,5 +274,6 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     pack_data["main_exe"] = main_exe
     pack_data["add_to_path"] = add_to_path
     pack_data["path_target_exe"] = path_target_exe if add_to_path else ""
+    pack_data["local_appdata_files"] = local_appdata_files
     pack_data["restart_explorer_on_update"] = restart_explorer_on_update
     return pack_data, None

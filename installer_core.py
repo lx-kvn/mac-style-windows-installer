@@ -164,6 +164,7 @@ class InstallerAPI:
         self.doc_icon = ""
         self.add_to_path = False
         self.path_target_exe = ""
+        self.local_appdata_files = []
         self.restart_explorer_on_update = False
         self.ui_language = lang_detect.detect_system_language(SUPPORTED_UI_LANGUAGES, DEFAULT_UI_LANGUAGE)
 
@@ -212,6 +213,7 @@ class InstallerAPI:
                     self.doc_icon = config.get("doc_icon", "")
                     self.add_to_path = bool(config.get("add_to_path", False))
                     self.path_target_exe = config.get("path_target_exe", "")
+                    self.local_appdata_files = config.get("local_appdata_files", [])
                     self.restart_explorer_on_update = bool(config.get("restart_explorer_on_update", False))
         except Exception as e:
             print(f"[提示] 使用預設開發模式: {e}")
@@ -488,7 +490,7 @@ class InstallerAPI:
     def _register_uninstall_entry(self):
         import winreg
         uninstall_exe = os.path.join(self.selected_path, "uninstall.exe")
-        main_exe_path = os.path.join(self.selected_path, self.main_exe) if self.main_exe else uninstall_exe
+        main_exe_path = self._resolve_installed_path(self.main_exe) if self.main_exe else uninstall_exe
         reg_path = f"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{self.app_name}"
         try:
             estimated_size_kb = self._required_size() // 1024
@@ -534,7 +536,7 @@ class InstallerAPI:
                 )
             os.makedirs(base, exist_ok=True)
             shortcut_path = os.path.join(base, f"{self.app_name}.lnk")
-            main_exe_path = os.path.join(self.selected_path, self.main_exe)
+            main_exe_path = self._resolve_installed_path(self.main_exe)
 
             shell = win32com.client.Dispatch("WScript.Shell")
             shortcut = shell.CreateShortCut(shortcut_path)
@@ -557,6 +559,43 @@ class InstallerAPI:
             return os.path.join(self.selected_path, self.doc_icon)
         return f"{main_exe_path},0"
 
+    def _local_appdata_root(self):
+        """`local_appdata_files` 指定的檔案要落地的目錄：
+        `%LOCALAPPDATA%\\Programs\\<folder_name>`。
+
+        用意是讓某幾支執行檔（典型案例：CLI 工具）改裝到使用者層級、
+        不需要系統管理員權限就能寫入的目錄，跟主安裝目錄（可能在
+        Program Files，需要管理員權限）分開——這樣使用者事後單純「執行」
+        這支工具不需要提權，只有「安裝/解除安裝」這個動作本身仍然需要
+        系統管理員權限（因為要寫登錄表、PATH 等系統層級項目）。
+
+        已知限制：如果安裝程式是用跟目前登入者不同的系統管理員帳號提權
+        執行（例如切換帳號的 UAC 提示），這裡解析出來的 %LOCALAPPDATA%
+        會是那個提權帳號的，不是原本操作安裝程式那個使用者的——多數情境
+        下 UAC 沿用同一個帳號的提權權杖，不會踩到這個邊界案例。
+        """
+        base = os.environ.get("LOCALAPPDATA") or os.path.join(
+            os.path.expanduser("~"), "AppData", "Local"
+        )
+        return os.path.join(base, "Programs", self.folder_name or self.app_name)
+
+    def _is_local_appdata_file(self, rel_path):
+        if not rel_path:
+            return False
+        norm = os.path.normcase(os.path.normpath(rel_path))
+        return any(
+            os.path.normcase(os.path.normpath(f)) == norm for f in self.local_appdata_files
+        )
+
+    def _resolve_installed_path(self, rel_path):
+        """把一個相對路徑（相對於 app_dir/安裝內容）解析成實際安裝到磁碟上的
+        絕對路徑：`local_appdata_files` 裡列出的檔案落在
+        `_local_appdata_root()`，其餘維持原本行為，落在 `self.selected_path`。
+        """
+        if self._is_local_appdata_file(rel_path):
+            return os.path.join(self._local_appdata_root(), rel_path)
+        return os.path.join(self.selected_path, rel_path)
+
     def _path_target_dir(self):
         """算出「加入 PATH」實際要加的目錄。
 
@@ -564,10 +603,12 @@ class InstallerAPI:
         一支執行檔（`path_target_exe`，例如跟主程式分開的 CLI 工具），改成
         只加那支執行檔所在的目錄——如果它就在安裝根目錄，結果跟預設行為
         相同；如果在子目錄，只有那個子目錄會被加進 PATH，不會讓整個安裝
-        目錄下所有 exe 都變成全域可呼叫。
+        目錄下所有 exe 都變成全域可呼叫。`path_target_exe` 如果同時也列在
+        `local_appdata_files` 裡，這裡會自動改成加 `_local_appdata_root()`
+        （或它底下的子目錄），不需要另外設定。
         """
         if self.path_target_exe:
-            target_dir = os.path.dirname(os.path.join(self.selected_path, self.path_target_exe))
+            target_dir = os.path.dirname(self._resolve_installed_path(self.path_target_exe))
             if target_dir:
                 return target_dir
         return self.selected_path
@@ -602,23 +643,14 @@ class InstallerAPI:
     # 主安裝流程
     # ------------------------------------------------------------------
 
-    def _rollback(self, copied_rel_paths, log=None):
-        """安裝失敗時的回滾：把這次安裝已經複製出去的檔案清掉，盡量讓系統回到
-        安裝前的乾淨狀態。只清掉『這次安裝自己複製出去的檔案』，不會動到
-        selected_path 底下其他既有內容（例如使用者選了一個已經有東西的資料夾）。
+    @staticmethod
+    def _cleanup_empty_dirs(root_dir):
+        """清掉 root_dir 底下因為刪檔而變空的子目錄（由裡到外），
+        root_dir 本身如果也空了就一併刪除。main install 目錄跟
+        `_local_appdata_root()` 的回滾清理都走這個共用邏輯。
         """
-        removed = 0
-        for rel in copied_rel_paths:
-            try:
-                path = os.path.join(self.selected_path, rel)
-                if os.path.exists(path):
-                    os.remove(path)
-                    removed += 1
-            except Exception:
-                pass
-        # 清掉因此變空的子目錄（由裡到外）
         try:
-            for root, dirs, files in os.walk(self.selected_path, topdown=False):
+            for root, dirs, files in os.walk(root_dir, topdown=False):
                 for d in dirs:
                     dpath = os.path.join(root, d)
                     try:
@@ -626,10 +658,29 @@ class InstallerAPI:
                             os.rmdir(dpath)
                     except Exception:
                         pass
-            if os.path.exists(self.selected_path) and not os.listdir(self.selected_path):
-                os.rmdir(self.selected_path)
+            if os.path.exists(root_dir) and not os.listdir(root_dir):
+                os.rmdir(root_dir)
         except Exception:
             pass
+
+    def _rollback(self, copied_rel_paths, log=None):
+        """安裝失敗時的回滾：把這次安裝已經複製出去的檔案清掉，盡量讓系統回到
+        安裝前的乾淨狀態。只清掉『這次安裝自己複製出去的檔案』，不會動到
+        selected_path（或 local_appdata_files 落地的 _local_appdata_root()）
+        底下其他既有內容（例如使用者選了一個已經有東西的資料夾）。
+        """
+        removed = 0
+        for rel in copied_rel_paths:
+            try:
+                path = self._resolve_installed_path(rel)
+                if os.path.exists(path):
+                    os.remove(path)
+                    removed += 1
+            except Exception:
+                pass
+        self._cleanup_empty_dirs(self.selected_path)
+        if self.local_appdata_files:
+            self._cleanup_empty_dirs(self._local_appdata_root())
         if log:
             log(f"安裝失敗，已回滾刪除 {removed} 個已複製的檔案")
 
@@ -697,8 +748,8 @@ class InstallerAPI:
             last_reported = -1
             for i, rel in enumerate(file_list):
                 src_f = os.path.join(src_dir, rel)
-                dest_f = os.path.join(self.selected_path, rel)
-                os.makedirs(os.path.dirname(dest_f) or self.selected_path, exist_ok=True)
+                dest_f = self._resolve_installed_path(rel)
+                os.makedirs(os.path.dirname(dest_f), exist_ok=True)
                 shutil.copy2(src_f, dest_f)
 
                 # 完整性驗證：先比大小（快），大小一致才進一步比 checksum（較慢但更可靠，
@@ -785,6 +836,8 @@ class InstallerAPI:
                 "file_associations": self.file_associations,
                 "path_added": self.add_to_path,
                 "path_directory": path_directory,
+                "local_appdata_files": self.local_appdata_files,
+                "local_appdata_dir": self._local_appdata_root() if self.local_appdata_files else "",
                 "restart_explorer_on_update": self.restart_explorer_on_update,
                 "installed_at": datetime.now().isoformat(),
             }
@@ -797,7 +850,7 @@ class InstallerAPI:
             self._report_progress(100, "安裝完成")
             self._discard_upgrade_backup()
 
-            main_exe_path = os.path.join(self.selected_path, self.main_exe) if self.main_exe else ""
+            main_exe_path = self._resolve_installed_path(self.main_exe) if self.main_exe else ""
             return {"status": "success", "message": "安裝成功", "main_exe_path": main_exe_path}
 
         except PermissionError:
@@ -839,7 +892,7 @@ class InstallerAPI:
         if not self.main_exe:
             return False
         try:
-            main_exe_path = os.path.join(self.selected_path, self.main_exe)
+            main_exe_path = self._resolve_installed_path(self.main_exe)
             subprocess.Popen([main_exe_path], cwd=os.path.dirname(main_exe_path))
             return True
         except Exception as e:

@@ -148,6 +148,77 @@ class TestPathRemovalTarget(unittest.TestCase):
         self.assertEqual(un._path_removal_target({}, "C:\\fallback"), "C:\\fallback")
 
 
+class TestLocalAppdataResolver(unittest.TestCase):
+    def test_matches_listed_file_regardless_of_slash_direction(self):
+        manifest = {"local_appdata_files": ["tools/cli.exe"]}
+        is_local = un._local_appdata_resolver(manifest)
+        self.assertTrue(is_local("tools\\cli.exe"))
+        self.assertTrue(is_local("tools/cli.exe"))
+
+    def test_unlisted_file_is_not_local_appdata(self):
+        manifest = {"local_appdata_files": ["cli.exe"]}
+        is_local = un._local_appdata_resolver(manifest)
+        self.assertFalse(is_local("gui.exe"))
+
+    def test_empty_or_missing_field_matches_nothing(self):
+        is_local = un._local_appdata_resolver({})
+        self.assertFalse(is_local("cli.exe"))
+
+
+class TestCleanupEmptyDirs(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_removes_dir_when_empty(self):
+        un._cleanup_empty_dirs(self.tmp_dir)
+        self.assertFalse(os.path.exists(self.tmp_dir))
+
+    def test_keeps_dir_when_files_remain(self):
+        with open(os.path.join(self.tmp_dir, "keep.txt"), "w") as f:
+            f.write("still here")
+        un._cleanup_empty_dirs(self.tmp_dir)
+        self.assertTrue(os.path.exists(self.tmp_dir))
+
+
+class TestManifestDeletionRoutesLocalAppdataFiles(unittest.TestCase):
+    """對應 installer_core.py 的 local_appdata_files：安裝時被指定改裝到
+    %LOCALAPPDATA%\\Programs\\<folder_name> 的檔案，解除安裝要從那個目錄
+    刪，不是從安裝目錄（current_dir）刪。"""
+
+    def setUp(self):
+        self.install_dir = tempfile.mkdtemp()
+        self.alt_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.install_dir, ignore_errors=True)
+        shutil.rmtree(self.alt_dir, ignore_errors=True)
+
+    def test_deletes_from_local_appdata_dir_not_install_dir(self):
+        with open(os.path.join(self.alt_dir, "cli.exe"), "w") as f:
+            f.write("copied")
+        with open(os.path.join(self.install_dir, "gui.exe"), "w") as f:
+            f.write("copied")
+        manifest = {"local_appdata_files": ["cli.exe"], "local_appdata_dir": self.alt_dir}
+        files_to_remove = ["gui.exe", "cli.exe"]
+        self_name = "uninstall.exe"
+
+        is_local_appdata_file = un._local_appdata_resolver(manifest)
+        local_appdata_dir = manifest.get("local_appdata_dir") or ""
+        for rel in files_to_remove:
+            if os.path.basename(rel) == self_name:
+                continue
+            base_dir = local_appdata_dir if (local_appdata_dir and is_local_appdata_file(rel)) else self.install_dir
+            item_path = os.path.join(base_dir, rel)
+            if os.path.exists(item_path):
+                os.remove(item_path)
+
+        self.assertFalse(os.path.exists(os.path.join(self.alt_dir, "cli.exe")))
+        self.assertFalse(os.path.exists(os.path.join(self.install_dir, "gui.exe")))
+
+
 class TestUninstallManifestDrivenDeletion(unittest.TestCase):
     """對應 uninstall.py 檔案頭部記錄的那個真實 bug：不能『清單式刪除做得很仔細，
     最後卻無差別 rmdir 整個資料夾』。這裡直接重現 main() 裡那段判斷

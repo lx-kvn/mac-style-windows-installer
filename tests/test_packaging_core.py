@@ -282,6 +282,32 @@ class TestValidateAndBuildPackData(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(pack_data["path_target_exe"], "")
 
+    def test_local_appdata_files_missing_from_app_dir_is_rejected(self):
+        _, error = self._validate(self._base_data(local_appdata_files=["missing_cli.exe"]))
+        self.assertIsNotNone(error)
+        self.assertIn("不存在", error)
+
+    def test_local_appdata_files_list_passes_through(self):
+        with open(os.path.join(self.app_dir, "cli.exe"), "wb") as f:
+            f.write(b"fake")
+        pack_data, error = self._validate(self._base_data(local_appdata_files=["cli.exe"]))
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["local_appdata_files"], ["cli.exe"])
+
+    def test_local_appdata_files_accepts_comma_separated_string(self):
+        """CLI/GUI 兩邊都可能送一個逗號分隔的原始字串，不是 JSON 裡現成的 list
+        （比照 file_associations 的處理方式）。"""
+        with open(os.path.join(self.app_dir, "cli.exe"), "wb") as f:
+            f.write(b"fake")
+        pack_data, error = self._validate(self._base_data(local_appdata_files="cli.exe, "))
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["local_appdata_files"], ["cli.exe"])
+
+    def test_local_appdata_files_defaults_to_empty_list(self):
+        pack_data, error = self._validate(self._base_data())
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["local_appdata_files"], [])
+
     def test_custom_doc_icon_checked_but_not_selected_is_rejected(self):
         _, error = self._validate(
             self._base_data(use_custom_doc_icon=True), doc_icon_path_selected="",

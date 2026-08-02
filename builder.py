@@ -25,6 +25,11 @@ builder.py
     現在改成所有路徑都錨定在呼叫端傳入的 workspace_dir，由呼叫端負責確保
     這個目錄底下有齊全的必要檔案（見 gui_config.py 的 _ensure_workspace_files()）。
     workspace_dir 預設為 "."，維持 .py 直接執行時的原有行為不變。
+  - 新增欄位：local_appdata_files（相對於 app_dir 的檔案清單，指定這些檔案
+    改裝到 %LOCALAPPDATA%\\Programs\\<folder_name> 而不是主安裝目錄，典型
+    用途是讓 CLI 工具不需要系統管理員權限就能執行；實際的落地/回滾/解除
+    安裝邏輯都在 installer_core.py/uninstall.py，這裡只是把清單原封不動
+    寫進 installer_config.json）。
 """
 
 import os
@@ -38,7 +43,8 @@ CONFIG_FILE_NAME = "installer_config.json"
 def build_all(
     app_dir, exe_name, app_name, folder_name, version, publisher, png_path, ico_path,
     main_exe, eula_texts=None, eula_default_lang="", dependencies=None, file_associations=None, doc_icon_path="",
-    add_to_path=False, path_target_exe="", restart_explorer_on_update=False, workspace_dir=".", progress_callback=None,
+    add_to_path=False, path_target_exe="", local_appdata_files=None,
+    restart_explorer_on_update=False, workspace_dir=".", progress_callback=None,
 ):
     """流水線：產生配置 -> 編譯反安裝檔 -> 編譯主安裝檔
 
@@ -71,6 +77,7 @@ def build_all(
 
     dependencies = dependencies or []
     file_associations = file_associations or []
+    local_appdata_files = local_appdata_files or []
     folder_name = folder_name or app_name
 
     workspace_dir = os.path.abspath(workspace_dir)
@@ -110,6 +117,7 @@ def build_all(
         "doc_icon": "doc_icon.ico" if doc_icon_path else "",
         "add_to_path": bool(add_to_path),
         "path_target_exe": path_target_exe,
+        "local_appdata_files": local_appdata_files,
         "restart_explorer_on_update": bool(restart_explorer_on_update),
     }
     config_path = os.path.join(workspace_dir, CONFIG_FILE_NAME)

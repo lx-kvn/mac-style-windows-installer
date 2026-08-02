@@ -208,6 +208,12 @@
         </div>
 
         <div class="form-group">
+            <label data-i18n="label_local_appdata_files">改裝到使用者目錄的檔案（選填）</label>
+            <input type="text" id="local_appdata_files_input" placeholder="輸入相對於應用程式資料夾的路徑，以逗號分隔，例如: tools\cli.exe" data-i18n-placeholder="ph_local_appdata_files">
+            <span class="note" data-i18n="note_local_appdata_files">預設所有檔案都裝進主安裝目錄（可能在 Program Files，需要系統管理員權限才能寫入）。在這裡列出的檔案會改成裝到 %LOCALAPPDATA%\Programs\&lt;安裝資料夾名稱&gt;（使用者自己的目錄，不需要系統管理員權限），適合單獨拆出來的命令列工具，讓使用者事後執行它不用每次都要提權。如果「加入 PATH 的執行檔」剛好也列在這裡，會自動改成把這個使用者目錄加進 PATH，不用另外設定。</span>
+        </div>
+
+        <div class="form-group">
             <div class="checkbox-row"><input type="checkbox" id="restart_explorer_on_update"><label for="restart_explorer_on_update" data-i18n="label_restart_explorer">更新覆蓋安裝時，暫時關閉檔案總管以釋放被鎖定的檔案</label></div>
             <span class="note" data-i18n="note_restart_explorer">適用於應用程式有註冊 Windows 檔案總管殼層擴充功能（Shell Extension，例如右鍵選單擴充 DLL）的情況——只要檔案總管還在執行，就會鎖住這類 DLL，導致更新覆蓋時無法覆寫。勾選後，更新覆蓋安裝時會先關閉檔案總管、刪除完畢後自動重啟；使用者畫面會短暫閃爍、所有檔案總管視窗會關閉，非必要（沒有殼層擴充功能）不建議勾選。</span>
         </div>
@@ -493,6 +499,9 @@
                 label_path_target_exe: "加入 PATH 的執行檔（選填）",
                 path_target_default_option: "（預設）整個安裝目錄",
                 note_path_target_exe: "預設會把整個安裝目錄加進 PATH。如果應用程式除了主程式外，還附了一支獨立的命令列工具（例如放在子資料夾），可以在這裡另外指定那支執行檔，改成只把它所在的目錄加進 PATH。",
+                label_local_appdata_files: "改裝到使用者目錄的檔案（選填）",
+                ph_local_appdata_files: "輸入相對於應用程式資料夾的路徑，以逗號分隔，例如: tools\\cli.exe",
+                note_local_appdata_files: "預設所有檔案都裝進主安裝目錄（可能在 Program Files，需要系統管理員權限才能寫入）。在這裡列出的檔案會改成裝到 %LOCALAPPDATA%\\Programs\\<安裝資料夾名稱>（使用者自己的目錄，不需要系統管理員權限），適合單獨拆出來的命令列工具，讓使用者事後執行它不用每次都要提權。如果「加入 PATH 的執行檔」剛好也列在這裡，會自動改成把這個使用者目錄加進 PATH，不用另外設定。",
                 label_restart_explorer: "更新覆蓋安裝時，暫時關閉檔案總管以釋放被鎖定的檔案",
                 note_restart_explorer: "適用於應用程式有註冊 Windows 檔案總管殼層擴充功能（Shell Extension，例如右鍵選單擴充 DLL）的情況——只要檔案總管還在執行，就會鎖住這類 DLL，導致更新覆蓋時無法覆寫。勾選後，更新覆蓋安裝時會先關閉檔案總管、刪除完畢後自動重啟；使用者畫面會短暫閃爍、所有檔案總管視窗會關閉，非必要（沒有殼層擴充功能）不建議勾選。",
                 btn_submit: "開始編譯安裝檔",
@@ -570,6 +579,9 @@
                 label_path_target_exe: "Executable to add to PATH (optional)",
                 path_target_default_option: "(Default) Entire install directory",
                 note_path_target_exe: "By default the entire install directory is added to PATH. If the application ships a separate command-line tool alongside the main program (e.g. in a subfolder), you can specify it here to add only its own directory to PATH instead.",
+                label_local_appdata_files: "Files to install to the user directory (optional)",
+                ph_local_appdata_files: "Enter paths relative to the app folder, comma-separated, e.g. tools\\cli.exe",
+                note_local_appdata_files: "By default every file is installed into the main install directory (possibly under Program Files, which requires administrator privileges to write to). Files listed here are instead installed to %LOCALAPPDATA%\\Programs\\<install folder name> (the current user's own directory, no administrator privileges required) — useful for a standalone command-line tool so the user doesn't need to elevate every time they run it. If the \"Executable to add to PATH\" is also listed here, PATH will automatically point at this user directory instead — no extra configuration needed.",
                 label_restart_explorer: "Temporarily close File Explorer during update overwrites to release locked files",
                 note_restart_explorer: "For applications that register a Windows File Explorer shell extension (e.g. a right-click context menu DLL) — as long as Explorer is running, it keeps that DLL locked, which can block overwrites during an update. When enabled, Explorer is closed before deleting old files during an update overwrite and restarted afterward; the screen will flicker briefly and all Explorer windows will close. Not recommended unless you actually have a shell extension.",
                 btn_submit: "Build Installer",
@@ -897,6 +909,7 @@
                 use_custom_doc_icon: document.getElementById('need_file_assoc').checked && document.getElementById('custom_doc_icon').checked,
                 add_to_path: document.getElementById('add_to_path').checked,
                 path_target_exe: document.getElementById('add_to_path').checked ? document.getElementById('path_target_exe').value : '',
+                local_appdata_files: document.getElementById('local_appdata_files_input').value,
                 restart_explorer_on_update: document.getElementById('restart_explorer_on_update').checked,
             };
             const result = await pywebview.api.start_pack(data);

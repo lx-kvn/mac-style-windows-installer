@@ -45,6 +45,7 @@ TEMPLATE = {
     "file_associations": "",
     "add_to_path": False,
     "path_target_exe": "",
+    "local_appdata_files": [],
     "restart_explorer_on_update": False,
 }
 
@@ -98,6 +99,10 @@ def build_arg_parser():
     )
     pack_p.add_argument("--add-to-path", dest="add_to_path", action=argparse.BooleanOptionalAction, default=None)
     pack_p.add_argument(
+        "--local-appdata-files", dest="local_appdata_files", default=None,
+        help="逗號分隔，相對於 app_dir 的路徑，指定改裝到 %%LOCALAPPDATA%%\\Programs\\<folder_name>（不需要系統管理員權限）",
+    )
+    pack_p.add_argument(
         "--restart-explorer-on-update", dest="restart_explorer_on_update",
         action=argparse.BooleanOptionalAction, default=None,
     )
@@ -136,6 +141,8 @@ def _load_pack_input(args):
         data["dependencies"] = [d.strip() for d in args.dependencies.split(",") if d.strip()]
     if args.add_to_path is not None:
         data["add_to_path"] = args.add_to_path
+    if args.local_appdata_files is not None:
+        data["local_appdata_files"] = [f.strip() for f in args.local_appdata_files.split(",") if f.strip()]
     if args.restart_explorer_on_update is not None:
         data["restart_explorer_on_update"] = args.restart_explorer_on_update
 
@@ -200,6 +207,7 @@ def cmd_pack(args):
             doc_icon_path=pack_data.get("doc_icon_path", ""),
             add_to_path=pack_data.get("add_to_path", False),
             path_target_exe=pack_data.get("path_target_exe", ""),
+            local_appdata_files=pack_data.get("local_appdata_files", []),
             restart_explorer_on_update=pack_data.get("restart_explorer_on_update", False),
             workspace_dir=workspace_dir,
             progress_callback=progress_handler,

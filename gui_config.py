@@ -266,6 +266,7 @@ class ConfigAPI:
                 doc_icon_path=data.get("doc_icon_path", ""),
                 add_to_path=data.get("add_to_path", False),
                 path_target_exe=data.get("path_target_exe", ""),
+                local_appdata_files=data.get("local_appdata_files", []),
                 restart_explorer_on_update=data.get("restart_explorer_on_update", False),
                 workspace_dir=workspace_dir,
                 progress_callback=progress_handler,

@@ -93,6 +93,16 @@ class TestLoadPackInput(unittest.TestCase):
         self.assertTrue(data["use_custom_doc_icon"])
         self.assertEqual(doc_icon_path_selected, "C:\\icon.ico")
 
+    def test_local_appdata_files_csv_parsed_into_list(self):
+        args = self._parse(["pack", "--local-appdata-files", "cli.exe, tools/helper.exe"])
+        data, *_ = builder_cli._load_pack_input(args)
+        self.assertEqual(data["local_appdata_files"], ["cli.exe", "tools/helper.exe"])
+
+    def test_local_appdata_files_not_set_when_flag_absent(self):
+        args = self._parse(["pack"])
+        data, *_ = builder_cli._load_pack_input(args)
+        self.assertNotIn("local_appdata_files", data)
+
 
 class TestCmdPack(unittest.TestCase):
     def setUp(self):

@@ -207,6 +207,100 @@ class TestAddToPathEnv(unittest.TestCase):
         self.assertEqual(added_dir, "C:\\Apps\\MyApp")
 
 
+class TestLocalAppdataFiles(unittest.TestCase):
+    """local_appdata_files：打包時指定某幾支檔案改裝到
+    %LOCALAPPDATA%\\Programs\\<folder_name>，不需要系統管理員權限就能寫入，
+    典型用途是跟主程式分開的 CLI 工具。"""
+
+    def setUp(self):
+        self.env_patcher = mock.patch.dict(os.environ, {"LOCALAPPDATA": "C:\\Users\\Tester\\AppData\\Local"})
+        self.env_patcher.start()
+
+    def tearDown(self):
+        self.env_patcher.stop()
+
+    def test_local_appdata_root_uses_folder_name(self):
+        api = make_installer_api(folder_name="MyApp")
+        self.assertEqual(
+            api._local_appdata_root(), "C:\\Users\\Tester\\AppData\\Local\\Programs\\MyApp",
+        )
+
+    def test_local_appdata_root_falls_back_to_app_name_without_folder_name(self):
+        api = make_installer_api(folder_name="", app_name="MyApp")
+        self.assertEqual(
+            api._local_appdata_root(), "C:\\Users\\Tester\\AppData\\Local\\Programs\\MyApp",
+        )
+
+    def test_resolve_installed_path_routes_listed_file_to_local_appdata(self):
+        api = make_installer_api(
+            selected_path="C:\\Program Files\\MyApp", folder_name="MyApp",
+            local_appdata_files=["cli.exe"],
+        )
+        self.assertEqual(
+            api._resolve_installed_path("cli.exe"),
+            "C:\\Users\\Tester\\AppData\\Local\\Programs\\MyApp\\cli.exe",
+        )
+
+    def test_resolve_installed_path_keeps_unlisted_file_in_main_install_dir(self):
+        api = make_installer_api(
+            selected_path="C:\\Program Files\\MyApp", folder_name="MyApp",
+            local_appdata_files=["cli.exe"],
+        )
+        self.assertEqual(
+            api._resolve_installed_path("gui.exe"), "C:\\Program Files\\MyApp\\gui.exe",
+        )
+
+    def test_resolve_installed_path_matches_regardless_of_slash_direction(self):
+        api = make_installer_api(
+            selected_path="C:\\Program Files\\MyApp", folder_name="MyApp",
+            local_appdata_files=["tools/cli.exe"],
+        )
+        self.assertEqual(
+            api._resolve_installed_path("tools\\cli.exe"),
+            "C:\\Users\\Tester\\AppData\\Local\\Programs\\MyApp\\tools\\cli.exe",
+        )
+
+    def test_path_target_dir_points_at_local_appdata_when_target_exe_listed(self):
+        api = make_installer_api(
+            selected_path="C:\\Program Files\\MyApp", folder_name="MyApp",
+            path_target_exe="cli.exe", local_appdata_files=["cli.exe"],
+        )
+        self.assertEqual(
+            api._path_target_dir(), "C:\\Users\\Tester\\AppData\\Local\\Programs\\MyApp",
+        )
+
+
+class TestRollbackLocalAppdataFiles(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.alt_dir = tempfile.mkdtemp()
+        self.env_patcher = mock.patch.dict(os.environ, {"LOCALAPPDATA": os.path.dirname(self.alt_dir)})
+        self.env_patcher.start()
+
+    def tearDown(self):
+        self.env_patcher.stop()
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+        shutil.rmtree(self.alt_dir, ignore_errors=True)
+
+    def test_rollback_removes_local_appdata_copies_and_prunes_empty_alt_dir(self):
+        folder_name = os.path.basename(self.alt_dir)
+        alt_root = os.path.join(os.path.dirname(self.alt_dir), "Programs", folder_name)
+        os.makedirs(alt_root)
+        with open(os.path.join(alt_root, "cli.exe"), "w") as f:
+            f.write("copied")
+        with open(os.path.join(self.tmp_dir, "gui.exe"), "w") as f:
+            f.write("copied")
+
+        api = make_installer_api(
+            selected_path=self.tmp_dir, folder_name=folder_name, local_appdata_files=["cli.exe"],
+        )
+        api._rollback(["gui.exe", "cli.exe"], log=None)
+
+        self.assertFalse(os.path.exists(os.path.join(alt_root, "cli.exe")))
+        self.assertFalse(os.path.exists(alt_root), "回滾後空了的別位目錄應該被清掉")
+        self.assertFalse(os.path.exists(os.path.join(self.tmp_dir, "gui.exe")))
+
+
 class TestUpgradeBackup(unittest.TestCase):
     """_backup_existing_install() / _restore_upgrade_backup() /
     _discard_upgrade_backup() 三個方法本身：更新覆蓋安裝時，刪除舊版本前先

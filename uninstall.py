@@ -205,6 +205,40 @@ def _should_schedule_self_delete(is_upgrade):
     return not is_upgrade
 
 
+def _local_appdata_resolver(manifest):
+    """回傳一個函式：給定安裝清單裡的相對路徑，判斷它是不是打包時被指定
+    落地到 `%LOCALAPPDATA%\\Programs\\<folder_name>`（而不是主安裝目錄）
+    的檔案（見 installer_core.py 的 `local_appdata_files`/
+    `_local_appdata_root()`）。manifest 沒有這個欄位（舊版本安裝、或
+    這次打包沒用到這個功能）時一律回傳 False，行為維持原樣。
+    """
+    local_appdata_files = manifest.get("local_appdata_files") or []
+    normed = {os.path.normcase(os.path.normpath(f)) for f in local_appdata_files}
+
+    def is_local_appdata_file(rel_path):
+        return os.path.normcase(os.path.normpath(rel_path)) in normed
+
+    return is_local_appdata_file
+
+
+def _cleanup_empty_dirs(root_dir):
+    """清掉 root_dir 底下因為刪檔而變空的子目錄（由裡到外），
+    root_dir 本身如果也空了就一併刪除。"""
+    try:
+        for root, dirs, files in os.walk(root_dir, topdown=False):
+            for d in dirs:
+                dpath = os.path.join(root, d)
+                try:
+                    if not os.listdir(dpath):
+                        os.rmdir(dpath)
+                except Exception:
+                    pass
+        if os.path.exists(root_dir) and not os.listdir(root_dir):
+            os.rmdir(root_dir)
+    except Exception:
+        pass
+
+
 def _path_removal_target(manifest, current_dir):
     """算出解除安裝時要從 PATH 移除的目錄字串。
 
@@ -332,18 +366,24 @@ def main():
 
     try:
         if files_to_remove:
-            # 有清單：只刪清單內記錄的檔案，使用者事後自己產生的檔案不會被誤刪
+            # 有清單：只刪清單內記錄的檔案，使用者事後自己產生的檔案不會被誤刪。
+            # 部分檔案打包時可能被指定落地到 %LOCALAPPDATA%\Programs\<folder_name>
+            # （見 installer_core.py 的 local_appdata_files），要從那邊刪，
+            # 不是安裝目錄（current_dir）。
+            is_local_appdata_file = _local_appdata_resolver(manifest)
+            local_appdata_dir = manifest.get("local_appdata_dir") or ""
             for rel in files_to_remove:
                 if os.path.basename(rel) == self_name:
                     continue  # 自己交給下面的自我刪除流程處理，執行中無法自刪
-                item_path = os.path.join(current_dir, rel)
+                base_dir = local_appdata_dir if (local_appdata_dir and is_local_appdata_file(rel)) else current_dir
+                item_path = os.path.join(base_dir, rel)
                 try:
                     if os.path.exists(item_path):
                         os.remove(item_path)
                 except Exception as e:
                     log_lines.append(f"[警告] 無法刪除 {rel}: {e}")
 
-            # 清掉刪空的子目錄
+            # 清掉刪空的子目錄（安裝目錄與別位的 local_appdata 目錄分開清）
             for root, dirs, files in os.walk(current_dir, topdown=False):
                 for d in dirs:
                     dpath = os.path.join(root, d)
@@ -352,6 +392,8 @@ def main():
                             os.rmdir(dpath)
                     except Exception:
                         pass
+            if local_appdata_dir:
+                _cleanup_empty_dirs(local_appdata_dir)
             log_lines.append(f"已依安裝清單刪除 {len(files_to_remove)} 個檔案")
 
             # 清單刪完之後，看看資料夾裡除了自己還剩什麼——這才是真正決定能不能

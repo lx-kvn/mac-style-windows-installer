@@ -88,6 +88,7 @@ python builder_cli.py pack --config app.json [--其他 flag 覆蓋個別欄位..
 | `file_associations` | `--file-associations` | 否 | 逗號分隔的副檔名，例如 `.xyz,.abc`；有填就等同 GUI 版「勾選需要註冊檔案關聯」 |
 | `add_to_path` | `--add-to-path` / `--no-add-to-path` | 否 | 安裝後是否把路徑加入環境變數 PATH |
 | `path_target_exe` | `--path-target-exe` | 否 | `add_to_path` 開啟時，指定只把這支執行檔所在的目錄加入 PATH（不填就是整個安裝目錄，見規格文件 §8.14） |
+| `local_appdata_files` | `--local-appdata-files` | 否 | 逗號分隔，相對於 `app_dir` 的路徑，指定這些檔案改裝到 `%LOCALAPPDATA%\Programs\<folder_name>`（使用者自己的目錄，不需要系統管理員權限）而不是主安裝目錄；典型用途是跟主程式分開的 CLI 工具，讓使用者事後單純執行它不用每次都提權。如果 `path_target_exe` 也列在這裡，加進 PATH 的會自動變成這個別位目錄，見規格文件 §8.19 |
 | `restart_explorer_on_update` | `--restart-explorer-on-update` / `--no-restart-explorer-on-update` | 否 | 更新覆蓋安裝時是否暫時關閉檔案總管釋放被鎖定的檔案（見規格文件 §8.12） |
 
 `eula_texts` 是字典結構，只能透過 JSON 設定檔提供，沒有對應的命令列 flag
