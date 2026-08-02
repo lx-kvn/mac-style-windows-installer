@@ -1,0 +1,281 @@
+<!--
+    uninstall.html — 解除安裝助手介面（跟 index.html 共用同一套 macOS 風格
+    彈窗語彙：字型堆疊、色票、.nice-modal-*、藥丸按鈕、frameless + 自訂拖曳 +
+    左上角 X 關閉）。
+
+    在此之前 uninstall.exe 是純 console 程式（builder.py 沒有給它加
+    --noconsole），互動流程全部靠原生 MessageBoxW，雙擊執行還會跳出一個
+    黑底命令提示字元視窗——跟 Setup.exe 那套精緻的拖曳安裝畫面完全是兩個
+    世界。這支頁面 + uninstall.py 的 UninstallerAPI 就是要補上這塊，讓解除
+    安裝的視覺語言跟安裝時一致，不再是「兩套系統拼在一起」。
+
+    畫面流程（同一個 HTML 裡用 class 切換顯示，不是分開的視窗）：
+    confirmView（預設）→（視情況）processRunningModal 或
+    lockingProcessesModal → progressView → doneModal / errorModal。
+-->
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>解除安裝</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0; padding: 0; background-color: #f5f5f7;
+            width: 100vw; height: 100vh;
+            display: flex; justify-content: center; align-items: center;
+            overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            user-select: none;
+        }
+        .drag-region {
+            position: fixed; top: 0; left: 0; width: 100%; height: 40px;
+            z-index: 9998;
+        }
+        .custom-close-btn {
+            position: fixed; top: 16px; left: 16px; width: 24px; height: 24px;
+            display: flex; align-items: center; justify-content: center;
+            cursor: pointer; border-radius: 50%; background-color: transparent; color: #8e8e93;
+            transition: background-color 0.2s, color 0.2s; z-index: 9999;
+        }
+        .custom-close-btn:hover { background-color: rgba(0, 0, 0, 0.06); color: #1d1d1f; }
+        .css-close-icon { position: relative; width: 10px; height: 10px; }
+        .css-close-icon::before, .css-close-icon::after {
+            content: ''; position: absolute; top: 50%; left: 0; width: 10px; height: 1.5px;
+            background-color: currentColor; border-radius: 1px;
+        }
+        .css-close-icon::before { transform: translateY(-50%) rotate(45deg); }
+        .css-close-icon::after { transform: translateY(-50%) rotate(-45deg); }
+
+        /* 跟 index.html 完全同一套彈窗樣式，內部實作重複、不是新樣式 */
+        .nice-view {
+            background: white; padding: 24px 32px; border-radius: 16px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.08); text-align: center;
+            border: 1px solid #e5e5ea; max-width: 340px;
+            display: none;
+        }
+        .nice-view.active { display: block; }
+        .nice-icon {
+            width: 44px; height: 44px; background: #34C759; border-radius: 50%;
+            display: flex; justify-content: center; align-items: center; margin: 0 auto 12px auto; color: white;
+        }
+        .nice-icon.error { background: #FF3B30; }
+        .nice-icon.warn { background: #FF9500; }
+        .nice-title { font-size: 17px; font-weight: 600; color: #1d1d1f; margin-bottom: 6px; }
+        .nice-message { font-size: 13px; color: #86868b; margin-bottom: 20px; text-align: left; line-height: 1.6; }
+        .nice-btn {
+            background: #0071e3; color: white; border: none; padding: 8px 24px;
+            border-radius: 20px; font-size: 13px; font-weight: 500; cursor: pointer;
+            transition: background 0.2s; outline: none; margin: 0 4px;
+        }
+        .nice-btn:hover { background: #0077ED; }
+        .nice-btn.secondary { background: #e5e5ea; color: #1d1d1f; }
+        .nice-btn.secondary:hover { background: #d8d8dd; }
+
+        .install-progress-wrap { width: 260px; }
+        .install-progress-text { font-size: 11px; color: #86868b; text-align: center; margin-bottom: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .install-progress-track { width: 100%; height: 4px; background: #e5e5ea; border-radius: 2px; overflow: hidden; }
+        .install-progress-fill { width: 0%; height: 100%; background: #0071e3; transition: width 0.2s ease; }
+    </style>
+</head>
+<body>
+
+    <div class="drag-region" id="dragRegion"></div>
+
+    <div class="custom-close-btn" onclick="onCancel();" title="關閉" data-i18n-title="close_title">
+        <div class="css-close-icon"></div>
+    </div>
+
+    <div class="nice-view" id="confirmView">
+        <div class="nice-icon warn"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L14.7 3.86a2 2 0 0 0-3.4 0z"></path></svg></div>
+        <div class="nice-title" id="confirmTitle" data-i18n="confirm_title">解除安裝助手</div>
+        <div class="nice-message" id="confirmMessage" style="text-align:center;"></div>
+        <button class="nice-btn secondary" onclick="onCancel()" data-i18n="btn_cancel">取消</button>
+        <button class="nice-btn" onclick="onDelete()" data-i18n="btn_delete">刪除</button>
+    </div>
+
+    <div class="nice-view" id="lockingProcessesView">
+        <div class="nice-icon warn"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L14.7 3.86a2 2 0 0 0-3.4 0z"></path></svg></div>
+        <div class="nice-title" data-i18n="locking_title">偵測到程式鎖定檔案</div>
+        <div class="nice-message" id="lockingMessage" style="text-align:left;"></div>
+        <button class="nice-btn secondary" onclick="onLockingProceed(false)" data-i18n="btn_no">否</button>
+        <button class="nice-btn" onclick="onLockingProceed(true)" data-i18n="btn_yes">是</button>
+    </div>
+
+    <div class="nice-view" id="processRunningView">
+        <div class="nice-icon error"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></div>
+        <div class="nice-title" id="processRunningTitle" data-i18n="process_running_title">程式正在執行</div>
+        <div class="nice-message" id="processRunningMessage" style="text-align:center;"></div>
+        <button class="nice-btn" onclick="onCancel()" data-i18n="btn_ok">了解</button>
+    </div>
+
+    <div class="nice-view" id="progressView">
+        <div class="nice-title" data-i18n="progress_title">正在解除安裝...</div>
+        <div class="install-progress-wrap">
+            <div class="install-progress-text" id="progressText"></div>
+            <div class="install-progress-track"><div class="install-progress-fill" id="progressFill"></div></div>
+        </div>
+    </div>
+
+    <div class="nice-view" id="doneView">
+        <div class="nice-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg></div>
+        <div class="nice-title" data-i18n="done_title">解除安裝完成</div>
+        <div class="nice-message" id="doneMessage" style="text-align:center;"></div>
+        <button class="nice-btn" onclick="onFinish()" data-i18n="btn_done">完成</button>
+    </div>
+
+    <div class="nice-view" id="errorView">
+        <div class="nice-icon error"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></div>
+        <div class="nice-title" data-i18n="error_title">解除安裝失敗</div>
+        <div class="nice-message" id="errorMessage" style="text-align:center;"></div>
+        <button class="nice-btn" onclick="onCancel()" data-i18n="btn_ok">了解</button>
+    </div>
+
+    <script>
+        document.addEventListener('contextmenu', (e) => e.preventDefault());
+
+        const I18N = {
+            "zh-TW": {
+                close_title: "關閉",
+                confirm_title: "解除安裝助手",
+                confirm_message: "您確定要刪除「{{name}}」及其所有元件嗎？",
+                btn_cancel: "取消",
+                btn_delete: "刪除",
+                locking_title: "偵測到程式鎖定檔案",
+                locking_message: "偵測到「{{name}}」的部分檔案目前被下列程式鎖定：{{processes}}。\n需要先結束這些程式才能完整移除相關檔案，是否繼續？\n\n（選「否」解除安裝仍會繼續，但可能有檔案因為還在使用中而無法刪除。）",
+                btn_no: "否",
+                btn_yes: "是",
+                process_running_title: "程式正在執行",
+                process_running_message: "「{{name}}」目前正在執行中，請先關閉程式後再解除安裝。",
+                btn_ok: "了解",
+                progress_title: "正在解除安裝...",
+                done_title: "解除安裝完成",
+                done_message: "「{{name}}」已成功移除。",
+                btn_done: "完成",
+                error_title: "解除安裝失敗",
+                step_registry: "正在清理 Windows 註冊表...",
+                step_shortcuts: "正在移除捷徑...",
+                step_file_assoc: "正在移除檔案關聯...",
+                step_path: "正在從環境變數 PATH 移除安裝路徑...",
+                step_files: "正在刪除安裝目錄下的檔案...",
+            },
+            "en": {
+                close_title: "Close",
+                confirm_title: "Uninstaller",
+                confirm_message: "Are you sure you want to remove \"{{name}}\" and all of its components?",
+                btn_cancel: "Cancel",
+                btn_delete: "Delete",
+                locking_title: "Files are locked by other programs",
+                locking_message: "Some files belonging to \"{{name}}\" are currently locked by: {{processes}}.\nThese programs need to be closed first to fully remove the related files. Continue?\n\n(Choosing \"No\" still continues the uninstall, but some in-use files may fail to be removed.)",
+                btn_no: "No",
+                btn_yes: "Yes",
+                process_running_title: "Application is running",
+                process_running_message: "\"{{name}}\" is currently running. Please close it before uninstalling.",
+                btn_ok: "OK",
+                progress_title: "Uninstalling...",
+                done_title: "Uninstall Complete",
+                done_message: "\"{{name}}\" has been removed successfully.",
+                btn_done: "Done",
+                error_title: "Uninstall Failed",
+                step_registry: "Cleaning up the Windows registry...",
+                step_shortcuts: "Removing shortcuts...",
+                step_file_assoc: "Removing file associations...",
+                step_path: "Removing the install path from PATH...",
+                step_files: "Deleting installed files...",
+            },
+        };
+        let currentLang = "zh-TW";
+        function t(key, vars) {
+            let s = (I18N[currentLang] && I18N[currentLang][key]) || (I18N["zh-TW"][key] || key);
+            if (vars) { for (const k in vars) s = s.replaceAll(`{{${k}}}`, vars[k]); }
+            return s;
+        }
+        function applyI18n(lang) {
+            currentLang = I18N[lang] ? lang : "zh-TW";
+            document.documentElement.setAttribute("lang", currentLang);
+            document.querySelectorAll("[data-i18n]").forEach(el => { el.innerText = t(el.dataset.i18n); });
+            document.querySelectorAll("[data-i18n-title]").forEach(el => { el.setAttribute("title", t(el.dataset.i18nTitle)); });
+        }
+
+        // 自訂視窗拖曳，寫法跟 index.html 完全一致（見該檔案的說明）
+        (function setupCustomDrag() {
+            const dragRegion = document.getElementById('dragRegion');
+            let isDragging = false;
+            let pendingPos = null;
+            function dragLoop() {
+                if (!isDragging) return;
+                if (pendingPos) { pywebview.api.drag_move(pendingPos[0], pendingPos[1]); pendingPos = null; }
+                requestAnimationFrame(dragLoop);
+            }
+            dragRegion.addEventListener('mousedown', (e) => {
+                isDragging = true;
+                pywebview.api.start_drag(e.screenX, e.screenY);
+                requestAnimationFrame(dragLoop);
+            });
+            document.addEventListener('mousemove', (e) => {
+                if (!isDragging) return;
+                if ((e.buttons & 1) === 0) { isDragging = false; pendingPos = null; pywebview.api.end_drag(); return; }
+                pendingPos = [e.screenX, e.screenY];
+            });
+            document.addEventListener('mouseup', () => {
+                if (isDragging) { isDragging = false; pendingPos = null; pywebview.api.end_drag(); }
+            });
+        })();
+
+        let appName = "";
+
+        function showView(id) {
+            document.querySelectorAll('.nice-view').forEach(v => v.classList.remove('active'));
+            document.getElementById(id).classList.add('active');
+        }
+
+        function onCancel() { pywebview.api.cancel(); }
+
+        async function onDelete() {
+            const running = await pywebview.api.check_main_exe_running();
+            if (running) {
+                document.getElementById('processRunningMessage').innerText = t('process_running_message', { name: appName });
+                showView('processRunningView');
+                return;
+            }
+            const processes = await pywebview.api.get_locking_process_names();
+            if (processes && processes.length > 0) {
+                document.getElementById('lockingMessage').innerText = t('locking_message', { name: appName, processes: processes.join('、') });
+                showView('lockingProcessesView');
+                return;
+            }
+            startUninstall(false);
+        }
+
+        function onLockingProceed(kill) { startUninstall(kill); }
+
+        window.updateUninstallProgress = function (percent, message) {
+            document.getElementById('progressText').innerText = message;
+            document.getElementById('progressFill').style.width = percent + '%';
+        };
+
+        async function startUninstall(killLockingProcesses) {
+            showView('progressView');
+            const result = await pywebview.api.run_uninstall(killLockingProcesses);
+            if (result.status === 'success') {
+                document.getElementById('doneMessage').innerText = t('done_message', { name: appName });
+                showView('doneView');
+            } else {
+                document.getElementById('errorMessage').innerText = result.message || '';
+                showView('errorView');
+            }
+        }
+
+        async function onFinish() {
+            await pywebview.api.finish_and_exit();
+        }
+
+        window.addEventListener('pywebviewready', async () => {
+            const uiLanguage = await pywebview.api.get_ui_language();
+            applyI18n(uiLanguage);
+            appName = await pywebview.api.get_app_name();
+            document.getElementById('confirmMessage').innerText = t('confirm_message', { name: appName });
+            showView('confirmView');
+        });
+    </script>
+</body>
+</html>

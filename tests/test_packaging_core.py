@@ -62,9 +62,13 @@ class TestEnsureWorkspaceFiles(unittest.TestCase):
             f.write("# NEW lang_detect content")
         with open(os.path.join(self.embedded_dir, "restart_manager.py"), "w") as f:
             f.write("# NEW restart_manager content")
+        with open(os.path.join(self.embedded_dir, "dependency_defs.py"), "w") as f:
+            f.write("# NEW dependency_defs content")
         os.makedirs(os.path.join(self.embedded_dir, "ui"))
         with open(os.path.join(self.embedded_dir, "ui", "index.html"), "w") as f:
             f.write("<!-- NEW index.html -->")
+        with open(os.path.join(self.embedded_dir, "ui", "uninstall.html"), "w") as f:
+            f.write("<!-- NEW uninstall.html -->")
         with open(os.path.join(self.embedded_dir, "ui", "folder_icon.png"), "wb") as f:
             f.write(b"NEW_ICON_BYTES")
 
@@ -114,13 +118,13 @@ class TestEnsureWorkspaceFiles(unittest.TestCase):
         模組，跟 installer_core.py/uninstall.py 本身一樣是內部實作，必須無
         條件覆蓋，理由相同：漏了任何一個沒同步更新，重新編譯出來的 exe
         用的還是這個共用模組的舊版本。"""
-        for name in ("window_drag.py", "disk_space.py", "file_assoc.py", "lang_detect.py", "restart_manager.py"):
+        for name in ("window_drag.py", "disk_space.py", "file_assoc.py", "lang_detect.py", "restart_manager.py", "dependency_defs.py"):
             with open(os.path.join(self.workspace_dir, name), "w") as f:
                 f.write(f"# STALE old {name} content")
 
         packaging_core.ensure_workspace_files(self.workspace_dir)
 
-        for name in ("window_drag.py", "disk_space.py", "file_assoc.py", "lang_detect.py", "restart_manager.py"):
+        for name in ("window_drag.py", "disk_space.py", "file_assoc.py", "lang_detect.py", "restart_manager.py", "dependency_defs.py"):
             with open(os.path.join(self.workspace_dir, name)) as f:
                 self.assertEqual(f.read(), f"# NEW {name.replace('.py', '')} content")
 
@@ -134,6 +138,18 @@ class TestEnsureWorkspaceFiles(unittest.TestCase):
 
         with open(os.path.join(self.workspace_dir, "ui", "index.html")) as f:
             self.assertEqual(f.read(), "<!-- NEW index.html -->")
+
+    def test_uninstall_html_is_always_overwritten(self):
+        """ui/uninstall.html 是解除安裝端的內部實作（跟 index.html 同一套
+        macOS 風格彈窗語彙），同樣不是使用者自訂項目，要無條件覆蓋。"""
+        os.makedirs(os.path.join(self.workspace_dir, "ui"))
+        with open(os.path.join(self.workspace_dir, "ui", "uninstall.html"), "w") as f:
+            f.write("<!-- STALE old uninstall.html -->")
+
+        packaging_core.ensure_workspace_files(self.workspace_dir)
+
+        with open(os.path.join(self.workspace_dir, "ui", "uninstall.html")) as f:
+            self.assertEqual(f.read(), "<!-- NEW uninstall.html -->")
 
     def test_user_customized_static_asset_is_preserved(self):
         """folder_icon.png 這類使用者可能自訂過的靜態資源，行為要跟上面兩個相反：
@@ -385,6 +401,90 @@ class TestValidateAndBuildPackData(unittest.TestCase):
         （那一步有真的複製檔案的副作用，刻意留在純函式外面），這裡確認沒有洩漏進來。"""
         pack_data, _ = self._validate(self._base_data())
         self.assertNotIn("workspace_dir", pack_data)
+
+    def test_no_admin_install_passes_through(self):
+        pack_data, error = self._validate(self._base_data(no_admin_install=True))
+        self.assertIsNone(error)
+        self.assertTrue(pack_data["no_admin_install"])
+
+    def test_pre_install_script_must_exist_in_app_dir(self):
+        _, error = self._validate(self._base_data(pre_install_script="not_there.bat"))
+        self.assertIsNotNone(error)
+        self.assertIn("安裝前置", error)
+
+    def test_pre_install_script_existing_file_passes(self):
+        script_path = os.path.join(self.app_dir, "setup.bat")
+        with open(script_path, "w") as f:
+            f.write("@echo off")
+        pack_data, error = self._validate(self._base_data(pre_install_script="setup.bat"))
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["pre_install_script"], "setup.bat")
+
+    def test_custom_dependency_missing_required_field_is_rejected(self):
+        _, error = self._validate(self._base_data(custom_dependencies=[{"key": "my_dep"}]))
+        self.assertIsNotNone(error)
+
+    def test_custom_dependency_colliding_with_built_in_key_is_rejected(self):
+        _, error = self._validate(self._base_data(custom_dependencies=[{
+            "key": "vcredist_x64", "display_name": "X", "download_url": "https://example.test/x.exe",
+            "registry_check": {"path": "Software\\X"},
+        }]))
+        self.assertIsNotNone(error)
+        self.assertIn("撞名", error)
+
+    def test_custom_dependency_duplicate_key_is_rejected(self):
+        entry = {
+            "key": "my_dep", "display_name": "X", "download_url": "https://example.test/x.exe",
+            "registry_check": {"path": "Software\\X"},
+        }
+        _, error = self._validate(self._base_data(custom_dependencies=[entry, dict(entry)]))
+        self.assertIsNotNone(error)
+        self.assertIn("重複", error)
+
+    def test_valid_custom_dependency_passes_through(self):
+        pack_data, error = self._validate(self._base_data(custom_dependencies=[{
+            "key": "my_dep", "display_name": "My Dep", "download_url": "https://example.test/x.exe",
+            "silent_args": ["/quiet"], "registry_check": {"hive": "HKLM", "path": "Software\\X"},
+        }]))
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["custom_dependencies"][0]["key"], "my_dep")
+
+    def test_bundle_dependencies_not_in_dependencies_list_is_rejected(self):
+        _, error = self._validate(self._base_data(dependencies=["vcredist_x64"], bundle_dependencies=["dotnet_desktop"]))
+        self.assertIsNotNone(error)
+
+    def test_bundle_dependencies_matching_dependencies_list_passes(self):
+        pack_data, error = self._validate(self._base_data(dependencies=["vcredist_x64"], bundle_dependencies=["vcredist_x64"]))
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["bundle_dependencies"], ["vcredist_x64"])
+
+    def test_signing_without_cert_file_is_rejected(self):
+        _, error = self._validate(self._base_data(signing={
+            "cert_path": "C:\\does\\not\\exist.pfx", "cert_password_env": "MY_CERT_PW",
+        }))
+        self.assertIsNotNone(error)
+
+    def test_signing_with_missing_env_var_is_rejected(self):
+        cert_path = os.path.join(self.app_dir, "cert.pfx")
+        with open(cert_path, "wb") as f:
+            f.write(b"fake cert bytes")
+        os.environ.pop("MY_TEST_CERT_PW_MISSING", None)
+        _, error = self._validate(self._base_data(signing={
+            "cert_path": cert_path, "cert_password_env": "MY_TEST_CERT_PW_MISSING",
+        }))
+        self.assertIsNotNone(error)
+
+    def test_valid_signing_config_passes_through(self):
+        cert_path = os.path.join(self.app_dir, "cert.pfx")
+        with open(cert_path, "wb") as f:
+            f.write(b"fake cert bytes")
+        with mock.patch.dict(os.environ, {"MY_TEST_CERT_PW": "hunter2"}):
+            pack_data, error = self._validate(self._base_data(signing={
+                "cert_path": cert_path, "cert_password_env": "MY_TEST_CERT_PW",
+            }))
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["signing"]["cert_path"], cert_path)
+        self.assertEqual(pack_data["signing"]["timestamp_url"], "http://timestamp.digicert.com")
 
 
 if __name__ == "__main__":

@@ -87,9 +87,26 @@ import ctypes
 import tempfile
 import time
 import subprocess
+import webview
 from datetime import datetime
 import file_assoc
 import restart_manager
+import lang_detect
+from window_drag import WindowDragController
+
+# 跟 installer_core.py 的介面語言支援範圍一致：解除安裝助手的畫面 chrome
+# 只認這兩種，跟安裝端同一套規則。
+SUPPORTED_UI_LANGUAGES = ["zh-TW", "en"]
+DEFAULT_UI_LANGUAGE = "zh-TW"
+
+
+def get_resource_path(relative_path):
+    """獲取資源絕對路徑，相容 PyInstaller 單一檔案打包環境（照抄
+    installer_core.py 的版本——這支 exe 現在也需要找到內嵌的
+    ui/uninstall.html）。"""
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(os.path.abspath("."), relative_path)
 
 
 def is_admin():
@@ -113,17 +130,26 @@ def is_process_running(exe_name):
         return False
 
 
-def remove_registry_entry(app_name):
+def remove_registry_entry(app_name, no_admin_install=False):
     reg_path = f"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{app_name}"
+    hive = winreg.HKEY_CURRENT_USER if no_admin_install else winreg.HKEY_LOCAL_MACHINE
     try:
-        winreg.DeleteKey(winreg.HKEY_LOCAL_MACHINE, reg_path)
+        winreg.DeleteKey(hive, reg_path)
         return True
     except Exception:
         return False
 
 
-def remove_shortcut(app_name, desktop=False):
-    if desktop:
+def remove_shortcut(app_name, desktop=False, no_admin_install=False):
+    if no_admin_install:
+        if desktop:
+            base = os.path.join(os.path.expanduser("~"), "Desktop")
+        else:
+            base = os.path.join(
+                os.environ.get("APPDATA", os.path.join(os.path.expanduser("~"), "AppData", "Roaming")),
+                "Microsoft", "Windows", "Start Menu", "Programs",
+            )
+    elif desktop:
         base = "C:\\Users\\Public\\Desktop"
     else:
         base = os.path.join(
@@ -234,30 +260,53 @@ def _wants_lock_release(manifest, argv):
     return ("--restart-explorer" in argv) or bool(manifest.get("restart_explorer_on_update", False))
 
 
-def _confirm_kill_locking_processes(app_name, processes):
-    """互動式解除安裝在真的結束鎖定進程前，跳出確認對話框取得使用者同意。
+def _compute_locking_processes(ctx, argv):
+    """偵測目前有哪些程式鎖定了這次要刪除的檔案（見 restart_manager.py）。
 
-    更新覆蓋安裝（無人值守）不需要問，因為那是使用者先前安裝新版本時就
-    已經同意的流程。但手動解除安裝是使用者當下主動的操作，強制結束其他
-    正在執行的程式是有感的副作用，選「否」的話解除安裝仍會繼續，只是
-    被鎖住的檔案可能刪不掉。
+    `_wants_lock_release(manifest, argv)` 為 False（打包時沒勾選這個選項，
+    也不是被 --restart-explorer 明確要求）時直接回傳空清單，不用真的去
+    偵測——維持原本「這個功能是選用的」行為。
 
-    列出 restart_manager 實際偵測到的進程名稱，而不是像舊版一律寫死
-    「檔案總管」——現在是真的偵測鎖定者是誰，不再假設一定是 explorer.exe。
-    processes 為空（沒偵測到任何鎖定）時直接回傳 False，不用打擾使用者。
+    互動式流程（UninstallerAPI.get_locking_process_names()）跟無人值守
+    流程（run_silent_uninstall()）共用這個函式；互動式會把結果快取起來，
+    問過使用者「要不要結束這些程式」之後才呼叫 _perform_uninstall_steps()，
+    無人值守則直接視為同意（維持原本「更新覆蓋安裝不用問」的行為）。
     """
-    if not processes:
-        return False
-    names = "、".join(sorted({name for _pid, name in processes if name})) or "未知程式"
-    MB_YESNO, IDYES, MB_ICONWARNING = 4, 6, 48
-    result = ctypes.windll.user32.MessageBoxW(
-        0,
-        f"偵測到「{app_name}」的部分檔案目前被下列程式鎖定：{names}。\n"
-        f"需要先結束這些程式才能完整移除相關檔案，是否繼續？\n\n"
-        f"（選「否」解除安裝仍會繼續，但可能有檔案因為還在使用中而無法刪除。）",
-        "解除安裝助手", MB_YESNO | MB_ICONWARNING,
-    )
-    return result == IDYES
+    manifest = ctx["manifest"]
+    if not _wants_lock_release(manifest, argv):
+        return []
+
+    current_dir = ctx["current_dir"]
+    files_to_remove = manifest.get("files")
+    self_name = os.path.basename(argv[0])
+    is_local_appdata_file = _local_appdata_resolver(manifest)
+    local_appdata_dir = manifest.get("local_appdata_dir") or ""
+
+    def _target_path(rel):
+        base_dir = local_appdata_dir if (local_appdata_dir and is_local_appdata_file(rel)) else current_dir
+        return os.path.join(base_dir, rel)
+
+    if files_to_remove:
+        candidate_paths = [_target_path(rel) for rel in files_to_remove if os.path.basename(rel) != self_name]
+    else:
+        # 找不到安裝清單的舊版遺留情況：沒有明確的檔案清單可以餵給鎖定偵測，
+        # 退回掃描整個安裝目錄，盡量維持跟有清單時同等的偵測涵蓋範圍。
+        candidate_paths = [
+            os.path.join(current_dir, f)
+            for f in os.listdir(current_dir)
+            if f != self_name and os.path.isfile(os.path.join(current_dir, f))
+        ]
+    return restart_manager.find_locking_processes(candidate_paths)
+
+
+def _cli_log_path(argv):
+    """解析 /LOG=路徑 命令列參數，讓解除安裝的紀錄檔路徑可以自訂，
+    不帶就回傳 None（呼叫端 fallback 回原本的 %TEMP% 路徑）。"""
+    for raw_arg in argv[1:]:
+        arg = raw_arg.strip()
+        if arg.upper().startswith("/LOG="):
+            return arg[5:].strip('"')
+    return None
 
 
 def _is_upgrade_call(argv):
@@ -343,13 +392,13 @@ def _path_removal_target(manifest, current_dir):
     return manifest.get("path_directory") or manifest.get("install_path", current_dir)
 
 
-def remove_from_path(install_path):
+def remove_from_path(install_path, no_admin_install=False):
     try:
-        key = winreg.OpenKey(
-            winreg.HKEY_LOCAL_MACHINE,
-            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
-            0, winreg.KEY_ALL_ACCESS,
-        )
+        if no_admin_install:
+            hive, sub_key = winreg.HKEY_CURRENT_USER, "Environment"
+        else:
+            hive, sub_key = winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
+        key = winreg.OpenKey(hive, sub_key, 0, winreg.KEY_ALL_ACCESS)
         current, reg_type = winreg.QueryValueEx(key, "Path")
         parts = [p for p in current.split(";") if p and os.path.normcase(p) != os.path.normcase(install_path)]
         winreg.SetValueEx(key, "Path", 0, reg_type, ";".join(parts))
@@ -364,17 +413,12 @@ def remove_from_path(install_path):
         pass
 
 
-def main():
-    silent = "--silent" in sys.argv
-    is_upgrade = _is_upgrade_call(sys.argv)
-
-    if not is_admin():
-        print("[錯誤] 請以系統管理員身分執行此程式。")
-        if not silent:
-            os.system("pause")
-        return
-
-    current_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+def _load_uninstall_context(argv):
+    """讀 sys.argv[0] 所在目錄的 install_manifest.json/installer_config.json，
+    算出這次解除安裝需要的基本資訊。main() 的靜默路徑跟互動路徑
+    （UninstallerAPI.__init__）共用這個函式，不重複寫兩份。
+    """
+    current_dir = os.path.dirname(os.path.abspath(argv[0]))
     manifest_path = os.path.join(current_dir, "install_manifest.json")
     config_path = os.path.join(current_dir, "installer_config.json")
 
@@ -391,158 +435,33 @@ def main():
         except Exception:
             pass
     app_name = app_name or "DefaultApp"
-    main_exe = manifest.get("main_exe", "")
 
-    if not silent:
-        MB_YESNO, IDYES, MB_ICONQUESTION = 4, 6, 32
-        confirm = ctypes.windll.user32.MessageBoxW(
-            0, f"您確定要刪除「{app_name}」及其所有組件嗎？",
-            "解除安裝助手", MB_YESNO | MB_ICONQUESTION,
-        )
-        if confirm != IDYES:
-            print("[資訊] 使用者已取消解除安裝。")
+    return {
+        "current_dir": current_dir,
+        "manifest": manifest,
+        "app_name": app_name,
+        "main_exe": manifest.get("main_exe", ""),
+        # no_admin_install 開啟時整個安裝流程（含解除安裝）完全不要求系統
+        # 管理員權限——manifest 找不到這個欄位（舊版本安裝、或找不到清單的
+        # 情況）就 fallback 成 False，維持原本一律要求管理員權限的行為。
+        "no_admin_install": bool(manifest.get("no_admin_install", False)),
+    }
+
+
+def _write_uninstall_log(log_lines, app_name, argv):
+    """安裝目錄即將被整個刪掉（或者只刪自己），log 改寫到 %TEMP%（或使用者
+    用 /LOG= 指定的路徑），不寫回安裝目錄底下，因為那個位置接下來可能會
+    被清掉。互動/靜默兩條路徑共用。
+    """
+    custom_log_path = _cli_log_path(argv)
+    if custom_log_path:
+        try:
+            os.makedirs(os.path.dirname(custom_log_path) or ".", exist_ok=True)
+            with open(custom_log_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(log_lines))
             return
-
-    # 主程式執行中偵測：避免刪除一半被鎖住的檔案卡住
-    if is_process_running(main_exe):
-        if not silent:
-            ctypes.windll.user32.MessageBoxW(
-                0, f"「{app_name}」目前正在執行中，請先關閉程式後再解除安裝。",
-                "解除安裝助手", 0x10,
-            )
-        print(f"[錯誤] {main_exe} 正在執行中，中止解除安裝。")
-        return
-
-    log_lines = [f"=== {app_name} 解除安裝紀錄 {datetime.now().isoformat()} ==="]
-
-    print("[步驟 1] 正在清理 Windows 註冊表...")
-    if remove_registry_entry(app_name):
-        log_lines.append("已移除解除安裝登錄表項目")
-
-    print("[步驟 2] 正在移除捷徑...")
-    if manifest.get("start_menu_shortcut"):
-        remove_shortcut(app_name, desktop=False)
-        log_lines.append("已移除開始功能表捷徑")
-    if manifest.get("desktop_shortcut"):
-        remove_shortcut(app_name, desktop=True)
-        log_lines.append("已移除桌面捷徑")
-
-    file_associations = manifest.get("file_associations") or []
-    if file_associations:
-        print("[步驟 3] 正在移除檔案關聯...")
-        file_assoc.unregister(file_associations)
-        log_lines.append(f"已移除檔案關聯: {file_associations}")
-
-    if manifest.get("path_added"):
-        print("[步驟 4] 正在從環境變數 PATH 移除安裝路徑...")
-        remove_from_path(_path_removal_target(manifest, current_dir))
-        log_lines.append("已從 PATH 移除安裝路徑")
-
-    print("[步驟 5] 正在刪除安裝目錄下的檔案...")
-    files_to_remove = manifest.get("files")
-    self_name = os.path.basename(sys.argv[0])
-
-    # 這個旗標決定最後一步能不能連整個資料夾一起刪：
-    # True = 資料夾裡確定只剩自己（uninstall.exe），可以安全整個清空；
-    # False = 資料夾裡還留有其他東西，只能刪自己、把資料夾留著。
-    safe_to_remove_whole_dir = False
-
-    is_local_appdata_file = _local_appdata_resolver(manifest)
-    local_appdata_dir = manifest.get("local_appdata_dir") or ""
-
-    def _target_path(rel):
-        base_dir = local_appdata_dir if (local_appdata_dir and is_local_appdata_file(rel)) else current_dir
-        return os.path.join(base_dir, rel)
-
-    if files_to_remove:
-        candidate_paths = [_target_path(rel) for rel in files_to_remove if os.path.basename(rel) != self_name]
-    else:
-        # 找不到安裝清單的舊版遺留情況：沒有明確的檔案清單可以餵給鎖定偵測，
-        # 退回掃描整個安裝目錄，盡量維持跟有清單時同等的偵測涵蓋範圍。
-        candidate_paths = [
-            os.path.join(current_dir, f)
-            for f in os.listdir(current_dir)
-            if f != self_name and os.path.isfile(os.path.join(current_dir, f))
-        ]
-
-    # 打包時勾選了這個選項，才需要偵測並結束鎖定檔案的進程；無人值守
-    # （--silent，來自更新覆蓋流程或企業批次部署）偵測到就直接結束，
-    # 互動式（使用者手動解除安裝）額外跳確認對話框，列出實際偵測到的
-    # 進程名稱，取得同意後才真的結束，避免無預警強制關閉使用者正在用的
-    # 其他程式。
-    killed_processes = []
-    if _wants_lock_release(manifest, sys.argv):
-        locking_processes = restart_manager.find_locking_processes(candidate_paths)
-        proceed = silent or _confirm_kill_locking_processes(app_name, locking_processes)
-        if locking_processes and proceed:
-            print("[提示] 正在結束鎖定安裝檔案的程式，以釋放檔案（例如殼層擴充功能 DLL）...")
-            killed_processes = _kill_processes(locking_processes)
-
-    try:
-        if files_to_remove:
-            # 有清單：只刪清單內記錄的檔案，使用者事後自己產生的檔案不會被誤刪。
-            # 部分檔案打包時可能被指定落地到 %LOCALAPPDATA%\Programs\<folder_name>
-            # （見 installer_core.py 的 local_appdata_files），要從那邊刪，
-            # 不是安裝目錄（current_dir）。
-            for rel in files_to_remove:
-                if os.path.basename(rel) == self_name:
-                    continue  # 自己交給下面的自我刪除流程處理，執行中無法自刪
-                item_path = _target_path(rel)
-                try:
-                    if os.path.exists(item_path):
-                        os.remove(item_path)
-                except Exception as e:
-                    log_lines.append(f"[警告] 無法刪除 {rel}: {e}")
-
-            # 清掉刪空的子目錄（安裝目錄與別位的 local_appdata 目錄分開清）
-            for root, dirs, files in os.walk(current_dir, topdown=False):
-                for d in dirs:
-                    dpath = os.path.join(root, d)
-                    try:
-                        if not os.listdir(dpath):
-                            os.rmdir(dpath)
-                    except Exception:
-                        pass
-            if local_appdata_dir:
-                _cleanup_empty_dirs(local_appdata_dir)
-            log_lines.append(f"已依安裝清單刪除 {len(files_to_remove)} 個檔案")
-
-            # 清單刪完之後，看看資料夾裡除了自己還剩什麼——這才是真正決定能不能
-            # 整個 rmdir 的依據，不能像原本那樣不管三七二十一直接砍。
-            remaining = [item for item in os.listdir(current_dir) if item != self_name]
-            if remaining:
-                log_lines.append(
-                    f"安裝目錄內還有清單之外的 {len(remaining)} 個項目（可能是使用者自行產生的資料），"
-                    f"保留資料夾，只刪除解除安裝程式本身：{remaining}"
-                )
-                safe_to_remove_whole_dir = False
-            else:
-                safe_to_remove_whole_dir = True
-        else:
-            print("[警告] 找不到安裝清單，將移除整個安裝目錄（含目錄下所有檔案）。")
-            log_lines.append("[警告] 找不到安裝清單，改為整個安裝目錄清除")
-            for item in os.listdir(current_dir):
-                item_path = os.path.join(current_dir, item)
-                try:
-                    if item == self_name:
-                        continue
-                    if os.path.isdir(item_path):
-                        shutil.rmtree(item_path)
-                    else:
-                        os.remove(item_path)
-                except Exception as e:
-                    log_lines.append(f"[警告] 無法刪除 {item}: {e}")
-            # 找不到清單這個分支，設計上本來就是要整個清空，維持原行為
-            safe_to_remove_whole_dir = True
-    finally:
-        # 只有真的結束掉的進程裡剛好有 explorer.exe，才自動重啟它——殺掉它
-        # 會讓使用者的桌面/工作列消失；其他被偵測到鎖定檔案而結束掉的進程
-        # 通常是使用者自己的應用程式，不該自動幫使用者重新開啟。
-        if any(image_name.lower() == "explorer.exe" for _pid, image_name in killed_processes):
-            _restart_explorer()
-
-    # 安裝目錄即將被整個刪掉（或者只刪自己），log 改寫到 %TEMP%，
-    # 不寫回安裝目錄底下，因為那個位置接下來可能會被清掉。
+        except Exception as e:
+            log_lines.append(f"[警告] 無法寫入指定的紀錄路徑 {custom_log_path}：{e}，改用預設路徑。")
     try:
         # tempfile.gettempdir() 比自己讀 os.environ.get("TEMP", ...) 穩固：
         # 後者只有 TEMP 這個環境變數整個不存在時才會用預設值，存在但是空字串
@@ -554,32 +473,14 @@ def main():
     except Exception:
         pass
 
-    if not _should_schedule_self_delete(is_upgrade):
-        # 更新覆蓋安裝流程呼叫的是「舊版本」的 uninstall.exe，接下來
-        # installer_core.py 馬上就要在同一個目錄裡寫入新版本的檔案
-        # （包含覆蓋這支 uninstall.exe 自己）——不排背景自我刪除指令，
-        # 見 _should_schedule_self_delete() 的完整說明。
-        print("\n" + "=" * 40)
-        print("解除安裝完成（更新覆蓋安裝流程），交由新版本接手安裝。")
-        print("=" * 40)
-        return
 
-    print("\n" + "=" * 40)
-    print("解除安裝完成！")
-    if safe_to_remove_whole_dir:
-        print("提示：本視窗即將關閉，並將自動刪除本助手檔案與所屬資料夾。")
-    else:
-        print("提示：本視窗即將關閉並刪除本助手檔案；安裝目錄內還有其他檔案，資料夾會保留。")
-    print("=" * 40)
-
-    if not silent:
-        time.sleep(1.5)
-
-    # 自我刪除：先明確 cd /d 切到安裝目錄，確保刪的一定是安裝目錄本身，
-    # 而不是 cmd.exe 繼承來的、可能不確定的工作目錄。
-    # 只有確認資料夾裡真的清空了（safe_to_remove_whole_dir）才會連資料夾一起
-    # rmdir；還有剩東西的話，只刪自己，資料夾跟裡面剩下的內容保留給使用者。
-    exe_path = sys.argv[0]
+def _schedule_self_delete(current_dir, exe_path, safe_to_remove_whole_dir):
+    """自我刪除：先明確 cd /d 切到安裝目錄，確保刪的一定是安裝目錄本身，
+    而不是 cmd.exe 繼承來的、可能不確定的工作目錄。只有確認資料夾裡真的
+    清空了（safe_to_remove_whole_dir）才會連資料夾一起 rmdir；還有剩東西
+    的話，只刪自己，資料夾跟裡面剩下的內容保留給使用者。互動/靜默兩條
+    路徑共用。
+    """
     if safe_to_remove_whole_dir:
         cmd_command = (
             f'cd /d "{current_dir}" && '
@@ -599,6 +500,293 @@ def main():
         shell=True,
         creationflags=subprocess.CREATE_NO_WINDOW,
     )
+
+
+def _perform_uninstall_steps(ctx, locking_processes, kill_locking_processes, log, report_progress=None):
+    """實際的解除安裝步驟：登錄表 → 捷徑 → 檔案關聯 → PATH →（視情況結束
+    鎖定檔案的程式）→ 清單式刪除。互動流程（UninstallerAPI.run_uninstall()）
+    跟無人值守流程（run_silent_uninstall()）共用同一份，差別只在
+    kill_locking_processes 從哪裡決定（互動由使用者在確認對話框回答；
+    無人值守一律視為同意，維持原本「更新覆蓋安裝不用問」的行為）跟
+    report_progress 要不要真的推播進度給前端。
+
+    回傳 safe_to_remove_whole_dir（bool）：True 表示資料夾裡確定只剩自己
+    （uninstall.exe），呼叫端可以安全整個清空；False 表示資料夾裡還留有
+    其他東西，呼叫端只能刪自己、把資料夾留著。
+    """
+    app_name = ctx["app_name"]
+    manifest = ctx["manifest"]
+    current_dir = ctx["current_dir"]
+    no_admin_install = ctx["no_admin_install"]
+
+    def progress(percent, message):
+        log(message)
+        if report_progress:
+            report_progress(percent, message)
+
+    progress(10, "正在清理 Windows 註冊表...")
+    if remove_registry_entry(app_name, no_admin_install):
+        log("已移除解除安裝登錄表項目")
+
+    progress(25, "正在移除捷徑...")
+    if manifest.get("start_menu_shortcut"):
+        remove_shortcut(app_name, desktop=False, no_admin_install=no_admin_install)
+        log("已移除開始功能表捷徑")
+    if manifest.get("desktop_shortcut"):
+        remove_shortcut(app_name, desktop=True, no_admin_install=no_admin_install)
+        log("已移除桌面捷徑")
+
+    file_associations = manifest.get("file_associations") or []
+    if file_associations:
+        progress(40, "正在移除檔案關聯...")
+        file_assoc.unregister(file_associations)
+        log(f"已移除檔案關聯: {file_associations}")
+
+    if manifest.get("path_added"):
+        progress(50, "正在從環境變數 PATH 移除安裝路徑...")
+        remove_from_path(_path_removal_target(manifest, current_dir), no_admin_install)
+        log("已從 PATH 移除安裝路徑")
+
+    progress(65, "正在刪除安裝目錄下的檔案...")
+    files_to_remove = manifest.get("files")
+    self_name = os.path.basename(sys.argv[0])
+
+    safe_to_remove_whole_dir = False
+    is_local_appdata_file = _local_appdata_resolver(manifest)
+    local_appdata_dir = manifest.get("local_appdata_dir") or ""
+
+    def _target_path(rel):
+        base_dir = local_appdata_dir if (local_appdata_dir and is_local_appdata_file(rel)) else current_dir
+        return os.path.join(base_dir, rel)
+
+    killed_processes = []
+    if kill_locking_processes and locking_processes:
+        log("正在結束鎖定安裝檔案的程式，以釋放檔案（例如殼層擴充功能 DLL）...")
+        killed_processes = _kill_processes(locking_processes)
+
+    try:
+        if files_to_remove:
+            # 有清單：只刪清單內記錄的檔案，使用者事後自己產生的檔案不會被誤刪。
+            # 部分檔案打包時可能被指定落地到 %LOCALAPPDATA%\Programs\<folder_name>
+            # （見 installer_core.py 的 local_appdata_files），要從那邊刪，
+            # 不是安裝目錄（current_dir）。
+            for rel in files_to_remove:
+                if os.path.basename(rel) == self_name:
+                    continue  # 自己交給下面的自我刪除流程處理，執行中無法自刪
+                item_path = _target_path(rel)
+                try:
+                    if os.path.exists(item_path):
+                        os.remove(item_path)
+                except Exception as e:
+                    log(f"[警告] 無法刪除 {rel}: {e}")
+
+            # 清掉刪空的子目錄（安裝目錄與別位的 local_appdata 目錄分開清）
+            for root, dirs, files in os.walk(current_dir, topdown=False):
+                for d in dirs:
+                    dpath = os.path.join(root, d)
+                    try:
+                        if not os.listdir(dpath):
+                            os.rmdir(dpath)
+                    except Exception:
+                        pass
+            if local_appdata_dir:
+                _cleanup_empty_dirs(local_appdata_dir)
+            log(f"已依安裝清單刪除 {len(files_to_remove)} 個檔案")
+
+            # 清單刪完之後，看看資料夾裡除了自己還剩什麼——這才是真正決定能不能
+            # 整個 rmdir 的依據，不能像原本那樣不管三七二十一直接砍。
+            remaining = [item for item in os.listdir(current_dir) if item != self_name]
+            if remaining:
+                log(
+                    f"安裝目錄內還有清單之外的 {len(remaining)} 個項目（可能是使用者自行產生的資料），"
+                    f"保留資料夾，只刪除解除安裝程式本身：{remaining}"
+                )
+                safe_to_remove_whole_dir = False
+            else:
+                safe_to_remove_whole_dir = True
+        else:
+            log("[警告] 找不到安裝清單，改為整個安裝目錄清除")
+            for item in os.listdir(current_dir):
+                item_path = os.path.join(current_dir, item)
+                try:
+                    if item == self_name:
+                        continue
+                    if os.path.isdir(item_path):
+                        shutil.rmtree(item_path)
+                    else:
+                        os.remove(item_path)
+                except Exception as e:
+                    log(f"[警告] 無法刪除 {item}: {e}")
+            # 找不到清單這個分支，設計上本來就是要整個清空，維持原行為
+            safe_to_remove_whole_dir = True
+    finally:
+        # 只有真的結束掉的進程裡剛好有 explorer.exe，才自動重啟它——殺掉它
+        # 會讓使用者的桌面/工作列消失；其他被偵測到鎖定檔案而結束掉的進程
+        # 通常是使用者自己的應用程式，不該自動幫使用者重新開啟。
+        if any(image_name.lower() == "explorer.exe" for _pid, image_name in killed_processes):
+            _restart_explorer()
+
+    progress(95, "正在寫入解除安裝紀錄...")
+    return safe_to_remove_whole_dir
+
+
+def run_silent_uninstall(ctx, is_upgrade, argv):
+    """command-line 靜默解除安裝：完全不開視窗，給 installer_core.py 的
+    run_upgrade_uninstall()（更新覆蓋安裝）跟企業批次部署（登入腳本/MDM/
+    群組原則）用。回傳值直接當這支 exe 的 process exit code。
+
+    既定行為（維持修改前的原樣）：不彈確認、偵測到鎖定檔案的程式直接視為
+    同意結束（不用像互動式那樣先問過使用者），跑完寫 log、排自我刪除。
+    """
+    app_name = ctx["app_name"]
+    main_exe = ctx["main_exe"]
+    log_lines = [f"=== {app_name} 解除安裝紀錄 {datetime.now().isoformat()} ==="]
+
+    def log(msg):
+        log_lines.append(msg)
+
+    if is_process_running(main_exe):
+        log(f"[錯誤] {main_exe} 正在執行中，中止解除安裝。")
+        _write_uninstall_log(log_lines, app_name, argv)
+        return 1
+
+    locking_processes = _compute_locking_processes(ctx, argv)
+    safe_to_remove_whole_dir = _perform_uninstall_steps(
+        ctx, locking_processes, kill_locking_processes=True, log=log, report_progress=None,
+    )
+
+    _write_uninstall_log(log_lines, app_name, argv)
+
+    if not _should_schedule_self_delete(is_upgrade):
+        # 更新覆蓋安裝流程呼叫的是「舊版本」的 uninstall.exe，接下來
+        # installer_core.py 馬上就要在同一個目錄裡寫入新版本的檔案
+        # （包含覆蓋這支 uninstall.exe 自己）——不排背景自我刪除指令，
+        # 見 _should_schedule_self_delete() 的完整說明。
+        return 0
+
+    _schedule_self_delete(ctx["current_dir"], argv[0], safe_to_remove_whole_dir)
+    return 0
+
+
+class UninstallerAPI:
+    """互動式解除安裝的 pywebview JS API，寫法比照 installer_core.py 的
+    InstallerAPI：畫面（ui/uninstall.html）驅動流程，這個 class 只負責
+    回答「目前狀態怎樣」跟「執行實際的解除安裝動作」，取代原本一路線性
+    執行到底、靠原生 MessageBoxW 中斷的 main()。
+    """
+
+    def __init__(self, ctx):
+        self.current_dir = ctx["current_dir"]
+        self.manifest = ctx["manifest"]
+        self.app_name = ctx["app_name"]
+        self.main_exe = ctx["main_exe"]
+        self.no_admin_install = ctx["no_admin_install"]
+        self.ui_language = lang_detect.detect_system_language(SUPPORTED_UI_LANGUAGES, DEFAULT_UI_LANGUAGE)
+        self._drag = WindowDragController()
+        self._locking_processes = []
+        self._safe_to_remove_whole_dir = True
+        self._log_lines = [f"=== {self.app_name} 解除安裝紀錄 {datetime.now().isoformat()} ==="]
+
+    def start_drag(self, cursor_x, cursor_y):
+        global window
+        self._drag.start_drag(window, cursor_x, cursor_y)
+
+    def drag_move(self, cursor_x, cursor_y):
+        global window
+        self._drag.drag_move(window, cursor_x, cursor_y)
+
+    def end_drag(self):
+        self._drag.end_drag()
+
+    def get_app_name(self):
+        return self.app_name
+
+    def get_ui_language(self):
+        return self.ui_language
+
+    def check_main_exe_running(self):
+        return is_process_running(self.main_exe)
+
+    def get_locking_process_names(self):
+        """算一次鎖定檔案的程式清單，快取在 self._locking_processes 供
+        run_uninstall() 使用（避免使用者已經在畫面上看過一次名單、按了
+        是/否之後，run_uninstall() 又重新掃一次、可能得到不一致的結果）。
+        """
+        ctx = {"current_dir": self.current_dir, "manifest": self.manifest}
+        self._locking_processes = _compute_locking_processes(ctx, sys.argv)
+        return sorted({name for _pid, name in self._locking_processes if name})
+
+    def _report_progress(self, percent, message):
+        global window
+        safe_msg = json.dumps(message, ensure_ascii=False)
+        try:
+            if window:
+                window.evaluate_js(f"window.updateUninstallProgress({percent}, {safe_msg})")
+        except Exception:
+            pass
+
+    def run_uninstall(self, kill_locking_processes):
+        ctx = {
+            "current_dir": self.current_dir, "manifest": self.manifest,
+            "app_name": self.app_name, "main_exe": self.main_exe,
+            "no_admin_install": self.no_admin_install,
+        }
+
+        def log(msg):
+            self._log_lines.append(msg)
+
+        try:
+            self._safe_to_remove_whole_dir = _perform_uninstall_steps(
+                ctx, self._locking_processes, kill_locking_processes, log,
+                report_progress=self._report_progress,
+            )
+            return {"status": "success"}
+        except Exception as e:
+            log(f"[錯誤] {e}")
+            return {"status": "error", "message": str(e)}
+
+    def finish_and_exit(self):
+        """使用者在完成畫面按下「完成」：寫 log、排自我刪除、關閉視窗。"""
+        _write_uninstall_log(self._log_lines, self.app_name, sys.argv)
+        if _should_schedule_self_delete(_is_upgrade_call(sys.argv)):
+            _schedule_self_delete(self.current_dir, sys.argv[0], self._safe_to_remove_whole_dir)
+        global window
+        window.destroy()
+
+    def cancel(self):
+        """使用者在確認畫面按下「取消」，或在「主程式正在執行中」畫面按下
+        「了解」：單純關閉視窗，不做任何刪除動作。"""
+        global window
+        window.destroy()
+
+
+def main():
+    silent = "--silent" in sys.argv
+    is_upgrade = _is_upgrade_call(sys.argv)
+    ctx = _load_uninstall_context(sys.argv)
+
+    if not ctx["no_admin_install"] and not is_admin():
+        # webview 視窗還沒建立，用原生 MessageBoxW 是既有的接受方案
+        # （跟 installer_core.py 單一實例鎖對話框同樣的例外）。
+        _lang = lang_detect.detect_system_language(SUPPORTED_UI_LANGUAGES, DEFAULT_UI_LANGUAGE)
+        if _lang == "en":
+            _title, _msg = "Uninstaller", "Please run this program as an administrator."
+        else:
+            _title, _msg = "解除安裝助手", "請以系統管理員身分執行此程式。"
+        ctypes.windll.user32.MessageBoxW(0, _msg, _title, 0x10)
+        return
+
+    if silent:
+        sys.exit(run_silent_uninstall(ctx, is_upgrade, sys.argv))
+
+    global window
+    api = UninstallerAPI(ctx)
+    html_path = get_resource_path(os.path.join("ui", "uninstall.html"))
+    window = webview.create_window(
+        title="解除安裝", url=html_path, js_api=api,
+        width=420, height=280, resizable=False, frameless=True, easy_drag=False,
+    )
+    webview.start(debug=False)
     sys.exit(0)
 
 

@@ -55,32 +55,40 @@ class TestCliArgs(unittest.TestCase):
             return ic._parse_cli_args()
 
     def test_no_args_defaults(self):
-        silent, install_dir, desktop = self._parse([])
+        silent, install_dir, desktop, log_path = self._parse([])
         self.assertFalse(silent)
         self.assertIsNone(install_dir)
         self.assertTrue(desktop)
+        self.assertIsNone(log_path)
 
     def test_silent_flag_case_insensitive(self):
-        silent, _, _ = self._parse(["/s"])
+        silent, _, _, _ = self._parse(["/s"])
         self.assertTrue(silent)
 
     def test_dir_flag(self):
-        _, install_dir, _ = self._parse(["/D=C:\\Custom Path"])
+        _, install_dir, _, _ = self._parse(["/D=C:\\Custom Path"])
         self.assertEqual(install_dir, "C:\\Custom Path")
 
     def test_long_dir_flag(self):
-        _, install_dir, _ = self._parse(["/DIR=D:\\Apps\\MyApp"])
+        _, install_dir, _, _ = self._parse(["/DIR=D:\\Apps\\MyApp"])
         self.assertEqual(install_dir, "D:\\Apps\\MyApp")
 
     def test_no_desktop_shortcut_flag(self):
-        _, _, desktop = self._parse(["/NODESKTOPSHORTCUT"])
+        _, _, desktop, _ = self._parse(["/NODESKTOPSHORTCUT"])
         self.assertFalse(desktop)
 
+    def test_log_flag(self):
+        _, _, _, log_path = self._parse(["/LOG=D:\\logs\\install.txt"])
+        self.assertEqual(log_path, "D:\\logs\\install.txt")
+
     def test_combined_flags(self):
-        silent, install_dir, desktop = self._parse(["/S", "/D=C:\\X", "/NODESKTOPSHORTCUT"])
+        silent, install_dir, desktop, log_path = self._parse(
+            ["/S", "/D=C:\\X", "/NODESKTOPSHORTCUT", "/LOG=C:\\X\\log.txt"]
+        )
         self.assertTrue(silent)
         self.assertEqual(install_dir, "C:\\X")
         self.assertFalse(desktop)
+        self.assertEqual(log_path, "C:\\X\\log.txt")
 
 
 class TestCheckDiskSpace(unittest.TestCase):
@@ -947,6 +955,294 @@ class TestInstallDependency(unittest.TestCase):
              mock.patch("installer_core.subprocess.run", side_effect=OSError("模擬子程序啟動失敗")):
             api.install_dependency(self.fake_key)
         self.assertFalse(os.path.exists(expected_tmp_path))
+
+
+class TestGenericRegistryCheck(unittest.TestCase):
+    """_generic_registry_check()：泛用登錄表偵測，取代原本每個相依元件各自
+    寫一個檢查函式的做法，custom_dependencies 的自訂相依元件也靠它。"""
+
+    def setUp(self):
+        self.fake_reg = FakeWinReg()
+        self.patcher = mock.patch.dict(sys.modules, {"winreg": self.fake_reg})
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    def test_key_missing_returns_false(self):
+        self.assertFalse(ic._generic_registry_check("HKLM", "Software\\NotThere"))
+
+    def test_value_name_none_only_checks_key_exists(self):
+        self.fake_reg.set_hklm("Software\\SomeApp", {})
+        self.assertTrue(ic._generic_registry_check("HKLM", "Software\\SomeApp"))
+
+    def test_value_matches_expected(self):
+        self.fake_reg.set_hklm("Software\\SomeApp", {"Installed": 1})
+        self.assertTrue(ic._generic_registry_check("HKLM", "Software\\SomeApp", "Installed", 1))
+
+    def test_value_mismatch_returns_false(self):
+        self.fake_reg.set_hklm("Software\\SomeApp", {"Installed": 0})
+        self.assertFalse(ic._generic_registry_check("HKLM", "Software\\SomeApp", "Installed", 1))
+
+    def test_hkcu_hive_is_respected(self):
+        self.fake_reg.set_hkcu("Software\\SomeApp", {"Installed": 1})
+        self.assertTrue(ic._generic_registry_check("HKCU", "Software\\SomeApp", "Installed", 1))
+        self.assertFalse(ic._generic_registry_check("HKLM", "Software\\SomeApp", "Installed", 1))
+
+
+class TestCustomDependencies(unittest.TestCase):
+    """custom_dependencies：讓封裝者自訂相依元件，不再侷限於內建的
+    vcredist_x64/dotnet_desktop。"""
+
+    def setUp(self):
+        self.fake_reg = FakeWinReg()
+        self.patcher = mock.patch.dict(sys.modules, {"winreg": self.fake_reg})
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    def test_custom_dependency_appears_in_warnings_when_missing(self):
+        api = make_installer_api(
+            dependencies=["my_runtime"],
+            custom_dependencies=[{
+                "key": "my_runtime",
+                "display_name": "My Runtime",
+                "download_url": "https://example.test/my_runtime.exe",
+                "silent_args": ["/quiet"],
+                "registry_check": {"hive": "HKLM", "path": "Software\\MyRuntime", "value_name": "Installed", "expected": 1},
+            }],
+        )
+        warnings = api.get_dependency_warnings()
+        self.assertEqual(warnings, [{
+            "key": "my_runtime", "name": "My Runtime", "url": "https://example.test/my_runtime.exe",
+        }])
+
+    def test_custom_dependency_no_warning_when_installed(self):
+        self.fake_reg.set_hklm("Software\\MyRuntime", {"Installed": 1})
+        api = make_installer_api(
+            dependencies=["my_runtime"],
+            custom_dependencies=[{
+                "key": "my_runtime",
+                "display_name": "My Runtime",
+                "download_url": "https://example.test/my_runtime.exe",
+                "silent_args": ["/quiet"],
+                "registry_check": {"hive": "HKLM", "path": "Software\\MyRuntime", "value_name": "Installed", "expected": 1},
+            }],
+        )
+        self.assertEqual(api.get_dependency_warnings(), [])
+
+    def test_built_in_dependencies_still_work_alongside_custom(self):
+        """自訂清單不能把內建的 vcredist_x64/dotnet_desktop 擠掉。"""
+        api = make_installer_api(
+            dependencies=["vcredist_x64"],
+            custom_dependencies=[{
+                "key": "my_runtime", "display_name": "My Runtime",
+                "download_url": "https://example.test/x.exe", "silent_args": [],
+                "registry_check": {"hive": "HKLM", "path": "Software\\X"},
+            }],
+        )
+        with mock.patch.dict(
+            ic.DEPENDENCY_CHECKERS,
+            {"vcredist_x64": (lambda: False, "Visual C++ Redistributable (x64)", "https://example.test/vc.exe", ["/quiet"])},
+        ):
+            warnings = api.get_dependency_warnings()
+        self.assertEqual(warnings, [{
+            "key": "vcredist_x64", "name": "Visual C++ Redistributable (x64)", "url": "https://example.test/vc.exe",
+        }])
+
+
+class TestBundleDependencies(unittest.TestCase):
+    """bundle_dependencies：打包時內嵌的相依元件安裝檔，install_dependency()
+    要優先用內嵌檔案，不要再連網下載。"""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_uses_bundled_file_instead_of_downloading(self):
+        dep_dir = os.path.join(self.tmp_dir, "dependencies")
+        os.makedirs(dep_dir)
+        bundled_path = os.path.join(dep_dir, "fake_dep.exe")
+        with open(bundled_path, "wb") as f:
+            f.write(b"fake bundled installer")
+
+        api = make_installer_api(bundle_dependencies=["fake_dep"])
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda rel: os.path.join(self.tmp_dir, rel)), \
+             mock.patch.dict(ic.DEPENDENCY_CHECKERS, {"fake_dep": (lambda: True, "Fake Dep", "https://example.test/fake.exe", ["/quiet"])}), \
+             mock.patch("installer_core.urllib.request.urlopen") as mock_urlopen, \
+             mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=0)) as mock_run:
+            result = api.install_dependency("fake_dep")
+        mock_urlopen.assert_not_called()
+        mock_run.assert_called_once_with(
+            [bundled_path, "/quiet"], creationflags=mock.ANY, timeout=600,
+        )
+        self.assertEqual(result, {"status": "success", "name": "Fake Dep"})
+        self.assertTrue(os.path.exists(bundled_path), "內嵌檔案不是我們下載的暫存檔，不該被刪除")
+
+    def test_falls_back_to_download_when_bundled_file_missing(self):
+        api = make_installer_api(bundle_dependencies=["fake_dep"])
+        response = mock.MagicMock()
+        response.__enter__ = mock.Mock(return_value=response)
+        response.__exit__ = mock.Mock(return_value=False)
+        response.getheader.return_value = None
+        response.read.side_effect = [b"data", b""]
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda rel: os.path.join(self.tmp_dir, rel)), \
+             mock.patch.dict(ic.DEPENDENCY_CHECKERS, {"fake_dep": (lambda: True, "Fake Dep", "https://example.test/fake.exe", ["/quiet"])}), \
+             mock.patch("installer_core.urllib.request.urlopen", return_value=response) as mock_urlopen, \
+             mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=0)):
+            result = api.install_dependency("fake_dep")
+        mock_urlopen.assert_called_once()
+        self.assertEqual(result["status"], "success")
+
+
+class TestNoAdminInstall(unittest.TestCase):
+    """no_admin_install：免系統管理員權限（per-user）安裝模式，登錄表/PATH/
+    捷徑都要改寫到使用者層級，而不是系統層級。"""
+
+    def setUp(self):
+        self.fake_reg = FakeWinReg()
+        self.patcher = mock.patch.dict(sys.modules, {"winreg": self.fake_reg})
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    def test_register_uninstall_entry_uses_hkcu_when_no_admin(self):
+        api = make_installer_api(
+            no_admin_install=True, app_name="MyApp", selected_path="C:\\Fake\\MyApp",
+            main_exe="app.exe",
+        )
+        with mock.patch.object(api, "_required_size", return_value=0):
+            api._register_uninstall_entry()
+        reg_path = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\MyApp"
+        self.assertIsNotNone(self.fake_reg.hkcu(reg_path))
+        self.assertIsNone(self.fake_reg.hklm(reg_path))
+
+    def test_register_uninstall_entry_uses_hklm_by_default(self):
+        api = make_installer_api(
+            no_admin_install=False, app_name="MyApp", selected_path="C:\\Fake\\MyApp",
+            main_exe="app.exe",
+        )
+        with mock.patch.object(api, "_required_size", return_value=0):
+            api._register_uninstall_entry()
+        reg_path = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\MyApp"
+        self.assertIsNotNone(self.fake_reg.hklm(reg_path))
+        self.assertIsNone(self.fake_reg.hkcu(reg_path))
+
+    def test_add_to_path_uses_hkcu_environment_when_no_admin(self):
+        self.fake_reg.set_hkcu("Environment", {})
+        api = make_installer_api(no_admin_install=True, selected_path="C:\\Apps\\MyApp")
+        with mock.patch("installer_core.ctypes.windll.user32.SendMessageTimeoutW"):
+            api._add_to_path_env()
+        self.assertEqual(self.fake_reg.hkcu("Environment")["Path"], "C:\\Apps\\MyApp")
+
+    def test_check_existing_install_reads_hkcu_when_no_admin(self):
+        self.fake_reg.set_hkcu(
+            "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\MyApp",
+            {"InstallLocation": "C:\\Apps\\Old", "DisplayVersion": "1.0.0"},
+        )
+        api = make_installer_api(no_admin_install=True, app_name="MyApp", version="1.0.0")
+        result = api.check_existing_install()
+        self.assertTrue(result["exists"])
+        self.assertTrue(result["is_same"])
+
+
+class TestInstallScriptHook(unittest.TestCase):
+    """_run_install_script()：pre/post-install 自訂腳本。"""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_missing_script_is_a_no_op(self):
+        api = make_installer_api()
+        with mock.patch("installer_core.get_resource_path", return_value="C:\\does\\not\\exist.bat"):
+            ok, msg = api._run_install_script("pre_install_script.bat")
+        self.assertTrue(ok)
+        self.assertEqual(msg, "")
+
+    def test_empty_script_field_is_a_no_op(self):
+        api = make_installer_api()
+        ok, msg = api._run_install_script("")
+        self.assertTrue(ok)
+
+    def test_success_returns_ok(self):
+        script_path = os.path.join(self.tmp_dir, "pre_install_script.bat")
+        with open(script_path, "w") as f:
+            f.write("@echo off")
+        api = make_installer_api()
+        with mock.patch("installer_core.get_resource_path", return_value=script_path), \
+             mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=0, stdout="", stderr="")):
+            ok, msg = api._run_install_script("pre_install_script.bat")
+        self.assertTrue(ok)
+
+    def test_nonzero_exit_code_returns_failure_with_message(self):
+        script_path = os.path.join(self.tmp_dir, "pre_install_script.bat")
+        with open(script_path, "w") as f:
+            f.write("@echo off")
+        api = make_installer_api()
+        with mock.patch("installer_core.get_resource_path", return_value=script_path), \
+             mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=1, stdout="oops", stderr="")):
+            ok, msg = api._run_install_script("pre_install_script.bat")
+        self.assertFalse(ok)
+        self.assertIn("oops", msg)
+
+    def test_exception_returns_failure(self):
+        script_path = os.path.join(self.tmp_dir, "pre_install_script.bat")
+        with open(script_path, "w") as f:
+            f.write("@echo off")
+        api = make_installer_api()
+        with mock.patch("installer_core.get_resource_path", return_value=script_path), \
+             mock.patch("installer_core.subprocess.run", side_effect=OSError("boom")):
+            ok, msg = api._run_install_script("pre_install_script.bat")
+        self.assertFalse(ok)
+        self.assertIn("boom", msg)
+
+
+class TestSilentInstallLogPath(unittest.TestCase):
+    """/LOG= 指定靜默安裝紀錄檔路徑，寫入失敗要 fallback 回 %TEMP%。"""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_writes_to_custom_log_path(self):
+        log_path = os.path.join(self.tmp_dir, "custom", "install.log")
+        api_result = {"status": "success", "message": "安裝成功"}
+        with mock.patch("installer_core.InstallerAPI") as MockAPI, \
+             mock.patch("installer_core._acquire_single_instance_lock", return_value=(True, None)):
+            instance = MockAPI.return_value
+            instance.app_name = "MyApp"
+            instance.check_existing_install.return_value = {"exists": False}
+            instance.get_dependency_warnings.return_value = []
+            instance.trigger_installation.return_value = api_result
+            exit_code = ic.run_silent_install(log_path=log_path)
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(os.path.exists(log_path))
+        with open(log_path, encoding="utf-8") as f:
+            self.assertIn("成功", f.read())
+
+    def test_falls_back_to_temp_when_custom_path_unwritable(self):
+        bogus_path = "Z:\\definitely\\not\\a\\real\\drive\\install.log"
+        with mock.patch("installer_core.InstallerAPI") as MockAPI, \
+             mock.patch("installer_core._acquire_single_instance_lock", return_value=(True, None)):
+            instance = MockAPI.return_value
+            instance.app_name = "FallbackApp"
+            instance.check_existing_install.return_value = {"exists": False}
+            instance.get_dependency_warnings.return_value = []
+            instance.trigger_installation.return_value = {"status": "success", "message": "ok"}
+            exit_code = ic.run_silent_install(log_path=bogus_path)
+        self.assertEqual(exit_code, 0)
+        fallback_path = os.path.join(tempfile.gettempdir(), "FallbackApp_silent_install_log.txt")
+        self.assertTrue(os.path.exists(fallback_path))
+        os.remove(fallback_path)
 
 
 if __name__ == "__main__":

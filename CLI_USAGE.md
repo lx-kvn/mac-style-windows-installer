@@ -91,6 +91,11 @@ python builder_cli.py pack --config app.json [--其他 flag 覆蓋個別欄位..
 | `path_target_exe` | `--path-target-exe` | 否 | `add_to_path` 開啟時，指定只把這支執行檔所在的目錄加入 PATH（不填就是整個安裝目錄，見規格文件 §8.14） |
 | `local_appdata_files` | `--local-appdata-files` | 否 | 逗號分隔，相對於 `app_dir` 的路徑，指定這些檔案改裝到 `%LOCALAPPDATA%\Programs\<folder_name>`（使用者自己的目錄，不需要系統管理員權限）而不是主安裝目錄；典型用途是跟主程式分開的 CLI 工具，讓使用者事後單純執行它不用每次都提權。如果 `path_target_exe` 也列在這裡，加進 PATH 的會自動變成這個別位目錄，見規格文件 §8.19 |
 | `restart_explorer_on_update` | `--restart-explorer-on-update` / `--no-restart-explorer-on-update` | 否 | 更新覆蓋安裝或解除安裝時是否偵測並結束鎖定安裝檔案的進程（不只是 explorer.exe，用 Windows Restart Manager API 實際偵測是哪些進程持有控制代碼）；更新覆蓋（無人值守）直接套用，手動解除安裝會先跳確認對話框列出偵測到的進程（見規格文件 §8.12） |
+| `custom_dependencies` | （只能透過 JSON） | 否 | 自訂相依元件清單，讓 `dependencies` 不再侷限於內建的 `vcredist_x64`/`dotnet_desktop`。每筆是一個物件：`key`（不可跟內建 key 撞名）、`display_name`、`download_url`（靜默安裝檔下載連結）、`silent_args`（靜默安裝命令列參數陣列）、`registry_check`（`{hive, path, value_name, expected}`，`value_name` 留空代表只檢查這個機碼是否存在）。跟 `eula_texts`/`doc_icons` 一樣是巢狀結構，沒有對應的命令列 flag。見規格文件 §8.23 |
+| `bundle_dependencies` | `--bundle-dependencies` | 否 | 逗號分隔，列在 `dependencies`（或 `custom_dependencies`）裡的相依元件 key，打包當下就把安裝檔下載下來內嵌進 Setup.exe，安裝時不需要再連網下載（安裝檔會變大）。沒列在這裡的相依元件維持原本「安裝時才連網下載」的行為。見規格文件 §8.24 |
+| `no_admin_install` | `--no-admin-install` / `--no-no-admin-install` | 否 | 開啟後整個安裝檔（含解除安裝）完全不要求系統管理員權限，不會跳出 UAC 提示：預設安裝路徑改成 `%LOCALAPPDATA%\Programs\<folder_name>`，解除安裝登錄表、PATH、捷徑都改寫到使用者層級（HKCU、`%APPDATA%`/`%USERPROFILE%\Desktop`）而不是系統層級。適合單一使用者自己安裝、不需要讓電腦上其他使用者共用的情境。見規格文件 §8.25 |
+| `pre_install_script` / `post_install_script` | `--pre-install-script` / `--post-install-script` | 否 | 相對於 `app_dir` 的路徑，指向一支要在安裝前/安裝後自動靜默執行的腳本或執行檔（例如 `.bat`/`.exe`/`.ps1`）。前置腳本失敗會中止整個安裝並回報錯誤；後置腳本失敗只記錄警告，不影響安裝結果（此時主程式已經裝好）。見規格文件 §8.26 |
+| `signing` | （只能透過 JSON） | 否 | 設定後打包時自動用 `signtool` 幫 Setup.exe/uninstall.exe 簽數位簽章：`{"cert_path": "憑證檔案(.pfx)路徑", "cert_password_env": "存放密碼的環境變數名稱", "timestamp_url": "時間戳記伺服器（選填，預設 DigiCert）"}`。密碼不放在設定檔明文裡，只存環境變數名稱；打包當下這個環境變數必須有值，簽章失敗會讓整個 `pack` 流程失敗。需要事先安裝 Windows SDK 或 Visual Studio 取得 `signtool`，並自行準備憑證（本工具不提供、也無法生成憑證）。見規格文件 §8.27 |
 
 `eula_texts` 是字典結構，只能透過 JSON 設定檔提供，沒有對應的命令列 flag
 （塞一整包多語言文字進命令列參數不實際）。

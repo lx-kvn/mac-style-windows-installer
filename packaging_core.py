@@ -139,7 +139,7 @@ def ensure_workspace_files(workspace_dir):
     required_scripts = [
         "installer_core.py", "uninstall.py",
         "window_drag.py", "disk_space.py", "file_assoc.py", "lang_detect.py",
-        "restart_manager.py",
+        "restart_manager.py", "dependency_defs.py",
     ]
 
     try:
@@ -156,8 +156,9 @@ def ensure_workspace_files(workspace_dir):
                 dest = os.path.join(workspace_dir, "ui", name)
                 if not os.path.isfile(src):
                     continue
-                if name == "index.html":
-                    # 安裝端介面實作，同樣不是使用者自訂項目，要跟著同步更新
+                if name in ("index.html", "uninstall.html"):
+                    # 安裝端/解除安裝端介面實作，同樣不是使用者自訂項目，
+                    # 要跟著同步更新
                     shutil.copy2(src, dest)
                 elif not os.path.exists(dest):
                     # 其他靜態資源使用者可能自己換過（例如 folder_icon.png），
@@ -206,6 +207,12 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     path_target_exe = data.get("path_target_exe", "").strip()
     local_appdata_files_raw = data.get("local_appdata_files", []) or []
     restart_explorer_on_update = bool(data.get("restart_explorer_on_update", False))
+    no_admin_install = bool(data.get("no_admin_install", False))
+    pre_install_script = data.get("pre_install_script", "").strip() if isinstance(data.get("pre_install_script"), str) else ""
+    post_install_script = data.get("post_install_script", "").strip() if isinstance(data.get("post_install_script"), str) else ""
+    custom_dependencies_raw = data.get("custom_dependencies", []) or []
+    bundle_dependencies_raw = data.get("bundle_dependencies", []) or []
+    signing_raw = data.get("signing", {}) or {}
 
     if not app_name or not version or not publisher or not exe_name:
         return None, "欄位驗證失敗：<br>所有文字欄位（名稱、版本、發行者、安裝檔名）皆為必填項目，請檢查是否有欄位遺漏。"
@@ -286,6 +293,73 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
             return None, f"欄位驗證失敗：<br>副檔名「{ext}」指定的專屬圖示不是有效的 ICO 檔案，請重新選擇。"
         doc_icons[ext] = icon_path
 
+    for script_field, script_rel in (("pre_install_script", pre_install_script), ("post_install_script", post_install_script)):
+        if script_rel and not os.path.exists(os.path.join(app_dir, script_rel)):
+            return None, f"欄位驗證失敗：<br>指定的{'安裝前置' if script_field == 'pre_install_script' else '安裝後置'}腳本「{script_rel}」不存在於應用程式資料夾中，請重新選擇。"
+
+    # custom_dependencies：只能透過 JSON 提供（巢狀結構塞進命令列不實際，
+    # 跟 eula_texts/doc_icons 同樣理由）。key 不能重複、不能跟內建的
+    # vcredist_x64/dotnet_desktop 撞名，必填欄位要齊全。
+    built_in_dependency_keys = {"vcredist_x64", "dotnet_desktop"}
+    custom_dependencies = []
+    seen_custom_keys = set()
+    for entry in custom_dependencies_raw:
+        if not isinstance(entry, dict):
+            return None, "欄位驗證失敗：<br>custom_dependencies 裡每一筆都必須是物件（字典）。"
+        key = str(entry.get("key", "")).strip()
+        display_name = str(entry.get("display_name", "")).strip()
+        download_url = str(entry.get("download_url", "")).strip()
+        registry_check = entry.get("registry_check", {}) or {}
+        if not key or not display_name or not download_url or not registry_check.get("path"):
+            return None, "欄位驗證失敗：<br>custom_dependencies 裡每一筆都必須填 key、display_name、download_url、registry_check.path。"
+        if key in built_in_dependency_keys:
+            return None, f"欄位驗證失敗：<br>custom_dependencies 的 key「{key}」跟內建的相依元件撞名，請改用其他名稱。"
+        if key in seen_custom_keys:
+            return None, f"欄位驗證失敗：<br>custom_dependencies 的 key「{key}」重複了。"
+        seen_custom_keys.add(key)
+        custom_dependencies.append({
+            "key": key,
+            "display_name": display_name,
+            "download_url": download_url,
+            "silent_args": list(entry.get("silent_args", []) or []),
+            "registry_check": {
+                "hive": registry_check.get("hive", "HKLM"),
+                "path": registry_check.get("path", ""),
+                "value_name": registry_check.get("value_name"),
+                "expected": registry_check.get("expected"),
+            },
+        })
+
+    # bundle_dependencies：只能是這次打包實際會用到的相依元件 key
+    # （dependencies 清單裡的內建 key，或上面驗證過的 custom_dependencies key），
+    # 不然打包時不知道要去哪裡下載這個 key 對應的安裝檔。
+    if isinstance(bundle_dependencies_raw, str):
+        bundle_dependencies_raw = bundle_dependencies_raw.replace("，", ",").split(",")
+    bundle_dependencies = [str(k).strip() for k in bundle_dependencies_raw if str(k).strip()]
+    known_dependency_keys = set(dependencies) | seen_custom_keys | built_in_dependency_keys
+    for key in bundle_dependencies:
+        if key not in known_dependency_keys or key not in dependencies:
+            return None, f"欄位驗證失敗：<br>bundle_dependencies 的「{key}」必須同時列在 dependencies 清單裡，才知道要內嵌哪個相依元件。"
+
+    # signing：只能透過 JSON 提供，密碼只存環境變數名稱（不放明文），
+    # 打包當下就要能讀到，簽不成不該等到 signtool 執行時才失敗。
+    signing = None
+    if signing_raw:
+        cert_path = str(signing_raw.get("cert_path", "")).strip()
+        cert_password_env = str(signing_raw.get("cert_password_env", "")).strip()
+        timestamp_url = str(signing_raw.get("timestamp_url", "")).strip()
+        if not cert_path or not os.path.exists(cert_path):
+            return None, "欄位驗證失敗：<br>signing.cert_path 必須指向一個實際存在的憑證檔案（.pfx）。"
+        if not cert_password_env:
+            return None, "欄位驗證失敗：<br>signing.cert_password_env 必須指定存放憑證密碼的環境變數名稱（密碼本身不放在設定檔裡）。"
+        if not os.environ.get(cert_password_env):
+            return None, f"欄位驗證失敗：<br>環境變數「{cert_password_env}」目前沒有值，請先設定好憑證密碼再打包。"
+        signing = {
+            "cert_path": cert_path,
+            "cert_password_env": cert_password_env,
+            "timestamp_url": timestamp_url or "http://timestamp.digicert.com",
+        }
+
     pack_data = dict(data)
     pack_data["folder_name"] = folder_name
     pack_data["file_associations"] = file_associations
@@ -299,4 +373,10 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     pack_data["path_target_exe"] = path_target_exe if add_to_path else ""
     pack_data["local_appdata_files"] = local_appdata_files
     pack_data["restart_explorer_on_update"] = restart_explorer_on_update
+    pack_data["no_admin_install"] = no_admin_install
+    pack_data["pre_install_script"] = pre_install_script
+    pack_data["post_install_script"] = post_install_script
+    pack_data["custom_dependencies"] = custom_dependencies
+    pack_data["bundle_dependencies"] = bundle_dependencies
+    pack_data["signing"] = signing
     return pack_data, None

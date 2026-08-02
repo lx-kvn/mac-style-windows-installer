@@ -96,7 +96,7 @@ ERROR = "#FF6B6B"
 _SHARED_ADD_DATA = [
     "installer_core.py", "uninstall.py",
     "window_drag.py", "disk_space.py", "file_assoc.py", "lang_detect.py",
-    "restart_manager.py",
+    "restart_manager.py", "dependency_defs.py",
 ]
 _GUI_ADD_DATA = _SHARED_ADD_DATA + ["splash_helper.py", "packaging_core.py"]
 _CLI_ADD_DATA = _SHARED_ADD_DATA + ["packaging_core.py", "builder.py"]
@@ -108,6 +108,7 @@ _REQUIRED_FILES = [
     ("builder.py", "builder.py"),
     ("ui/config.html", os.path.join("ui", "config.html")),
     ("ui/index.html", os.path.join("ui", "index.html")),
+    ("ui/uninstall.html", os.path.join("ui", "uninstall.html")),
     ("installer_core.py", "installer_core.py"),
     ("uninstall.py", "uninstall.py"),
     ("splash_helper.py", "splash_helper.py"),
@@ -116,6 +117,7 @@ _REQUIRED_FILES = [
     ("file_assoc.py", "file_assoc.py"),
     ("lang_detect.py", "lang_detect.py"),
     ("restart_manager.py", "restart_manager.py"),
+    ("dependency_defs.py", "dependency_defs.py"),
 ]
 
 

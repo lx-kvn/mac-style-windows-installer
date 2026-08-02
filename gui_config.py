@@ -72,6 +72,7 @@ class ConfigAPI:
         self.png_path = ""
         self.ico_path = ""
         self.doc_icon_path = ""
+        self.cert_path = ""
         self._window = None
         self._drag = WindowDragController()
         self._resize_origin = None
@@ -195,6 +196,15 @@ class ConfigAPI:
             return res[0]
         return ""
 
+    def select_cert_file(self):
+        """選擇數位簽章用的 PFX 憑證檔案（signing 設定，見規格文件 §8.27）"""
+        window = webview.active_window()
+        res = window.create_file_dialog(webview.OPEN_DIALOG, file_types=['PFX Certificate (*.pfx)'])
+        if res:
+            self.cert_path = res[0]
+            return self.cert_path
+        return ""
+
     def clear_doc_icon(self):
         """取消勾選「自訂文件圖示」時呼叫，把後端記住的路徑也一併清空。
 
@@ -283,6 +293,12 @@ class ConfigAPI:
                 path_target_exe=data.get("path_target_exe", ""),
                 local_appdata_files=data.get("local_appdata_files", []),
                 restart_explorer_on_update=data.get("restart_explorer_on_update", False),
+                no_admin_install=data.get("no_admin_install", False),
+                pre_install_script=data.get("pre_install_script", ""),
+                post_install_script=data.get("post_install_script", ""),
+                custom_dependencies=data.get("custom_dependencies", []),
+                bundle_dependencies=data.get("bundle_dependencies", []),
+                signing=data.get("signing"),
                 workspace_dir=workspace_dir,
                 progress_callback=progress_handler,
             )

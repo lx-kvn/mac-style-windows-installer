@@ -181,8 +181,10 @@
         <div class="form-group">
             <label data-i18n="label_dependencies">相依元件偵測 (選填)</label>
             <div class="checkbox-row"><input type="checkbox" id="dep_vcredist"><label for="dep_vcredist">Visual C++ Redistributable (x64)</label></div>
+            <div class="checkbox-row" style="margin-left: 24px;"><input type="checkbox" id="dep_vcredist_bundle"><label for="dep_vcredist_bundle" data-i18n="label_bundle_dep">內嵌進安裝檔（不需連網下載，安裝檔會變大）</label></div>
             <div class="checkbox-row"><input type="checkbox" id="dep_dotnet"><label for="dep_dotnet">.NET Desktop Runtime</label></div>
-            <span class="note" data-i18n="note_dependencies">安裝時僅會偵測系統是否已安裝，缺少時提示使用者前往官方頁面下載，不會自動安裝。</span>
+            <div class="checkbox-row" style="margin-left: 24px;"><input type="checkbox" id="dep_dotnet_bundle"><label for="dep_dotnet_bundle" data-i18n="label_bundle_dep">內嵌進安裝檔（不需連網下載，安裝檔會變大）</label></div>
+            <span class="note" data-i18n="note_dependencies">安裝時會偵測系統是否已安裝，缺少的話提示使用者是否要自動下載並靜默安裝（或選擇略過，不會阻擋主程式安裝）。</span>
         </div>
 
         <div class="form-group">
@@ -222,6 +224,45 @@
         <div class="form-group">
             <div class="checkbox-row"><input type="checkbox" id="restart_explorer_on_update"><label for="restart_explorer_on_update" data-i18n="label_restart_explorer">更新覆蓋安裝或解除安裝時，偵測並結束鎖定安裝檔案的程式</label></div>
             <span class="note" data-i18n="note_restart_explorer">適用於應用程式有註冊 Windows 檔案總管殼層擴充功能（Shell Extension，例如右鍵選單擴充 DLL）、或其他背景程式持有安裝目錄下檔案控制代碼的情況——導致更新覆蓋或解除安裝時無法刪除/覆寫。勾選後會用 Windows 官方的 Restart Manager API 實際偵測是哪些程式鎖住了要刪除的檔案（不是只針對檔案總管），結束那些程式；如果剛好結束掉的是檔案總管，完成後會自動重啟。更新覆蓋安裝（無人值守）會直接套用；使用者手動解除安裝時會先跳出確認對話框，列出偵測到的程式名稱，同意後才結束。畫面可能短暫閃爍（如果需要結束檔案總管），非必要不建議勾選。</span>
+        </div>
+
+        <div class="form-group">
+            <div class="checkbox-row"><input type="checkbox" id="no_admin_install"><label for="no_admin_install" data-i18n="label_no_admin_install">免系統管理員權限安裝（改裝到使用者目錄，不會跳出 UAC 提示）</label></div>
+            <span class="note" data-i18n="note_no_admin_install">預設會安裝到 Program Files，需要系統管理員權限（雙擊安裝檔會跳出 UAC 提示）。勾選這個選項後，整個安裝檔（含解除安裝）完全不要求提權，改裝到 %LOCALAPPDATA%\Programs\&lt;安裝資料夾名稱&gt;，適合單一使用者自己安裝、不需要讓電腦上其他使用者共用的情境。</span>
+        </div>
+
+        <div class="form-group">
+            <label data-i18n="label_pre_install_script">安裝前置腳本（選填）</label>
+            <input type="text" id="pre_install_script_input" placeholder="相對於應用程式資料夾的路徑，例如: scripts\pre_install.bat" data-i18n-placeholder="ph_pre_install_script">
+            <span class="note" data-i18n="note_pre_install_script">複製檔案之前自動靜默執行這支腳本/執行檔；執行失敗會中止整個安裝並回報錯誤。留空代表不執行。</span>
+        </div>
+
+        <div class="form-group">
+            <label data-i18n="label_post_install_script">安裝後置腳本（選填）</label>
+            <input type="text" id="post_install_script_input" placeholder="相對於應用程式資料夾的路徑，例如: scripts\post_install.bat" data-i18n-placeholder="ph_post_install_script">
+            <span class="note" data-i18n="note_post_install_script">登錄表/捷徑都寫完後自動靜默執行這支腳本/執行檔；執行失敗只記錄警告，不影響安裝結果。留空代表不執行。</span>
+        </div>
+
+        <div class="form-group">
+            <label data-i18n="label_custom_dependencies">自訂相依元件（選填）</label>
+            <div id="custom_deps_rows"></div>
+            <button class="btn-browse" type="button" onclick="addCustomDependencyRow()" data-i18n="btn_add_custom_dependency">+ 新增自訂相依元件</button>
+            <span class="note" data-i18n="note_custom_dependencies">除了上面內建的 Visual C++ Redistributable / .NET Desktop Runtime，也可以自訂任意相依元件：安裝時用登錄表偵測是否已安裝，缺少的話比照內建元件提示自動下載＋靜默安裝。</span>
+        </div>
+
+        <div class="form-group">
+            <div class="checkbox-row"><input type="checkbox" id="enable_signing" onchange="toggleSigningFields(this.checked)"><label for="enable_signing" data-i18n="label_enable_signing">啟用數位簽章自動化</label></div>
+            <div id="signing_section" style="display: none; margin-top: 8px;">
+                <div class="file-selector">
+                    <button class="btn-browse" onclick="browseCertFile()" data-i18n="btn_browse_cert">選擇 PFX 憑證</button>
+                    <span class="path-display" id="cert_path_display" data-i18n="no_file_selected">未選擇檔案</span>
+                </div>
+                <label style="margin-top: 8px;" data-i18n="label_cert_password_env">憑證密碼的環境變數名稱</label>
+                <input type="text" id="cert_password_env" placeholder="例如: MSWI_CERT_PASSWORD" data-i18n-placeholder="ph_cert_password_env">
+                <label style="margin-top: 8px;" data-i18n="label_timestamp_url">時間戳記伺服器（選填）</label>
+                <input type="text" id="timestamp_url" placeholder="http://timestamp.digicert.com" data-i18n-placeholder="ph_timestamp_url">
+                <span class="note" data-i18n="note_signing">打包時自動幫 Setup.exe/uninstall.exe 跑 signtool 簽章。密碼不會存在設定檔裡，只存放密碼的環境變數名稱，打包當下從這個環境變數讀取；需要事先安裝 Windows SDK 或 Visual Studio 取得 signtool，並自行準備好憑證。</span>
+            </div>
         </div>
 
         <button class="btn-submit" onclick="submitForm()" data-i18n="btn_submit">開始編譯安裝檔</button>
@@ -497,7 +538,33 @@
                     </div>
                 `,
                 label_dependencies: "相依元件偵測 (選填)",
-                note_dependencies: "安裝時僅會偵測系統是否已安裝，缺少時提示使用者前往官方頁面下載，不會自動安裝。",
+                note_dependencies: "安裝時會偵測系統是否已安裝，缺少的話提示使用者是否要自動下載並靜默安裝（或選擇略過，不會阻擋主程式安裝）。",
+                label_bundle_dep: "內嵌進安裝檔（不需連網下載，安裝檔會變大）",
+                label_no_admin_install: "免系統管理員權限安裝（改裝到使用者目錄，不會跳出 UAC 提示）",
+                note_no_admin_install: "預設會安裝到 Program Files，需要系統管理員權限（雙擊安裝檔會跳出 UAC 提示）。勾選這個選項後，整個安裝檔（含解除安裝）完全不要求提權，改裝到 %LOCALAPPDATA%\\Programs\\<安裝資料夾名稱>，適合單一使用者自己安裝、不需要讓電腦上其他使用者共用的情境。",
+                label_pre_install_script: "安裝前置腳本（選填）",
+                ph_pre_install_script: "相對於應用程式資料夾的路徑，例如: scripts\\pre_install.bat",
+                note_pre_install_script: "複製檔案之前自動靜默執行這支腳本/執行檔；執行失敗會中止整個安裝並回報錯誤。留空代表不執行。",
+                label_post_install_script: "安裝後置腳本（選填）",
+                ph_post_install_script: "相對於應用程式資料夾的路徑，例如: scripts\\post_install.bat",
+                note_post_install_script: "登錄表/捷徑都寫完後自動靜默執行這支腳本/執行檔；執行失敗只記錄警告，不影響安裝結果。留空代表不執行。",
+                label_custom_dependencies: "自訂相依元件（選填）",
+                btn_add_custom_dependency: "+ 新增自訂相依元件",
+                note_custom_dependencies: "除了上面內建的 Visual C++ Redistributable / .NET Desktop Runtime，也可以自訂任意相依元件：安裝時用登錄表偵測是否已安裝，缺少的話比照內建元件提示自動下載＋靜默安裝。",
+                ph_cd_key: "唯一識別代碼，例如: my_runtime",
+                ph_cd_display_name: "顯示名稱，例如: My Runtime 2.0",
+                ph_cd_download_url: "官方靜默安裝檔下載連結",
+                ph_cd_silent_args: "靜默安裝參數，以逗號分隔，例如: /quiet,/norestart",
+                ph_cd_reg_path: "登錄表路徑，例如: SOFTWARE\\MyRuntime",
+                ph_cd_value_name: "登錄表值名稱（選填，留空只檢查機碼是否存在）",
+                ph_cd_expected: "期望值（選填）",
+                label_enable_signing: "啟用數位簽章自動化",
+                btn_browse_cert: "選擇 PFX 憑證",
+                label_cert_password_env: "憑證密碼的環境變數名稱",
+                ph_cert_password_env: "例如: MSWI_CERT_PASSWORD",
+                label_timestamp_url: "時間戳記伺服器（選填）",
+                ph_timestamp_url: "http://timestamp.digicert.com",
+                note_signing: "打包時自動幫 Setup.exe/uninstall.exe 跑 signtool 簽章。密碼不會存在設定檔裡，只存放密碼的環境變數名稱，打包當下從這個環境變數讀取；需要事先安裝 Windows SDK 或 Visual Studio 取得 signtool，並自行準備好憑證。",
                 label_file_assoc: "需要註冊檔案關聯", ph_file_assoc: "輸入副檔名，以逗號分隔，例如: .xyz, .abc",
                 label_custom_doc_icon: "自訂這個副檔名的文件圖示",
                 note_custom_doc_icon: "不勾選的話，文件圖示會直接沿用應用程式本身的圖示。",
@@ -580,7 +647,33 @@
                     </div>
                 `,
                 label_dependencies: "Dependency Detection (optional)",
-                note_dependencies: "Only detects whether these are installed; if missing, the user is prompted to download them from the official page — nothing is installed automatically.",
+                note_dependencies: "Detects whether these are installed; if missing, the user is prompted to auto-download and silently install (or skip, without blocking the main install).",
+                label_bundle_dep: "Bundle into the installer (no download needed at install time; makes the installer larger)",
+                label_no_admin_install: "No-admin install (installs to the user's own folder, no UAC prompt)",
+                note_no_admin_install: "By default the app installs to Program Files and requires administrator rights (double-clicking the installer triggers a UAC prompt). Enabling this makes the entire installer (including uninstall) require no elevation at all, installing to %LOCALAPPDATA%\\Programs\\<folder name> instead — suited for a single user installing for themselves rather than sharing with every user on the machine.",
+                label_pre_install_script: "Pre-install script (optional)",
+                ph_pre_install_script: "Path relative to the app folder, e.g. scripts\\pre_install.bat",
+                note_pre_install_script: "Runs silently before files are copied; a failure aborts the whole install and reports an error. Leave empty to skip.",
+                label_post_install_script: "Post-install script (optional)",
+                ph_post_install_script: "Path relative to the app folder, e.g. scripts\\post_install.bat",
+                note_post_install_script: "Runs silently after the registry/shortcuts are written; a failure is only logged as a warning and doesn't affect the install result. Leave empty to skip.",
+                label_custom_dependencies: "Custom dependencies (optional)",
+                btn_add_custom_dependency: "+ Add custom dependency",
+                note_custom_dependencies: "Besides the built-in Visual C++ Redistributable / .NET Desktop Runtime, you can define any custom dependency: the installer checks the registry to detect whether it's installed, and if missing, offers the same auto-download-and-silent-install flow as the built-in ones.",
+                ph_cd_key: "Unique key, e.g. my_runtime",
+                ph_cd_display_name: "Display name, e.g. My Runtime 2.0",
+                ph_cd_download_url: "Official silent installer download URL",
+                ph_cd_silent_args: "Silent install args, comma-separated, e.g. /quiet,/norestart",
+                ph_cd_reg_path: "Registry path, e.g. SOFTWARE\\MyRuntime",
+                ph_cd_value_name: "Registry value name (optional; leave empty to just check the key exists)",
+                ph_cd_expected: "Expected value (optional)",
+                label_enable_signing: "Enable code-signing automation",
+                btn_browse_cert: "Choose PFX certificate",
+                label_cert_password_env: "Environment variable holding the cert password",
+                ph_cert_password_env: "e.g. MSWI_CERT_PASSWORD",
+                label_timestamp_url: "Timestamp server (optional)",
+                ph_timestamp_url: "http://timestamp.digicert.com",
+                note_signing: "Automatically runs signtool on Setup.exe/uninstall.exe during packaging. The password itself is never stored in the config — only the name of the environment variable holding it, read at packaging time. Requires signtool (from the Windows SDK or Visual Studio) and a certificate you provide yourself.",
                 label_file_assoc: "Register file associations", ph_file_assoc: "Enter file extensions, comma-separated, e.g. .xyz, .abc",
                 label_custom_doc_icon: "Use a custom icon for this file type",
                 note_custom_doc_icon: "If left unchecked, the file icon falls back to the application's own icon.",
@@ -828,6 +921,77 @@
         async function browsePng() { const path = await pywebview.api.select_png_icon(); if(path) document.getElementById('png_icon_path').innerText = path; }
         async function browseIco() { const path = await pywebview.api.select_ico_icon(); if(path) document.getElementById('ico_icon_path').innerText = path; }
 
+        // ---------------- 數位簽章自動化 ----------------
+        function toggleSigningFields(checked) {
+            document.getElementById('signing_section').style.display = checked ? 'block' : 'none';
+        }
+        async function browseCertFile() {
+            const path = await pywebview.api.select_cert_file();
+            if (path) document.getElementById('cert_path_display').innerText = path;
+        }
+
+        // ---------------- 自訂相依元件 ----------------
+        // 每一列直接用 innerHTML 樣板 + querySelector 收集，跟多語言 EULA
+        // 那組列表（addEulaLangRow/collectEulaData）同一套模式，不是另外
+        // 維護一份 JS 陣列狀態（那套模式見 per-ext 圖示那組，適合「值本身
+        // 需要跨欄位保留」的情境；這裡每個欄位都在自己的 DOM 節點裡，
+        // 送出時直接讀 DOM 即可，不需要額外狀態）。
+        let customDepRowCounter = 0;
+        function addCustomDependencyRow() {
+            customDepRowCounter += 1;
+            const rowId = `customDepRow${customDepRowCounter}`;
+            const row = document.createElement('div');
+            row.className = 'custom-dep-row';
+            row.id = rowId;
+            row.style.cssText = 'border:1px solid var(--border-color); border-radius:8px; padding:10px; margin-top:8px;';
+            row.innerHTML = `
+                <div style="display:flex; gap:8px;">
+                    <input type="text" class="cd-key" style="flex:1;" placeholder="${t('ph_cd_key')}">
+                    <input type="text" class="cd-display-name" style="flex:1;" placeholder="${t('ph_cd_display_name')}">
+                </div>
+                <input type="text" class="cd-download-url" style="margin-top:6px;" placeholder="${t('ph_cd_download_url')}">
+                <input type="text" class="cd-silent-args" style="margin-top:6px;" placeholder="${t('ph_cd_silent_args')}">
+                <div style="display:flex; gap:8px; margin-top:6px;">
+                    <select class="cd-hive" style="flex:0 0 100px;"><option value="HKLM">HKLM</option><option value="HKCU">HKCU</option></select>
+                    <input type="text" class="cd-reg-path" style="flex:1;" placeholder="${t('ph_cd_reg_path')}">
+                </div>
+                <div style="display:flex; gap:8px; margin-top:6px;">
+                    <input type="text" class="cd-value-name" style="flex:1;" placeholder="${t('ph_cd_value_name')}">
+                    <input type="text" class="cd-expected" style="flex:0 0 100px;" placeholder="${t('ph_cd_expected')}">
+                </div>
+                <button type="button" class="btn-browse" style="margin-top:6px;" onclick="removeCustomDependencyRow('${rowId}')">${t('btn_remove')}</button>
+            `;
+            document.getElementById('custom_deps_rows').appendChild(row);
+        }
+        function removeCustomDependencyRow(rowId) {
+            const row = document.getElementById(rowId);
+            if (row) row.remove();
+        }
+        function collectCustomDependencies() {
+            const result = [];
+            document.querySelectorAll('.custom-dep-row').forEach(row => {
+                const key = row.querySelector('.cd-key').value.trim();
+                const displayName = row.querySelector('.cd-display-name').value.trim();
+                const downloadUrl = row.querySelector('.cd-download-url').value.trim();
+                const regPath = row.querySelector('.cd-reg-path').value.trim();
+                if (!key || !displayName || !downloadUrl || !regPath) return; // 沒填完整的列，靜默略過，交給後端驗證擋掉真正送出的不完整資料
+                const silentArgs = row.querySelector('.cd-silent-args').value
+                    .replace(/，/g, ',').split(',').map(s => s.trim()).filter(s => s.length > 0);
+                const valueName = row.querySelector('.cd-value-name').value.trim();
+                const expectedRaw = row.querySelector('.cd-expected').value.trim();
+                result.push({
+                    key, display_name: displayName, download_url: downloadUrl, silent_args: silentArgs,
+                    registry_check: {
+                        hive: row.querySelector('.cd-hive').value,
+                        path: regPath,
+                        value_name: valueName || null,
+                        expected: expectedRaw === '' ? null : (isNaN(Number(expectedRaw)) ? expectedRaw : Number(expectedRaw)),
+                    },
+                });
+            });
+            return result;
+        }
+
         function toggleFileAssocFields(checked) {
             document.getElementById('file_assoc_input').style.display = checked ? 'block' : 'none';
             document.getElementById('doc_icon_section').style.display = checked ? 'block' : 'none';
@@ -993,6 +1157,19 @@
                 path_target_exe: document.getElementById('add_to_path').checked ? document.getElementById('path_target_exe').value : '',
                 local_appdata_files: document.getElementById('local_appdata_files_input').value,
                 restart_explorer_on_update: document.getElementById('restart_explorer_on_update').checked,
+                no_admin_install: document.getElementById('no_admin_install').checked,
+                bundle_dependencies: [
+                    ...(document.getElementById('dep_vcredist').checked && document.getElementById('dep_vcredist_bundle').checked ? ['vcredist_x64'] : []),
+                    ...(document.getElementById('dep_dotnet').checked && document.getElementById('dep_dotnet_bundle').checked ? ['dotnet_desktop'] : []),
+                ],
+                pre_install_script: document.getElementById('pre_install_script_input').value.trim(),
+                post_install_script: document.getElementById('post_install_script_input').value.trim(),
+                custom_dependencies: collectCustomDependencies(),
+                signing: document.getElementById('enable_signing').checked ? {
+                    cert_path: document.getElementById('cert_path_display').innerText === t('no_file_selected') ? '' : document.getElementById('cert_path_display').innerText,
+                    cert_password_env: document.getElementById('cert_password_env').value.trim(),
+                    timestamp_url: document.getElementById('timestamp_url').value.trim(),
+                } : {},
             };
             const result = await pywebview.api.start_pack(data);
             if (result.status === 'error') { showErrorModal(result.message); }

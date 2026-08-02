@@ -43,15 +43,75 @@ import os
 import subprocess
 import json
 import shutil
+import urllib.request
+
+import dependency_defs
 
 CONFIG_FILE_NAME = "installer_config.json"
+
+
+def _download_file(url, dest_path, timeout=60):
+    """下載一個檔案到指定路徑，供 bundle_dependencies（打包時嵌入相依元件
+    安裝檔）共用。install_dependency()（installer_core.py）安裝時的線上
+    下載也是同一段邏輯的另一個副本——這裡刻意不強行合併成同一份程式碼：
+    一個在打包工具端（同步、失敗直接中止整個 pack）、一個在安裝端
+    （需要推播進度給前端），兩邊的呼叫情境跟錯誤處理方式不同，硬併會讓
+    兩邊都要遷就對方不需要的參數。
+    """
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        with open(dest_path, "wb") as f:
+            while True:
+                chunk = resp.read(1024 * 256)
+                if not chunk:
+                    break
+                f.write(chunk)
+
+
+def _sign_executable(exe_path, signing):
+    """用 signtool 幫編譯出來的 exe 簽數位簽章（見 signing 設定欄位）。
+
+    這裡不負責生出憑證——那要跟憑證機構購買或用公司行號申請，這個函式做的
+    只是「把簽章步驟接進打包流程」：憑證路徑/密碼來源都齊全時自動簽，找不到
+    signtool 或簽章失敗一律讓整個 pack 流程失敗（既然使用者特地設定了簽章，
+    不該悄悄放行一份沒簽到的檔案）。
+
+    密碼透過 cert_password_env 指定的環境變數名稱讀取，不放在設定檔明文裡；
+    packaging_core.py 的 validate_and_build_pack_data() 已經確認過打包當下
+    這個環境變數確實有值，這裡直接讀取即可。
+    """
+    signtool = shutil.which("signtool")
+    if not signtool:
+        raise Exception(
+            "找不到 signtool（需要安裝 Windows SDK 或 Visual Studio，並確認它在 PATH 裡），無法簽署數位簽章。"
+        )
+    password = os.environ.get(signing["cert_password_env"], "")
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    result = subprocess.run(
+        [
+            signtool, "sign",
+            "/f", signing["cert_path"],
+            "/p", password,
+            "/fd", "sha256",
+            "/tr", signing["timestamp_url"],
+            "/td", "sha256",
+            exe_path,
+        ],
+        creationflags=creationflags, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        # 錯誤訊息不印密碼（signtool 本身的輸出也不會回顯密碼，這裡只是不
+        # 額外把 password 變數帶進錯誤訊息，避免哪天有人手滑加進去）。
+        tail = ((result.stdout or "") + "\n" + (result.stderr or ""))[-1000:]
+        raise Exception(f"簽署 {os.path.basename(exe_path)} 失敗：\n{tail}")
 
 
 def build_all(
     app_dir, exe_name, app_name, folder_name, version, publisher, png_path, ico_path,
     main_exe, eula_texts=None, eula_default_lang="", dependencies=None, file_associations=None, doc_icon_path="",
     doc_icons=None, add_to_path=False, path_target_exe="", local_appdata_files=None,
-    restart_explorer_on_update=False, workspace_dir=".", progress_callback=None,
+    restart_explorer_on_update=False, no_admin_install=False, pre_install_script="", post_install_script="",
+    custom_dependencies=None, bundle_dependencies=None, signing=None,
+    workspace_dir=".", progress_callback=None,
 ):
     """流水線：產生配置 -> 編譯反安裝檔 -> 編譯主安裝檔
 
@@ -86,16 +146,21 @@ def build_all(
     file_associations = file_associations or []
     doc_icons = doc_icons or {}
     local_appdata_files = local_appdata_files or []
+    custom_dependencies = custom_dependencies or []
+    bundle_dependencies = bundle_dependencies or []
     folder_name = folder_name or app_name
 
     workspace_dir = os.path.abspath(workspace_dir)
     ui_dir = os.path.join(workspace_dir, "ui")
     ui_index = os.path.join(ui_dir, "index.html")
+    ui_uninstall_html = os.path.join(ui_dir, "uninstall.html")
 
     if not os.path.exists(ui_dir) or not os.path.exists(ui_index):
         raise Exception(
             f"找不到 ui 資料夾或 ui/index.html 基礎資源（預期位置：{ui_dir}）。"
         )
+    if not os.path.exists(ui_uninstall_html):
+        raise Exception(f"找不到 ui/uninstall.html 基礎資源（預期位置：{ui_uninstall_html}）。")
 
     if not os.path.exists(os.path.join(workspace_dir, "installer_core.py")):
         raise Exception(f"找不到 installer_core.py（預期位置：{workspace_dir}）。")
@@ -115,6 +180,12 @@ def build_all(
     # doc_icon_<副檔名去掉點>.ico 內嵌，跟共用的 doc_icon.ico 是分開的檔案，
     # 彼此不會互相覆蓋，installer_core.py 也是靠這個固定檔名去複製/引用。
     doc_icons_embedded = {ext: f"doc_icon_{ext.lstrip('.')}.ico" for ext in doc_icons}
+    # pre/post-install 腳本比照 doc_icon 的做法：固定命名內嵌，安裝端只認這個
+    # 固定檔名，不需要知道開發者原本選的檔案叫什麼。保留原始副檔名（.bat/.exe/
+    # .ps1 等），因為執行方式（是不是要透過 cmd /c 或 powershell）由副檔名
+    # 本身的關聯決定，改副檔名會讓它變得跑不起來。
+    pre_install_embedded = f"pre_install_script{os.path.splitext(pre_install_script)[1]}" if pre_install_script else ""
+    post_install_embedded = f"post_install_script{os.path.splitext(post_install_script)[1]}" if post_install_script else ""
     config_content = {
         "app_name": app_name,
         "display_name": app_name,
@@ -125,6 +196,8 @@ def build_all(
         "eula_texts": eula_texts or {},
         "eula_default_lang": eula_default_lang,
         "dependencies": dependencies,
+        "custom_dependencies": custom_dependencies,
+        "bundle_dependencies": bundle_dependencies,
         "file_associations": file_associations,
         "doc_icon": "doc_icon.ico" if doc_icon_path else "",
         "doc_icons": doc_icons_embedded,
@@ -132,6 +205,9 @@ def build_all(
         "path_target_exe": path_target_exe,
         "local_appdata_files": local_appdata_files,
         "restart_explorer_on_update": bool(restart_explorer_on_update),
+        "no_admin_install": bool(no_admin_install),
+        "pre_install_script": pre_install_embedded,
+        "post_install_script": post_install_embedded,
     }
     config_path = os.path.join(workspace_dir, CONFIG_FILE_NAME)
     with open(config_path, "w", encoding="utf-8") as f:
@@ -145,8 +221,28 @@ def build_all(
     # 剩下的空間留給後面編譯安裝檔那個實際耗時久很多的階段。
     report(15, "正在編譯解除安裝助手...", cap=35, time_constant=8)
     uninstall_cmd = [
-        "pyinstaller", "--onefile", "--uac-admin", "--name=uninstall", "uninstall.py",
+        "pyinstaller",
+        "--onefile",
+        # --noconsole：uninstall.py 現在也是 pywebview 視窗化程式（見
+        # ui/uninstall.html），套用跟主安裝檔同一套 .nice-modal-* 視覺語言，
+        # 不再是雙擊會跳出黑底命令提示字元視窗的純 console 程式。
+        "--noconsole",
+        "--add-data=ui;ui",
+        # installer_core.py 排除這幾個模組的理由同樣適用於 uninstall.py：
+        # 兩支 exe 現在都 import webview，PyInstaller 保守打包會把用不到的
+        # pywebview 替代 GUI 後端一起塞進去，體積差很多。
+        "--exclude-module=PyQt5",
+        "--exclude-module=PyQt6",
+        "--exclude-module=PySide2",
+        "--exclude-module=PySide6",
+        "--exclude-module=gi",
     ]
+    if not no_admin_install:
+        # no_admin_install 開啟時，整個 app（含解除安裝）都不要求提權；
+        # 兩支 exe 的提權設定要一致，不然單獨對 uninstall.exe 提權會很突兀
+        # （使用者剛裝完全程不用管理員權限，解除安裝卻突然跳 UAC）。
+        uninstall_cmd.append("--uac-admin")
+    uninstall_cmd += ["--name=uninstall", "uninstall.py"]
     # CREATE_NO_WINDOW：呼叫端（gui_config.py）是 --noconsole 的 GUI 程式，
     # 沒有這個旗標的話，Windows 會在編譯的當下短暫跳出一個命令提示字元視窗。
     # 同時改成 capture_output，把 PyInstaller 實際輸出的內容留著，
@@ -175,7 +271,6 @@ def build_all(
         "pyinstaller",
         "--onefile",
         "--noconsole",
-        "--uac-admin",
         f"--name={exe_name}",
         "--add-data=ui;ui",
         f"--add-data={app_dir};app_contents",
@@ -192,6 +287,8 @@ def build_all(
         "--exclude-module=PySide6",
         "--exclude-module=gi",
     ]
+    if not no_admin_install:
+        cmd.append("--uac-admin")
     if doc_icon_path:
         # --add-data 不會重新命名檔案，會保留使用者選的原始檔名，
         # 所以跟現有的 PNG 圖示（temp_icon）一樣，先複製一份固定檔名
@@ -208,6 +305,47 @@ def build_all(
         shutil.copy(src_path, temp_path)
         temp_doc_icons.append(temp_path)
         cmd.append(f"--add-data={temp_path};.")
+
+    temp_scripts = []
+    for script_src, embedded_name in (
+        (pre_install_script, pre_install_embedded),
+        (post_install_script, post_install_embedded),
+    ):
+        if not script_src:
+            continue
+        temp_path = os.path.join(workspace_dir, embedded_name)
+        shutil.copy(os.path.join(app_dir, script_src), temp_path)
+        temp_scripts.append(temp_path)
+        cmd.append(f"--add-data={temp_path};.")
+
+    # bundle_dependencies：打包當下把指定的相依元件安裝檔下載下來，內嵌進
+    # Setup.exe 的 dependencies/ 子目錄（掛載路徑要跟 installer_core.py 的
+    # install_dependency() 查找路徑 dependencies/<key>.exe 一致）。下載失敗
+    # 直接中止整個 pack 流程並回報，不要悄悄產出一份「號稱有內嵌、其實沒裝
+    # 進去」的安裝檔。
+    dependency_url_map = {
+        key: meta["download_url"] for key, meta in dependency_defs.BUILT_IN_DEPENDENCIES.items()
+    }
+    for entry in custom_dependencies:
+        dependency_url_map[entry["key"]] = entry["download_url"]
+
+    temp_dependency_files = []
+    for key in bundle_dependencies:
+        url = dependency_url_map.get(key)
+        if not url:
+            raise Exception(f"無法內嵌相依元件「{key}」：找不到對應的下載連結。")
+        report(38, f"正在下載相依元件 {key} 供內嵌打包...", cap=39, time_constant=5)
+        # 檔名必須剛好是「{key}.exe」：--add-data 不會重新命名檔案，只會把
+        # 來源檔案原封不動放進目的地資料夾，installer_core.py 的
+        # install_dependency() 查找的固定路徑是 dependencies/<key>.exe。
+        temp_path = os.path.join(workspace_dir, f"{key}.exe")
+        try:
+            _download_file(url, temp_path)
+        except Exception as e:
+            raise Exception(f"下載相依元件「{key}」失敗，無法內嵌：{e}")
+        temp_dependency_files.append(temp_path)
+        cmd.append(f"--add-data={temp_path};dependencies")
+
     cmd.append("installer_core.py")
 
     res_installer = subprocess.run(
@@ -227,9 +365,24 @@ def build_all(
     for temp_path in temp_doc_icons:
         if os.path.exists(temp_path):
             os.remove(temp_path)
+    for temp_path in temp_scripts:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+    for temp_path in temp_dependency_files:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
     if res_installer.returncode != 0:
         tail = ((res_installer.stdout or "") + "\n" + (res_installer.stderr or ""))[-1500:]
         raise Exception(f"主安裝檔編譯打包失敗。\n\n{tail}")
 
-    report(100, f"編譯完成，輸出位置：{os.path.join(workspace_dir, 'dist', exe_name + '.exe')}", cap=100, time_constant=1)
+    dist_installer = os.path.join(workspace_dir, "dist", f"{exe_name}.exe")
+
+    if signing:
+        # 使用者特地設定了簽章，簽不成不該悄悄放行產出未簽章的檔案——
+        # 直接讓整個 pack 流程失敗，而不是打包「成功」但實際上沒簽章。
+        report(99, "正在簽署數位簽章...", cap=99, time_constant=2)
+        _sign_executable(dist_installer, signing)
+        _sign_executable(built_uninstall, signing)
+
+    report(100, f"編譯完成，輸出位置：{dist_installer}", cap=100, time_constant=1)

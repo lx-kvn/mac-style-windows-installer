@@ -13,6 +13,7 @@ install_manifest.json 記錄的檔案，保留使用者事後自己在安裝目�
 """
 import os
 import sys
+import json
 import shutil
 import tempfile
 import unittest
@@ -123,32 +124,151 @@ class TestWantsLockRelease(unittest.TestCase):
         self.assertTrue(result)
 
 
-class TestConfirmKillLockingProcesses(unittest.TestCase):
-    """_confirm_kill_locking_processes()：互動式解除安裝真的結束鎖定進程前，
-    跳出確認對話框取得使用者同意——避免無預警強制關閉使用者正在用的其他
-    程式。列出 restart_manager 實際偵測到的進程名稱，不是像舊版一律寫死
-    「檔案總管」。"""
+class TestComputeLockingProcesses(unittest.TestCase):
+    """_compute_locking_processes()：取代原本的 _confirm_kill_locking_processes()
+    （原生 MessageBoxW 確認對話框）——確認邏輯現在搬進 ui/uninstall.html +
+    UninstallerAPI.get_locking_process_names()，這裡只負責偵測，不負責問。
+    """
 
-    def test_returns_true_when_user_clicks_yes(self):
-        IDYES = 6
-        with mock.patch("uninstall.ctypes.windll.user32.MessageBoxW", return_value=IDYES) as mock_box:
-            result = un._confirm_kill_locking_processes("測試應用程式", [(111, "某個殼層擴充功能")])
-        self.assertTrue(result)
-        args, kwargs = mock_box.call_args
-        self.assertIn("測試應用程式", args[1])
-        self.assertIn("某個殼層擴充功能", args[1])
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
 
-    def test_returns_false_when_user_clicks_no(self):
-        IDNO = 7
-        with mock.patch("uninstall.ctypes.windll.user32.MessageBoxW", return_value=IDNO):
-            result = un._confirm_kill_locking_processes("測試應用程式", [(111, "某個殼層擴充功能")])
-        self.assertFalse(result)
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
-    def test_returns_false_without_prompting_when_no_processes_detected(self):
-        with mock.patch("uninstall.ctypes.windll.user32.MessageBoxW") as mock_box:
-            result = un._confirm_kill_locking_processes("測試應用程式", [])
-        self.assertFalse(result)
-        mock_box.assert_not_called()
+    def _ctx(self, manifest):
+        return {"current_dir": self.tmp_dir, "manifest": manifest}
+
+    def test_returns_empty_when_lock_release_not_wanted(self):
+        with mock.patch("uninstall.restart_manager.find_locking_processes") as mock_find:
+            result = un._compute_locking_processes(self._ctx({}), ["uninstall.exe"])
+        self.assertEqual(result, [])
+        mock_find.assert_not_called()
+
+    def test_delegates_to_restart_manager_when_lock_release_wanted(self):
+        manifest = {"restart_explorer_on_update": True, "files": ["app.exe"]}
+        with mock.patch("uninstall.restart_manager.find_locking_processes", return_value=[(111, "某個殼層擴充功能")]) as mock_find:
+            result = un._compute_locking_processes(self._ctx(manifest), ["uninstall.exe"])
+        self.assertEqual(result, [(111, "某個殼層擴充功能")])
+        mock_find.assert_called_once()
+
+    def test_falls_back_to_directory_scan_without_manifest_files(self):
+        with open(os.path.join(self.tmp_dir, "leftover.dll"), "w") as f:
+            f.write("x")
+        manifest = {"restart_explorer_on_update": True}
+        with mock.patch("uninstall.restart_manager.find_locking_processes", return_value=[]) as mock_find:
+            un._compute_locking_processes(self._ctx(manifest), ["uninstall.exe"])
+        candidate_paths = mock_find.call_args[0][0]
+        self.assertIn(os.path.join(self.tmp_dir, "leftover.dll"), candidate_paths)
+
+
+class TestUninstallerAPI(unittest.TestCase):
+    """UninstallerAPI：互動式解除安裝的 pywebview JS API，取代原本一路線性
+    執行到底、靠原生 MessageBoxW 中斷的 main()。"""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.fake_reg = FakeWinReg()
+        self.patcher = mock.patch.object(un, "winreg", self.fake_reg)
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _make_api(self, **manifest_overrides):
+        ctx = {
+            "current_dir": self.tmp_dir,
+            "manifest": manifest_overrides,
+            "app_name": "測試應用程式",
+            "main_exe": "app.exe",
+            "no_admin_install": False,
+        }
+        return un.UninstallerAPI(ctx)
+
+    def test_check_main_exe_running_delegates(self):
+        api = self._make_api()
+        with mock.patch("uninstall.is_process_running", return_value=True) as mock_running:
+            self.assertTrue(api.check_main_exe_running())
+        mock_running.assert_called_once_with("app.exe")
+
+    def test_get_locking_process_names_caches_and_dedupes(self):
+        api = self._make_api(restart_explorer_on_update=True, files=["app.exe"])
+        with mock.patch("uninstall.restart_manager.find_locking_processes", return_value=[(1, "A"), (2, "A"), (3, "B")]):
+            names = api.get_locking_process_names()
+        self.assertEqual(names, ["A", "B"])
+        self.assertEqual(api._locking_processes, [(1, "A"), (2, "A"), (3, "B")])
+
+    def test_get_locking_process_names_empty_when_not_wanted(self):
+        api = self._make_api()
+        names = api.get_locking_process_names()
+        self.assertEqual(names, [])
+
+    def test_run_uninstall_success_updates_safe_to_remove_flag(self):
+        api = self._make_api()
+        with mock.patch("uninstall._perform_uninstall_steps", return_value=True) as mock_perform:
+            result = api.run_uninstall(False)
+        self.assertEqual(result, {"status": "success"})
+        self.assertTrue(api._safe_to_remove_whole_dir)
+        mock_perform.assert_called_once()
+
+    def test_run_uninstall_exception_returns_error(self):
+        api = self._make_api()
+        with mock.patch("uninstall._perform_uninstall_steps", side_effect=RuntimeError("boom")):
+            result = api.run_uninstall(False)
+        self.assertEqual(result["status"], "error")
+        self.assertIn("boom", result["message"])
+
+    def test_finish_and_exit_writes_log_and_schedules_delete(self):
+        api = self._make_api()
+        api._safe_to_remove_whole_dir = True
+        fake_window = mock.Mock()
+        with mock.patch.object(un, "window", fake_window, create=True), \
+             mock.patch("uninstall._write_uninstall_log") as mock_log, \
+             mock.patch("uninstall._schedule_self_delete") as mock_schedule:
+            api.finish_and_exit()
+        mock_log.assert_called_once()
+        mock_schedule.assert_called_once_with(self.tmp_dir, sys.argv[0], True)
+        fake_window.destroy.assert_called_once()
+
+    def test_cancel_destroys_window_without_deleting(self):
+        api = self._make_api()
+        fake_window = mock.Mock()
+        with mock.patch.object(un, "window", fake_window, create=True), \
+             mock.patch("uninstall._schedule_self_delete") as mock_schedule:
+            api.cancel()
+        mock_schedule.assert_not_called()
+        fake_window.destroy.assert_called_once()
+
+
+class TestLoadUninstallContext(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.exe_path = os.path.join(self.tmp_dir, "uninstall.exe")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_defaults_when_no_manifest(self):
+        ctx = un._load_uninstall_context([self.exe_path])
+        self.assertEqual(ctx["app_name"], "DefaultApp")
+        self.assertEqual(ctx["main_exe"], "")
+        self.assertFalse(ctx["no_admin_install"])
+        self.assertEqual(ctx["current_dir"], self.tmp_dir)
+
+    def test_reads_manifest_fields(self):
+        with open(os.path.join(self.tmp_dir, "install_manifest.json"), "w", encoding="utf-8") as f:
+            json.dump({"app_name": "MyApp", "main_exe": "app.exe", "no_admin_install": True}, f)
+        ctx = un._load_uninstall_context([self.exe_path])
+        self.assertEqual(ctx["app_name"], "MyApp")
+        self.assertEqual(ctx["main_exe"], "app.exe")
+        self.assertTrue(ctx["no_admin_install"])
+
+    def test_falls_back_to_config_app_name_when_manifest_missing_it(self):
+        with open(os.path.join(self.tmp_dir, "installer_config.json"), "w", encoding="utf-8") as f:
+            json.dump({"app_name": "FromConfig"}, f)
+        ctx = un._load_uninstall_context([self.exe_path])
+        self.assertEqual(ctx["app_name"], "FromConfig")
 
 
 class TestUpgradeSelfDeleteGating(unittest.TestCase):
@@ -194,6 +314,60 @@ class TestRemoveFromPath(unittest.TestCase):
         with mock.patch("uninstall.ctypes.windll.user32.SendMessageTimeoutW"):
             un.remove_from_path("C:\\Apps\\MyApp")
         self.assertEqual(self.fake_reg.hklm(self._path_key())["Path"], "C:\\Windows;C:\\Other")
+
+
+class TestNoAdminInstallUninstall(unittest.TestCase):
+    """no_admin_install：解除安裝端的登錄表/PATH 讀寫要對應改到使用者層級
+    （HKCU），不是系統層級（HKLM），跟安裝端保持一致。"""
+
+    def setUp(self):
+        self.fake_reg = FakeWinReg()
+        self.patcher = mock.patch.object(un, "winreg", self.fake_reg)
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    def test_remove_registry_entry_uses_hkcu_when_no_admin(self):
+        reg_path = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\MyApp"
+        self.fake_reg.set_hkcu(reg_path, {})
+        self.assertTrue(un.remove_registry_entry("MyApp", no_admin_install=True))
+        self.assertIsNone(self.fake_reg.hkcu(reg_path))
+
+    def test_remove_registry_entry_uses_hklm_by_default(self):
+        reg_path = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\MyApp"
+        self.fake_reg.set_hklm(reg_path, {})
+        self.assertTrue(un.remove_registry_entry("MyApp"))
+        self.assertIsNone(self.fake_reg.hklm(reg_path))
+
+    def test_remove_from_path_uses_hkcu_environment_when_no_admin(self):
+        self.fake_reg.set_hkcu("Environment", {"Path": "C:\\Windows;C:\\Apps\\MyApp"})
+        with mock.patch("uninstall.ctypes.windll.user32.SendMessageTimeoutW"):
+            un.remove_from_path("C:\\Apps\\MyApp", no_admin_install=True)
+        self.assertEqual(self.fake_reg.hkcu("Environment")["Path"], "C:\\Windows")
+
+    def test_remove_shortcut_uses_user_desktop_when_no_admin(self):
+        with mock.patch("uninstall.os.path.expanduser", return_value="C:\\Users\\Tester"), \
+             mock.patch("uninstall.os.path.exists", return_value=True) as mock_exists, \
+             mock.patch("uninstall.os.remove") as mock_remove:
+            un.remove_shortcut("MyApp", desktop=True, no_admin_install=True)
+        expected_path = os.path.join("C:\\Users\\Tester", "Desktop", "MyApp.lnk")
+        mock_exists.assert_called_once_with(expected_path)
+        mock_remove.assert_called_once_with(expected_path)
+
+
+class TestCliLogPath(unittest.TestCase):
+    def test_no_flag_returns_none(self):
+        self.assertIsNone(un._cli_log_path(["uninstall.exe"]))
+
+    def test_parses_log_flag(self):
+        self.assertEqual(
+            un._cli_log_path(["uninstall.exe", "/LOG=D:\\logs\\uninstall.txt"]),
+            "D:\\logs\\uninstall.txt",
+        )
+
+    def test_case_insensitive(self):
+        self.assertEqual(un._cli_log_path(["uninstall.exe", "/log=D:\\x.txt"]), "D:\\x.txt")
 
 
 class TestPathRemovalTarget(unittest.TestCase):

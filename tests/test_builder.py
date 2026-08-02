@@ -37,6 +37,8 @@ class BuildAllTestBase(unittest.TestCase):
         os.makedirs(os.path.join(self.workspace_dir, "ui"))
         with open(os.path.join(self.workspace_dir, "ui", "index.html"), "w") as f:
             f.write("<html></html>")
+        with open(os.path.join(self.workspace_dir, "ui", "uninstall.html"), "w") as f:
+            f.write("<html></html>")
         with open(os.path.join(self.workspace_dir, "installer_core.py"), "w") as f:
             f.write("# stub")
         with open(os.path.join(self.workspace_dir, "uninstall.py"), "w") as f:
@@ -270,6 +272,57 @@ class TestErrorPaths(BuildAllTestBase):
             os.path.exists(os.path.join(stale_dist, "leftover_from_previous_build.exe")),
             "每次重新編譯前應該清掉上一輪殘留的 dist 產物，避免混淆",
         )
+
+
+class TestUninstallCompileFlags(BuildAllTestBase):
+    """uninstall.exe 現在也是 pywebview 視窗化程式（見 ui/uninstall.html，
+    取代原本純 console + 原生 MessageBoxW 的介面），編譯指令要對應調整：
+    --noconsole 移除黑底命令提示字元視窗、掛載 ui 資料夾讓它找得到
+    uninstall.html、跟主安裝檔一樣排除用不到的 pywebview 替代 GUI 後端。
+    """
+
+    def test_uninstall_cmd_has_noconsole_and_ui_data(self):
+        captured_cmds = []
+
+        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+            captured_cmds.append(cmd)
+            if "uninstall.py" in cmd:
+                os.makedirs(self.dist_dir, exist_ok=True)
+                with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
+                    f.write(b"FAKE_UNINSTALL_EXE")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        self._call_build_all(run_side_effect=fake_run)
+
+        uninstall_cmd = next(cmd for cmd in captured_cmds if "uninstall.py" in cmd)
+        self.assertIn("--noconsole", uninstall_cmd)
+        self.assertIn("--add-data=ui;ui", uninstall_cmd)
+        self.assertIn("--exclude-module=PyQt5", uninstall_cmd)
+
+    def test_uninstall_cmd_omits_uac_admin_when_no_admin_install(self):
+        captured_cmds = []
+
+        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+            captured_cmds.append(cmd)
+            if "uninstall.py" in cmd:
+                os.makedirs(self.dist_dir, exist_ok=True)
+                with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
+                    f.write(b"FAKE_UNINSTALL_EXE")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        self._call_build_all(run_side_effect=fake_run, no_admin_install=True)
+
+        uninstall_cmd = next(cmd for cmd in captured_cmds if "uninstall.py" in cmd)
+        self.assertNotIn("--uac-admin", uninstall_cmd)
+        self.assertIn("--noconsole", uninstall_cmd)
+
+
+class TestMissingUninstallHtmlRaises(BuildAllTestBase):
+    def test_missing_uninstall_html_raises(self):
+        os.remove(os.path.join(self.workspace_dir, "ui", "uninstall.html"))
+        with self.assertRaises(Exception) as ctx:
+            self._call_build_all()
+        self.assertIn("uninstall.html", str(ctx.exception))
 
 
 if __name__ == "__main__":

@@ -38,6 +38,7 @@ from disk_space import required_install_size, check_disk_space
 import file_assoc
 import lang_detect
 import restart_manager
+import dependency_defs
 
 # 目前介面 chrome（ui/index.html 裡固定的標籤、按鈕、提示文字）支援的語言，
 # 跟 ui/index.html 內嵌的 I18N 翻譯表一一對應。EULA 文字語言不受此限制——
@@ -75,53 +76,91 @@ def get_resource_path(relative_path):
 # 但足以提醒使用者「可能缺少某個執行環境」。
 # ---------------------------------------------------------------------------
 
-def _check_vcredist_x64():
+_REGISTRY_HIVES = None  # 延後初始化：只有用得到時才 import winreg（跨平台開發機也能載入這個模組）
+
+
+def _registry_hive(name):
+    """把設定檔裡的字串（"HKLM"/"HKCU"）轉成 winreg 的 hive 常數。
+    只支援這兩個，相依元件偵測跟免 UAC 模式用得到的就這兩種。
+    """
+    global _REGISTRY_HIVES
+    import winreg
+    if _REGISTRY_HIVES is None:
+        _REGISTRY_HIVES = {
+            "HKLM": winreg.HKEY_LOCAL_MACHINE,
+            "HKEY_LOCAL_MACHINE": winreg.HKEY_LOCAL_MACHINE,
+            "HKCU": winreg.HKEY_CURRENT_USER,
+            "HKEY_CURRENT_USER": winreg.HKEY_CURRENT_USER,
+        }
+    return _REGISTRY_HIVES.get(str(name).strip().upper(), winreg.HKEY_LOCAL_MACHINE)
+
+
+def _generic_registry_check(hive, path, value_name=None, expected=None):
+    """泛用的「這個相依元件裝了沒」登錄表偵測，取代原本每個相依元件各自寫
+    一個檢查函式的做法（見規格文件對應章節：自訂相依元件功能）。
+
+    value_name 留空：只確認這個機碼本身存在（.NET Desktop Runtime 沒有明確
+    的版本值可查，用機碼是否存在當作「有沒有裝」的依據）。
+    value_name 有給：機碼底下這個值要等於 expected 才算已安裝。
+    """
     import winreg
     try:
-        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64")
-        val, _ = winreg.QueryValueEx(key, "Installed")
-        return val == 1
+        key = winreg.OpenKey(_registry_hive(hive), path)
+        if value_name is None:
+            return True
+        val, _ = winreg.QueryValueEx(key, value_name)
+        return val == expected
     except Exception:
         return False
+
+
+def _check_vcredist_x64():
+    return _generic_registry_check(
+        "HKLM", r"SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64", "Installed", 1,
+    )
 
 
 def _check_dotnet_desktop():
-    import winreg
-    base = r"SOFTWARE\WOW6432Node\dotnet\Setup\InstalledVersions\x64\sharedfx\Microsoft.WindowsDesktop.App"
-    try:
-        winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, base)
-        return True
-    except Exception:
-        return False
+    return _generic_registry_check(
+        "HKLM", r"SOFTWARE\WOW6432Node\dotnet\Setup\InstalledVersions\x64\sharedfx\Microsoft.WindowsDesktop.App",
+    )
+
+
+def _make_custom_dependency_checker(reg_check):
+    """把 custom_dependencies 裡一筆 registry_check 設定，包成跟內建相依元件
+    同樣簽章的 check_fn（不吃參數、回傳布林），供 _build_dependency_checkers()
+    統一放進同一個 dict 使用。用 default 參數把當下這筆設定值綁進閉包，避免
+    for 迴圈裡常見的「閉包晚繫結」陷阱（迴圈跑完後所有 checker 都指到最後
+    一筆設定）。
+    """
+    def _check(reg_check=reg_check):
+        return _generic_registry_check(
+            reg_check.get("hive", "HKLM"),
+            reg_check.get("path", ""),
+            reg_check.get("value_name"),
+            reg_check.get("expected"),
+        )
+    return _check
 
 
 # {key: (check_fn, 顯示名稱, 官方靜默安裝檔下載連結, 靜默安裝命令列參數)}。
 # 下載連結目前都指向可以直接執行的安裝檔（不是網頁），install_dependency()
-# 靠這個直接下載＋執行。
-#
-# vcredist_x64 的連結是 Microsoft 官方文件明講的永久 permalink
-# （https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist
-# 的「Permalink for latest supported x64 version」），永遠指向最新版，
-# 不需要維護。
-#
-# dotnet_desktop 沒有這種版本無關的永久連結——aka.ms/dotnet/<版本>/... 這個
-# 格式一定要指定確切的 major.minor 頻道。這裡先固定用「10.0」（2026 年寫下
-# 這行時的最新 LTS 版本，.NET 8/9 已於 2026-11-10 到期）。等 .NET 10 也到期
-# （官方支援到約 2028-11）時，這個版本號要手動更新成下一個 LTS，否則舊連結
-# 雖然還能用，但裝到的會是一個過期的舊版本。這是刻意接受的維護負擔，不是
-# 遺漏——見規格文件.md 對應章節的已知限制說明。
+# 靠這個直接下載＋執行。顯示名稱/連結/靜默參數本體定義在 dependency_defs.py，
+# 跟 builder.py 的 bundle_dependencies（打包時內嵌相依元件安裝檔）共用同一份，
+# 避免兩邊分別維護一份 URL 悄悄不同步（見 dependency_defs.py 開頭的說明，
+# 包含 dotnet_desktop 版本號需要定期手動更新的已知限制）。
 DEPENDENCY_CHECKERS = {
     "vcredist_x64": (
         _check_vcredist_x64,
-        "Visual C++ Redistributable (x64)",
-        "https://aka.ms/vc14/vc_redist.x64.exe",
-        ["/install", "/quiet", "/norestart"],
+        dependency_defs.BUILT_IN_DEPENDENCIES["vcredist_x64"]["display_name"],
+        dependency_defs.BUILT_IN_DEPENDENCIES["vcredist_x64"]["download_url"],
+        dependency_defs.BUILT_IN_DEPENDENCIES["vcredist_x64"]["silent_args"],
     ),
     "dotnet_desktop": (
         _check_dotnet_desktop,
-        ".NET Desktop Runtime",
-        "https://aka.ms/dotnet/10.0/windowsdesktop-runtime-win-x64.exe",
-        ["/install", "/quiet", "/norestart"],
+        dependency_defs.BUILT_IN_DEPENDENCIES["dotnet_desktop"]["display_name"],
+        dependency_defs.BUILT_IN_DEPENDENCIES["dotnet_desktop"]["download_url"],
+        dependency_defs.BUILT_IN_DEPENDENCIES["dotnet_desktop"]["silent_args"],
     ),
 }
 
@@ -188,6 +227,8 @@ class InstallerAPI:
         self.eula_texts = {}
         self.eula_default_lang = ""
         self.dependencies = []
+        self.custom_dependencies = []
+        self.bundle_dependencies = []
         self.file_associations = []
         self.doc_icon = ""
         self.doc_icons = {}
@@ -195,16 +236,23 @@ class InstallerAPI:
         self.path_target_exe = ""
         self.local_appdata_files = []
         self.restart_explorer_on_update = False
+        self.no_admin_install = False
+        self.pre_install_script = ""
+        self.post_install_script = ""
         self.ui_language = lang_detect.detect_system_language(SUPPORTED_UI_LANGUAGES, DEFAULT_UI_LANGUAGE)
 
         program_files = os.environ.get("ProgramFiles", "C:\\Program Files")
         self.default_path = os.path.join(program_files, self.app_name)
         self.selected_path = self.default_path
         self.load_config()
-        # default_path 改用 folder_name（安裝路徑用的名稱，建議英數字），
-        # 不再用 app_name（顯示名稱，可能是中文）組路徑，兩者職責分開。
+        # no_admin_install 開啟時，預設安裝根目錄改成使用者層級的
+        # %LOCALAPPDATA%\Programs\<folder_name>（沿用既有的 _local_appdata_root()），
+        # 完全不需要系統管理員權限；否則維持原本的 Program Files 行為。
         # folder_name 沒填的話 load_config() 已經 fallback 成 app_name，行為不變。
-        self.default_path = os.path.join(program_files, self.folder_name or self.app_name)
+        if self.no_admin_install:
+            self.default_path = self._local_appdata_root()
+        else:
+            self.default_path = os.path.join(program_files, self.folder_name or self.app_name)
         self.selected_path = self.default_path
         self._drag = WindowDragController()
         # 更新覆蓋安裝的復原用備份：run_upgrade_uninstall() 靜默刪掉舊版本前，
@@ -238,6 +286,8 @@ class InstallerAPI:
                     self.eula_texts = config.get("eula_texts", {})
                     self.eula_default_lang = config.get("eula_default_lang", "")
                     self.dependencies = config.get("dependencies", [])
+                    self.custom_dependencies = config.get("custom_dependencies", [])
+                    self.bundle_dependencies = config.get("bundle_dependencies", [])
                     self.file_associations = config.get("file_associations", [])
                     self.doc_icon = config.get("doc_icon", "")
                     self.doc_icons = config.get("doc_icons", {})
@@ -245,8 +295,36 @@ class InstallerAPI:
                     self.path_target_exe = config.get("path_target_exe", "")
                     self.local_appdata_files = config.get("local_appdata_files", [])
                     self.restart_explorer_on_update = bool(config.get("restart_explorer_on_update", False))
+                    self.no_admin_install = bool(config.get("no_admin_install", False))
+                    self.pre_install_script = config.get("pre_install_script", "")
+                    self.post_install_script = config.get("post_install_script", "")
         except Exception as e:
             print(f"[提示] 使用預設開發模式: {e}")
+
+    def _build_dependency_checkers(self):
+        """把內建的 DEPENDENCY_CHECKERS 跟這次打包時透過 custom_dependencies
+        自訂的相依元件合併成一份對照表。
+
+        每次呼叫都重新組（不是在 __init__ 時算好快取起來）：一來合併成本
+        很低（最多幾筆），二來讓 DEPENDENCY_CHECKERS 在執行當下被覆蓋/patch
+        （例如測試情境）時，這裡永遠讀到當下最新的內容，不會因為快取在
+        InstallerAPI 建構當時就定案而讀到過期的版本。custom_dependencies 的
+        key 如果跟內建的撞名，直接以自訂設定覆蓋（打包時 packaging_core
+        已經擋掉撞名，這裡再處理一次是最後一道防線，不視為錯誤，沿用
+        「儘量讓安裝繼續」的原則）。
+        """
+        checkers = dict(DEPENDENCY_CHECKERS)
+        for entry in self.custom_dependencies:
+            key = str(entry.get("key", "")).strip()
+            if not key:
+                continue
+            checkers[key] = (
+                _make_custom_dependency_checker(entry.get("registry_check", {}) or {}),
+                str(entry.get("display_name", key)),
+                str(entry.get("download_url", "")),
+                list(entry.get("silent_args", []) or []),
+            )
+        return checkers
 
     # ------------------------------------------------------------------
     # 供前端查詢的基本資訊
@@ -284,9 +362,10 @@ class InstallerAPI:
         不阻擋安裝。前端用 key 呼叫 install_dependency(key) 觸發自動安裝，
         url 保留給自動安裝失敗時的手動下載備援連結。
         """
+        checkers = self._build_dependency_checkers()
         warnings = []
         for key in self.dependencies:
-            checker = DEPENDENCY_CHECKERS.get(key)
+            checker = checkers.get(key)
             if not checker:
                 continue
             check_fn, display_name, url, _silent_args = checker
@@ -320,42 +399,58 @@ class InstallerAPI:
         本身是 --uac-admin 編譯、執行到這裡一定已經是系統管理員權杖，子
         程序繼承同一個權杖直接靜默安裝，不會再跳一次 UAC。
         """
-        checker = DEPENDENCY_CHECKERS.get(key)
+        checker = self._build_dependency_checkers().get(key)
         if not checker:
             return {"status": "error", "message": "未知的相依元件。"}
         check_fn, display_name, url, silent_args = checker
 
-        tmp_path = os.path.join(tempfile.gettempdir(), f"dep_installer_{key}.exe")
-        try:
-            self._report_dependency_progress(5, f"正在下載 {display_name}...")
-            with urllib.request.urlopen(url, timeout=30) as resp:
-                total = resp.getheader("Content-Length")
-                total = int(total) if total else None
-                downloaded = 0
-                with open(tmp_path, "wb") as f:
-                    while True:
-                        chunk = resp.read(1024 * 256)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total:
-                            percent = 5 + int(downloaded / total * 50)  # 下載階段佔 5%-55%
-                            self._report_dependency_progress(percent, f"正在下載 {display_name}...")
-        except Exception as e:
-            return {"status": "error", "message": f"下載 {display_name} 失敗：{e}"}
+        # bundle_dependencies：打包時已經把這個相依元件的安裝檔內嵌進安裝檔裡
+        # （見 packaging_core.py/builder.py 的 bundle_dependencies 處理），
+        # 直接執行內嵌檔案即可，不用再連網下載——適合「不確定目標機器有沒有
+        # 網路」的情境。掛載路徑固定是 dependencies/<key>.exe，跟打包端的
+        # 命名規則一致。
+        bundled_path = get_resource_path(os.path.join("dependencies", f"{key}.exe"))
+        run_path = None
+        if key in self.bundle_dependencies and os.path.exists(bundled_path):
+            run_path = bundled_path
+            self._report_dependency_progress(55, f"正在安裝 {display_name}...")
+        else:
+            tmp_path = os.path.join(tempfile.gettempdir(), f"dep_installer_{key}.exe")
+            try:
+                self._report_dependency_progress(5, f"正在下載 {display_name}...")
+                with urllib.request.urlopen(url, timeout=30) as resp:
+                    total = resp.getheader("Content-Length")
+                    total = int(total) if total else None
+                    downloaded = 0
+                    with open(tmp_path, "wb") as f:
+                        while True:
+                            chunk = resp.read(1024 * 256)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total:
+                                percent = 5 + int(downloaded / total * 50)  # 下載階段佔 5%-55%
+                                self._report_dependency_progress(percent, f"正在下載 {display_name}...")
+            except Exception as e:
+                return {"status": "error", "message": f"下載 {display_name} 失敗：{e}"}
+            run_path = tmp_path
 
         try:
             self._report_dependency_progress(60, f"正在安裝 {display_name}...")
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            subprocess.run([tmp_path] + silent_args, creationflags=creationflags, timeout=600)
+            subprocess.run([run_path] + silent_args, creationflags=creationflags, timeout=600)
         except Exception as e:
             return {"status": "error", "message": f"執行 {display_name} 安裝程式失敗：{e}"}
         finally:
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
+            # 內嵌檔案是這次安裝檔自己的資源（PyInstaller 解壓出來的暫存內容
+            # 或開發模式下的原始檔案），不是我們自己下載到 %TEMP% 的暫存檔，
+            # 不能刪除；只清掉真的是我們下載出來的那份。
+            if run_path != bundled_path:
+                try:
+                    os.remove(run_path)
+                except Exception:
+                    pass
 
         self._report_dependency_progress(95, "正在確認安裝結果...")
         if check_fn():
@@ -386,8 +481,9 @@ class InstallerAPI:
         """
         import winreg
         reg_path = f"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{self.app_name}"
+        hive = winreg.HKEY_CURRENT_USER if self.no_admin_install else winreg.HKEY_LOCAL_MACHINE
         try:
-            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path) as key:
+            with winreg.OpenKey(hive, reg_path) as key:
                 install_loc, _ = winreg.QueryValueEx(key, "InstallLocation")
                 old_version, _ = winreg.QueryValueEx(key, "DisplayVersion")
                 comparison = _compare_versions(self.version, old_version)
@@ -597,6 +693,10 @@ class InstallerAPI:
         uninstall_exe = os.path.join(self.selected_path, "uninstall.exe")
         main_exe_path = self._resolve_installed_path(self.main_exe) if self.main_exe else uninstall_exe
         reg_path = f"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{self.app_name}"
+        # no_admin_install 開啟時整個安裝流程完全不要求提權，解除安裝登錄表
+        # 也對應寫進 HKEY_CURRENT_USER（每個使用者各自的解除安裝清單），
+        # 不是需要系統管理員權限才能寫入的 HKLM。
+        hive = winreg.HKEY_CURRENT_USER if self.no_admin_install else winreg.HKEY_LOCAL_MACHINE
         try:
             estimated_size_kb = self._required_size() // 1024
         except Exception:
@@ -604,7 +704,7 @@ class InstallerAPI:
         # 不吞例外：這支 exe 是 --noconsole 編譯，print() 沒有任何地方會顯示
         # （同一類問題見規格文件 §8.7），失敗時直接讓例外往外拋，交給
         # trigger_installation() 既有的外層 except 處理（回滾 + 回報使用者）。
-        with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, reg_path) as key:
+        with winreg.CreateKey(hive, reg_path) as key:
             winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, self.app_name)
             winreg.SetValueEx(key, "UninstallString", 0, winreg.REG_SZ, f'"{uninstall_exe}"')
             # QuietUninstallString：Windows「設定 > 已安裝的應用程式」偵測到這個欄位時，
@@ -632,7 +732,20 @@ class InstallerAPI:
         try:
             import win32com.client
 
-            if desktop:
+            # no_admin_install 開啟時，捷徑改建在「目前使用者自己」的桌面/開始
+            # 功能表（%USERPROFILE%\Desktop、%APPDATA%\...\Start Menu），這兩個
+            # 位置一般使用者本來就有寫入權限；預設（需要系統管理員權限的安裝）
+            # 維持原本「所有使用者共用」的位置（Public Desktop、ProgramData），
+            # 這樣裝一次全部使用者都看得到捷徑。
+            if self.no_admin_install:
+                if desktop:
+                    base = os.path.join(os.path.expanduser("~"), "Desktop")
+                else:
+                    base = os.path.join(
+                        os.environ.get("APPDATA", os.path.join(os.path.expanduser("~"), "AppData", "Roaming")),
+                        "Microsoft", "Windows", "Start Menu", "Programs",
+                    )
+            elif desktop:
                 base = "C:\\Users\\Public\\Desktop"
             else:
                 base = os.path.join(
@@ -736,12 +849,15 @@ class InstallerAPI:
     def _add_to_path_env(self):
         import winreg
         target_dir = self._path_target_dir()
+        # no_admin_install 時寫使用者層級的 PATH（HKCU\Environment，本來就
+        # 不需要提權即可寫入），否則維持原本的系統層級 PATH（HKLM，需要
+        # 系統管理員權限，跟這支安裝檔本來就要求提權一致）。
+        if self.no_admin_install:
+            hive, sub_key = winreg.HKEY_CURRENT_USER, "Environment"
+        else:
+            hive, sub_key = winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
         # 不吞例外：理由同上，讓 PATH 寫入失敗時整個安裝流程失敗回滾。
-        key = winreg.OpenKey(
-            winreg.HKEY_LOCAL_MACHINE,
-            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
-            0, winreg.KEY_ALL_ACCESS,
-        )
+        key = winreg.OpenKey(hive, sub_key, 0, winreg.KEY_ALL_ACCESS)
         try:
             current, reg_type = winreg.QueryValueEx(key, "Path")
         except FileNotFoundError:
@@ -782,6 +898,34 @@ class InstallerAPI:
                 os.rmdir(root_dir)
         except Exception:
             pass
+
+    def _run_install_script(self, script_rel, timeout=120):
+        """執行打包時內嵌的 pre/post-install 腳本（見 pre_install_script/
+        post_install_script 設定欄位）。腳本以這支安裝程式當下的權限層級
+        執行（一般是系統管理員，或 no_admin_install 開啟時是一般使用者），
+        跟主程式檔案複製本來就有的能力等級一致，不是新增的風險類別。
+
+        回傳 (ok: bool, message: str)：ok 是「有跑且結束碼是 0」；找不到
+        腳本檔案（例如打包時沒有設定這個欄位）視為 no-op、直接回傳成功，
+        呼叫端不需要另外判斷「這個欄位到底有沒有設定」。
+        """
+        if not script_rel:
+            return True, ""
+        script_path = get_resource_path(script_rel)
+        if not os.path.exists(script_path):
+            return True, ""
+        try:
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            result = subprocess.run(
+                [script_path], creationflags=creationflags, timeout=timeout,
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                tail = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()[-500:]
+                return False, f"腳本結束碼 {result.returncode}：{tail}"
+            return True, ""
+        except Exception as e:
+            return False, str(e)
 
     def _rollback(self, copied_rel_paths, log=None):
         """安裝失敗時的回滾：把這次安裝已經複製出去的檔案清掉，盡量讓系統回到
@@ -853,6 +997,18 @@ class InstallerAPI:
             if not os.path.exists(self.selected_path):
                 os.makedirs(self.selected_path)
             log(f"安裝目標路徑: {self.selected_path}")
+
+            # pre-install 腳本：檔案還沒複製之前執行，失敗視為安裝失敗中止——
+            # 主程式可能依賴這個腳本先做的事（例如停用某個會鎖住待複製檔案
+            # 的服務），腳本沒成功執行完，後面的複製流程不該假裝沒事繼續跑。
+            if self.pre_install_script:
+                self._report_progress(2, "正在執行安裝前置腳本...")
+                ok, msg = self._run_install_script(self.pre_install_script)
+                if not ok:
+                    log(f"[錯誤] 安裝前置腳本執行失敗: {msg}")
+                    self._restore_upgrade_backup()
+                    return {"status": "error", "message": f"安裝失敗：安裝前置腳本執行失敗。{msg}"}
+                log("已執行安裝前置腳本")
 
             # 收集要複製的檔案清單（先算總數，才能算出真實百分比）
             file_list = []
@@ -957,6 +1113,17 @@ class InstallerAPI:
                     raise RuntimeError(f"加入環境變數 PATH 失敗：{e}") from e
                 log(f"已將 {path_directory} 加入環境變數 PATH")
 
+            # post-install 腳本：主程式已經裝好、登錄表/捷徑都寫完之後執行，
+            # 失敗只記錄警告、不讓整體安裝回報失敗——此時主程式已經是可用
+            # 狀態，不該因為收尾腳本（例如額外的環境設定）失敗就整個作廢。
+            if self.post_install_script:
+                self._report_progress(96, "正在執行安裝後置腳本...")
+                ok, msg = self._run_install_script(self.post_install_script)
+                if ok:
+                    log("已執行安裝後置腳本")
+                else:
+                    log(f"[警告] 安裝後置腳本執行失敗（不影響安裝結果）: {msg}")
+
             # 寫入安裝清單，供解除安裝時「照清單刪」使用
             self._report_progress(97, "正在寫入安裝紀錄...")
             manifest = {
@@ -974,6 +1141,7 @@ class InstallerAPI:
                 "local_appdata_files": self.local_appdata_files,
                 "local_appdata_dir": self._local_appdata_root() if self.local_appdata_files else "",
                 "restart_explorer_on_update": self.restart_explorer_on_update,
+                "no_admin_install": self.no_admin_install,
                 "installed_at": datetime.now().isoformat(),
             }
             with open(os.path.join(self.selected_path, "install_manifest.json"), "w", encoding="utf-8") as f:
@@ -1124,12 +1292,15 @@ def _parse_cli_args():
         /S, /SILENT, /QUIET     靜默模式，不開任何視窗
         /D=路徑 或 /DIR=路徑     指定安裝路徑（覆蓋預設的 Program Files 路徑）
         /NODESKTOPSHORTCUT       靜默安裝時不要建立桌面捷徑（預設會建立）
+        /LOG=路徑                指定靜默安裝紀錄檔要寫到哪裡（不帶就維持原本
+                                 的 %TEMP%\\<AppName>_silent_install_log.txt）
 
-    回傳 (silent: bool, install_dir: str|None, create_desktop_shortcut: bool)
+    回傳 (silent: bool, install_dir: str|None, create_desktop_shortcut: bool, log_path: str|None)
     """
     silent = False
     install_dir = None
     create_desktop_shortcut = True
+    log_path = None
     for raw_arg in sys.argv[1:]:
         arg = raw_arg.strip()
         upper = arg.upper()
@@ -1141,10 +1312,12 @@ def _parse_cli_args():
             install_dir = arg[5:].strip('"')
         elif upper == "/NODESKTOPSHORTCUT":
             create_desktop_shortcut = False
-    return silent, install_dir, create_desktop_shortcut
+        elif upper.startswith("/LOG="):
+            log_path = arg[5:].strip('"')
+    return silent, install_dir, create_desktop_shortcut, log_path
 
 
-def run_silent_install(install_dir=None, create_desktop_shortcut=True):
+def run_silent_install(install_dir=None, create_desktop_shortcut=True, log_path=None):
     """command-line 靜默安裝：完全不開視窗，給企業批次部署（登入腳本、MDM、
     群組原則）用。回傳值直接當這支 exe 的 process exit code：
     0 = 成功，非 0 = 失敗，部署腳本可以直接檢查 errorlevel（cmd）或
@@ -1169,9 +1342,21 @@ def run_silent_install(install_dir=None, create_desktop_shortcut=True):
         log_lines.append(msg)
 
     def write_log_and_return(app_name, exit_code):
+        # log_path（/LOG= 帶進來的路徑）優先；沒帶或寫入失敗（例如指定的
+        # 資料夾不存在、沒有寫入權限）都 fallback 回原本的 %TEMP% 路徑，
+        # 不讓「紀錄寫不進去」變成整個靜默安裝失敗。
+        target_path = log_path
+        if target_path:
+            try:
+                os.makedirs(os.path.dirname(target_path) or ".", exist_ok=True)
+                with open(target_path, "w", encoding="utf-8") as f:
+                    f.write("\n".join(log_lines))
+                return exit_code
+            except Exception as e:
+                log_lines.append(f"[警告] 無法寫入指定的紀錄路徑 {target_path}：{e}，改用預設路徑。")
         try:
-            log_path = os.path.join(tempfile.gettempdir(), f"{app_name}_silent_install_log.txt")
-            with open(log_path, "w", encoding="utf-8") as f:
+            fallback_path = os.path.join(tempfile.gettempdir(), f"{app_name}_silent_install_log.txt")
+            with open(fallback_path, "w", encoding="utf-8") as f:
                 f.write("\n".join(log_lines))
         except Exception:
             pass
@@ -1206,10 +1391,10 @@ def run_silent_install(install_dir=None, create_desktop_shortcut=True):
 
 
 if __name__ == '__main__':
-    _silent, _cli_install_dir, _cli_desktop_shortcut = _parse_cli_args()
+    _silent, _cli_install_dir, _cli_desktop_shortcut, _cli_log_path = _parse_cli_args()
 
     if _silent:
-        sys.exit(run_silent_install(_cli_install_dir, _cli_desktop_shortcut))
+        sys.exit(run_silent_install(_cli_install_dir, _cli_desktop_shortcut, _cli_log_path))
 
     # 讓 Windows 在非 100% 縮放比例下不要把整個視窗畫面當點陣圖拉伸，避免文字模糊。
     try:

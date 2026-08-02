@@ -48,6 +48,12 @@ TEMPLATE = {
     "path_target_exe": "",
     "local_appdata_files": [],
     "restart_explorer_on_update": False,
+    "no_admin_install": False,
+    "pre_install_script": "",
+    "post_install_script": "",
+    "custom_dependencies": [],
+    "bundle_dependencies": [],
+    "signing": {},
 }
 
 # 純量欄位：CLI flag 名稱 -> data 字典鍵名，CLI 有帶值就覆蓋 JSON 對應欄位。
@@ -61,6 +67,8 @@ _SCALAR_OVERRIDE_FIELDS = [
     ("eula_default_lang", "eula_default_lang"),
     ("file_associations", "file_associations"),
     ("path_target_exe", "path_target_exe"),
+    ("pre_install_script", "pre_install_script"),
+    ("post_install_script", "post_install_script"),
 ]
 
 
@@ -107,6 +115,15 @@ def build_arg_parser():
         "--restart-explorer-on-update", dest="restart_explorer_on_update",
         action=argparse.BooleanOptionalAction, default=None,
     )
+    pack_p.add_argument(
+        "--no-admin-install", dest="no_admin_install",
+        action=argparse.BooleanOptionalAction, default=None,
+        help="開啟後整個安裝檔完全不要求系統管理員權限，改裝到 %%LOCALAPPDATA%%（免 UAC）",
+    )
+    pack_p.add_argument(
+        "--bundle-dependencies", dest="bundle_dependencies", default=None,
+        help="逗號分隔，列在 dependencies 裡的相依元件 key，打包時內嵌進安裝檔（不用安裝時再連網下載）",
+    )
 
     return parser
 
@@ -146,6 +163,10 @@ def _load_pack_input(args):
         data["local_appdata_files"] = [f.strip() for f in args.local_appdata_files.split(",") if f.strip()]
     if args.restart_explorer_on_update is not None:
         data["restart_explorer_on_update"] = args.restart_explorer_on_update
+    if args.no_admin_install is not None:
+        data["no_admin_install"] = args.no_admin_install
+    if args.bundle_dependencies is not None:
+        data["bundle_dependencies"] = [d.strip() for d in args.bundle_dependencies.split(",") if d.strip()]
 
     # need_file_assoc / use_custom_doc_icon 這兩個布林欄位在 GUI 版是「勾選框
     # 決定要不要套用旁邊欄位」，CLI 版直接依對應欄位是否有內容推斷，不需要
@@ -155,6 +176,8 @@ def _load_pack_input(args):
     data.setdefault("eula_texts", data.get("eula_texts", {}))
     data.setdefault("doc_icons", data.get("doc_icons", {}))
     data.setdefault("eula_default_lang", data.get("eula_default_lang", ""))
+    data.setdefault("custom_dependencies", data.get("custom_dependencies", []))
+    data.setdefault("signing", data.get("signing", {}))
 
     return data, app_dir, png_path, ico_path, doc_icon_path_selected
 
@@ -212,6 +235,12 @@ def cmd_pack(args):
             path_target_exe=pack_data.get("path_target_exe", ""),
             local_appdata_files=pack_data.get("local_appdata_files", []),
             restart_explorer_on_update=pack_data.get("restart_explorer_on_update", False),
+            no_admin_install=pack_data.get("no_admin_install", False),
+            pre_install_script=pack_data.get("pre_install_script", ""),
+            post_install_script=pack_data.get("post_install_script", ""),
+            custom_dependencies=pack_data.get("custom_dependencies", []),
+            bundle_dependencies=pack_data.get("bundle_dependencies", []),
+            signing=pack_data.get("signing"),
             workspace_dir=workspace_dir,
             progress_callback=progress_handler,
         )
