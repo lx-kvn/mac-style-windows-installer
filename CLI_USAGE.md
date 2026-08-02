@@ -137,3 +137,39 @@ python build_config_tool.py --cli [--version X.Y.Z] [--icon icon.ico]
 `/released` 這類自動化發布流程呼叫，一般開發者手動編譯打包工具，用不帶
 參數的互動模式（`python build_config_tool.py`，跳出 Tkinter 視窗）通常
 更方便。
+
+---
+
+## 裝好之後，在 CMD 裡怎麼呼叫
+
+跑完官方發布的 `Setup_mac-style-windows-installer_vX.Y.Z.exe`（`/released`
+skill 產出的安裝檔）之後，這支 CLI 工具會被加進系統環境變數 PATH，可以
+直接在**任何目錄**開新的 CMD／PowerShell 視窗打指令，不需要 `python`、
+不需要 `cd` 到安裝目錄、也不用打完整路徑：
+
+```cmd
+mswi-cli init --output myapp.json
+mswi-cli pack --config myapp.json
+```
+
+**指令名稱固定是 `mswi-cli`，不含版本號，不會因為升級版本而改變**——
+這是刻意的設計：安裝時實際複製到電腦上的執行檔，檔名已經從建置產物
+的 `mac-style-windows-installer_CLI_vX.Y.Z.exe` 改成固定的 `mswi-cli.exe`
+（GUI 版對應是 `mswi-gui.exe`，用雙擊/開始功能表捷徑，不是給 CMD 叫的），
+所以就算之後裝新版本覆蓋更新，寫在腳本、CI、工作排程器裡呼叫
+`mswi-cli` 的指令完全不用跟著改。
+
+**跟 `python builder_cli.py ...` 有什麼不一樣**：純粹是啟動方式不同，
+底層邏輯完全共用（`packaging_core.py`）——沒有裝 Python 環境、只想單純
+執行編譯打包的使用者，裝好安裝檔後直接打 `mswi-cli` 即可；上面幾節講的
+`init`/`pack` 子指令、JSON 欄位對照表、CLI flag 覆蓋規則，`mswi-cli`
+全部原封不動適用，只是把指令開頭的 `python builder_cli.py` 換成
+`mswi-cli`：
+
+```cmd
+mswi-cli pack --config myapp.json --version 1.1.0
+```
+
+**新開的 CMD 視窗才吃得到新加的 PATH**：如果安裝時 CMD／PowerShell
+視窗已經開著，要先關掉重開一次，PATH 變更才會生效；已經開著的視窗
+繼續打 `mswi-cli` 會出現「不是內部或外部命令」。
