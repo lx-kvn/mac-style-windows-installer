@@ -8,5 +8,8 @@ build/
 dist/
 *.spec
 
+# /released skill 打包成品的暫存輸出資料夾（GUI/CLI exe + 安裝檔），發布產物不進版控
+release_output/
+
 # Claude Code 本機設定/skill，不進版控
 .claude/

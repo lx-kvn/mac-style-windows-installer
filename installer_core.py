@@ -657,12 +657,14 @@ class InstallerAPI:
                 }
             log(f"磁碟空間檢查通過（需要約 {required // (1024 * 1024)} MB）")
 
-            # 主程式執行中偵測
+            # 主程式執行中偵測：回傳獨立於一般 "error" 的狀態值，讓前端可以
+            # 跳出「關閉程式並繼續安裝／取消」的互動選擇，而不是直接判定
+            # 安裝失敗、逼使用者自己手動關閉程式再重新來一次。
             if self.main_exe and _is_process_running(os.path.basename(self.main_exe)):
                 self._restore_upgrade_backup()
                 return {
-                    "status": "error",
-                    "message": f"安裝失敗：偵測到「{self.main_exe}」正在執行，請先關閉程式後再安裝。",
+                    "status": "process_running",
+                    "message": f"偵測到「{self.main_exe}」正在執行中，請先關閉程式後再繼續安裝。",
                 }
 
             # 覆蓋安裝：使用者在拖曳圖示前的彈窗只是「確認要不要繼續」，真正
@@ -811,6 +813,26 @@ class InstallerAPI:
             self._rollback(copied_rel_paths, log)
             self._restore_upgrade_backup()
             return {"status": "error", "message": f"發生未知錯誤：\n{str(e)}"}
+
+    def close_running_main_exe(self):
+        """使用者在「偵測到主程式執行中」的彈窗按下「關閉程式並繼續安裝」時
+        呼叫：強制關閉正在執行的主程式，讓前端可以接著重新呼叫
+        trigger_installation()。寫法比照 uninstall.py 既有的 _kill_explorer()
+        （taskkill /f、CREATE_NO_WINDOW、吞例外回傳布林值），不做「先禮貌
+        關閉、失敗才強制」這種分層。
+        """
+        if not self.main_exe:
+            return False
+        try:
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            subprocess.run(
+                ["taskkill", "/f", "/im", os.path.basename(self.main_exe)],
+                creationflags=creationflags, timeout=10,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            return True
+        except Exception:
+            return False
 
     def launch_app(self):
         """安裝完成後「立即執行程式」"""

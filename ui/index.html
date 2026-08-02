@@ -236,6 +236,17 @@
         </div>
     </div>
 
+    <!-- 主程式執行中：讓使用者選擇關閉程式並繼續安裝，或取消 -->
+    <div class="nice-modal-overlay" id="processRunningModal">
+        <div class="nice-modal-box">
+            <div class="nice-icon warn"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L14.7 3.86a2 2 0 0 0-3.4 0z"></path></svg></div>
+            <div class="nice-title" data-i18n="process_running_title">偵測到程式正在執行</div>
+            <div class="nice-message" id="processRunningMessage"></div>
+            <button class="nice-btn secondary" onclick="cancelProcessRunningModal()" data-i18n="btn_cancel">取消</button>
+            <button class="nice-btn" onclick="closeRunningAppAndRetry()" data-i18n="btn_close_and_continue">關閉程式並繼續安裝</button>
+        </div>
+    </div>
+
     <!-- 安裝結果彈窗 -->
     <div class="nice-modal-overlay" id="custom-modal">
         <div class="nice-modal-box">
@@ -288,6 +299,8 @@
                 upgrade_same_msg: "已安裝的版本是 {{old}}，這次要安裝的版本是 {{new}}，並不比目前已安裝的版本新。選擇「仍要繼續安裝」會用這次的版本覆蓋現有安裝，選擇「取消」則結束安裝程式。",
                 upgrade_older_title: "已安裝較新的版本",
                 upgrade_older_msg: "已安裝的版本是 {{old}}，比這次要安裝的版本 {{new}} 還新，這次要安裝的版本比較舊。選擇「仍要繼續安裝」會用這次較舊的版本覆蓋現有安裝，選擇「取消」則結束安裝程式。",
+                process_running_title: "偵測到程式正在執行",
+                btn_close_and_continue: "關閉程式並繼續安裝",
             },
             "en": {
                 close_title: "Close",
@@ -317,6 +330,8 @@
                 upgrade_same_msg: "The installed version is {{old}}; the version you're about to install is {{new}}, which is not newer. Choose \"Continue Anyway\" to overwrite the existing installation, or \"Cancel\" to quit.",
                 upgrade_older_title: "A newer version is already installed",
                 upgrade_older_msg: "The installed version is {{old}}, which is newer than the version you're about to install ({{new}}). Choose \"Continue Anyway\" to overwrite it with this older version, or \"Cancel\" to quit.",
+                process_running_title: "Application is currently running",
+                btn_close_and_continue: "Close it and continue installing",
             },
         };
         let currentLang = "zh-TW";
@@ -525,28 +540,64 @@
             document.getElementById('installProgressFill').style.width = percent + '%';
         };
 
+        // ---------------- 主程式執行中：互動式關閉／取消 ----------------
+        // trigger_installation() 偵測到主程式正在執行時，不直接判定安裝
+        // 失敗，改回傳 process_running 狀態，讓這裡跳出「關閉程式並繼續
+        // 安裝／取消」的彈窗。「關閉並繼續」按下去之後要重新呼叫一次
+        // attemptInstall()，所以把安裝觸發邏輯抽成這個可以重複呼叫的函式，
+        // 不論是拖曳觸發還是這裡重試都走同一條路徑。
+        let lastCreateDesktopShortcut = true;
+
+        function resetInstallUiAfterCancelOrFailure() {
+            document.getElementById('installProgressWrap').style.display = 'none';
+        }
+
+        function cancelProcessRunningModal() {
+            document.getElementById('processRunningModal').classList.remove('active');
+            resetInstallUiAfterCancelOrFailure();
+            pathPreview.innerText = /* 恢復成安裝前顯示的路徑 */ pathPreview.dataset.beforeInstall || '';
+        }
+
+        async function closeRunningAppAndRetry() {
+            document.getElementById('processRunningModal').classList.remove('active');
+            await pywebview.api.close_running_main_exe();
+            attemptInstall(lastCreateDesktopShortcut);
+        }
+
+        async function attemptInstall(createDesktopShortcut) {
+            lastCreateDesktopShortcut = createDesktopShortcut;
+            pathPreview.dataset.beforeInstall = pathPreview.innerText;
+            document.getElementById('installProgressWrap').style.display = 'block';
+            document.getElementById('installProgressText').innerText = t('initializing_install');
+            document.getElementById('installProgressFill').style.width = '0%';
+            pathPreview.innerText = t('installing');
+
+            const result = await pywebview.api.trigger_installation(createDesktopShortcut);
+
+            if (result.status === 'success') {
+                installSucceeded = true;
+                showModal(t('install_success_title'), '', false, true);
+                pathPreview.innerText = t('install_complete_path');
+                document.getElementById('installProgressWrap').style.display = 'none';
+            } else if (result.status === 'process_running') {
+                resetInstallUiAfterCancelOrFailure();
+                pathPreview.innerText = pathPreview.dataset.beforeInstall || '';
+                document.getElementById('processRunningMessage').innerText = result.message;
+                document.getElementById('processRunningModal').classList.add('active');
+            } else {
+                installSucceeded = false;
+                showModal(t('install_failed_title'), result.message, true, false);
+                pathPreview.innerText = await pywebview.api.get_default_path();
+                document.getElementById('installProgressWrap').style.display = 'none';
+            }
+        }
+
         dropTarget.addEventListener('drop', async (e) => {
             e.preventDefault();
             dropTarget.classList.remove('drag-over');
             if (e.dataTransfer.getData('text/plain') === 'install-trigger') {
                 const createDesktopShortcut = document.getElementById('desktopShortcutCheck').checked;
-                document.getElementById('installProgressWrap').style.display = 'block';
-                document.getElementById('installProgressText').innerText = t('initializing_install');
-                document.getElementById('installProgressFill').style.width = '0%';
-                pathPreview.innerText = t('installing');
-
-                const result = await pywebview.api.trigger_installation(createDesktopShortcut);
-
-                if (result.status === 'success') {
-                    installSucceeded = true;
-                    showModal(t('install_success_title'), '', false, true);
-                    pathPreview.innerText = t('install_complete_path');
-                } else {
-                    installSucceeded = false;
-                    showModal(t('install_failed_title'), result.message, true, false);
-                    pathPreview.innerText = await pywebview.api.get_default_path();
-                }
-                document.getElementById('installProgressWrap').style.display = 'none';
+                await attemptInstall(createDesktopShortcut);
             }
         });
     </script>

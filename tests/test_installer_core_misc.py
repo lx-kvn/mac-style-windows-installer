@@ -463,6 +463,62 @@ class TestCloseWindowRestoresPendingBackup(unittest.TestCase):
         mock_window.destroy.assert_called_once()
 
 
+class TestCloseRunningMainExe(unittest.TestCase):
+    """close_running_main_exe()：使用者在「偵測到主程式執行中」的彈窗按下
+    「關閉程式並繼續安裝」時呼叫，寫法比照 uninstall.py 既有的
+    _kill_explorer()（taskkill /f、吞例外回傳布林值）。"""
+
+    def test_calls_taskkill_with_main_exe_basename(self):
+        api = make_installer_api(main_exe="sub\\app.exe")
+        with mock.patch("installer_core.subprocess.run") as mock_run:
+            result = api.close_running_main_exe()
+        self.assertTrue(result)
+        args, kwargs = mock_run.call_args
+        self.assertEqual(args[0], ["taskkill", "/f", "/im", "app.exe"])
+
+    def test_returns_false_without_main_exe(self):
+        api = make_installer_api(main_exe="")
+        self.assertFalse(api.close_running_main_exe())
+
+    def test_swallows_failure(self):
+        api = make_installer_api(main_exe="app.exe")
+        with mock.patch("installer_core.subprocess.run", side_effect=RuntimeError("模擬失敗")):
+            self.assertFalse(api.close_running_main_exe())
+
+
+class TestProcessRunningDetection(unittest.TestCase):
+    """真實需求：主程式執行中不該直接判定安裝失敗，要回傳獨立的狀態值
+    讓前端可以跳出「關閉程式並繼續安裝／取消」的互動選擇。"""
+
+    def setUp(self):
+        self.resource_dir = tempfile.mkdtemp()
+        self.app_contents_dir = os.path.join(self.resource_dir, "app_contents")
+        os.makedirs(self.app_contents_dir)
+        with open(os.path.join(self.app_contents_dir, "app.exe"), "wb") as f:
+            f.write(b"fake-app")
+        self.install_dir = tempfile.mkdtemp()
+        shutil.rmtree(self.install_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.resource_dir, ignore_errors=True)
+        shutil.rmtree(self.install_dir, ignore_errors=True)
+
+    def test_returns_process_running_status_instead_of_error(self):
+        api = make_installer_api(
+            app_name="MyApp", main_exe="app.exe", selected_path=self.install_dir,
+            file_associations=[], add_to_path=False,
+        )
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch("installer_core._is_process_running", return_value=True):
+            result = api.trigger_installation(create_desktop_shortcut=False)
+
+        self.assertEqual(result["status"], "process_running")
+        self.assertIn("app.exe", result["message"])
+        self.assertFalse(os.path.exists(self.install_dir), "偵測到執行中不該建立安裝目錄、開始複製檔案")
+
+
 class TestTriggerInstallationUpgradeFlow(unittest.TestCase):
     """驗證『刪除舊版本』延後到 trigger_installation() 內部才執行：使用者拖曳
     圖示、真正觸發安裝之後才會動舊版本，不是彈窗一按確認鈕就刪（見

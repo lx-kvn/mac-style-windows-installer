@@ -1,27 +1,32 @@
 """
 build_config_tool.py
 ---------------------
-「配置精靈」打包器的圖形化介面版本。
+「配置精靈」打包器：把 gui_config.py（打包工具的 GUI 版）跟 builder_cli.py
+（打包工具的 CLI 版，見 builder_cli.py 的說明）各自編譯成獨立 exe。
 
-負責把 gui_config.py（也就是「安裝軟體生成器」這個工具本身）打包成 exe，提供：
-  - 自訂輸出 exe 的圖示（.ico）
-  - 打包進度顯示：PyInstaller 執行期間即時把輸出串流到畫面上的 log 區塊，
-    並用一個緩慢往前推進的進度條給出「還在跑」的視覺回饋
-    （PyInstaller 本身不會回報精確百分比，這裡不假裝算得出來，
-    真正可信的進度資訊是 log 裡的實際輸出跟最後的結束碼）。
+兩種執行模式：
+  - 互動模式（不帶參數，`python build_config_tool.py`）：開 Tkinter 視窗，
+    只編譯 GUI 版（`InstallerBuilder.exe`），供開發者手動、偶爾用一下，
+    有進度條 + log 區塊的視覺回饋。
+  - 非互動模式（`python build_config_tool.py --cli [--version X.Y.Z]
+    [--icon xxx.ico]`）：不開任何視窗，依序編譯 GUI 版跟 CLI 版兩顆 exe，
+    檔名各自嵌入版本號（`mac-style-windows-installer_GUI_vX.Y.Z.exe` /
+    `mac-style-windows-installer_CLI_vX.Y.Z.exe`），給 `/released` 這類
+    自動化流程呼叫，不需要人在電腦前面點按鈕。
 
 跟 builder.py 的差異：builder.py 是這個工具「執行時」用來生成別人安裝檔的模組；
-這支腳本是拿來打包這個工具「自己」，職責不同所以獨立成一支檔案。
+這支腳本是拿來打包這個工具「自己」（GUI 跟 CLI 兩個版本），職責不同所以獨立成一支檔案。
 
-用 Tkinter 而不是 pywebview：這支只是內部偶爾會用到的建置小工具，
+用 Tkinter 而不是 pywebview 做互動模式：這支只是內部偶爾會用到的建置小工具，
 Tkinter 是標準函式庫、啟動快、不需要額外依賴，場合上比較合適。
 
 使用前提：
-  - 這支腳本要跟 gui_config.py、splash.py、splash_helper.py、builder.py、
-    installer_core.py、uninstall.py、ui/ 放在同一層。
+  - 這支腳本要跟 gui_config.py、packaging_core.py、builder_cli.py、splash.py、
+    splash_helper.py、builder.py、installer_core.py、uninstall.py、ui/
+    放在同一層。
   - 執行環境要先安裝 pyinstaller、pywebview（pip install pyinstaller pywebview）。
 
-修正紀錄：
+修正/新增紀錄：
   - 打包前清除 dist/build 資料夾原本用 ignore_errors=True，遇到檔案被鎖住
     （最常見是上一次打包出來的 exe 還在執行中，或被防毒軟體掃描）會悶不吭聲地
     失敗，然後在 PyInstaller 最後一步才丟出一長串看不懂的 traceback。
@@ -34,15 +39,31 @@ Tkinter 是標準函式庫、啟動快、不需要額外依賴，場合上比較
     builder.py 執行時需要另外呼叫一次 pyinstaller 子行程去編譯這兩支檔案，
     原本沒有內嵌進 InstallerBuilder.exe，導致打包成 exe 後執行時，
     這兩支檔案（以及 ui/index.html）不存在於磁碟上，直接報「找不到 ui 資料夾」。
-    現在內嵌進去後，gui_config.py 的 ensure_workspace_files() 會在需要時
+    現在內嵌進去後，packaging_core.py 的 ensure_workspace_files() 會在需要時
     自動把它們解壓到工作目錄，不需要使用者手動複製檔案。
   - 拿掉 --splash=splash.png（PyInstaller 原生的靜態圖片載入畫面），改成
     --add-data=splash_helper.py;.，內嵌一支獨立的載入畫面腳本，執行時用
     系統上真正的 python 直譯器去跑它，開出一個貨真價實、持續轉動的
     Tkinter 進度條視窗，取代原本只能放靜態圖片的做法。細節見 splash.py。
+  - 打包前清除舊產物原本是整個清空 dist/、build/ 資料夾，在 --cli 模式
+    依序編譯 GUI、CLI 兩顆 exe 時，編第二顆會把第一顆已經編好、放在
+    dist/ 底下的 exe 一起刪掉。改成只清除這次要編的目標自己的產物
+    （dist/{output_name}.exe、build/{output_name}/、{output_name}.spec），
+    不動其他目標已經編好的檔案。
+  - 【架構調整】實際建置一顆 exe 的邏輯（清理 dist/build、組 PyInstaller
+    指令、跑子行程、串流輸出、檢查產出）從 BuilderGUI 這個 class 裡抽成
+    獨立的 build_one_exe() 函式：互動模式的 BuilderGUI 跟新增的 --cli
+    非互動模式都呼叫同一份，只是進度/log 怎麼呈現不一樣（前者接回
+    Tkinter 的 log_queue，後者直接印到 stdout）。同時新增 --cli 模式，
+    讓打包工具本身也能被指令驅動、不需要開視窗，呼應「打包工具要有 GUI/
+    CLI 兩種介面」的整體方向——這裡指的是 build_config_tool.py 自己，
+    不是它打包出來的 gui_config.py/builder_cli.py（那兩個各自就是 GUI
+    介面跟 CLI 介面本身）。
 """
 
+import argparse
 import os
+import sys
 import shutil
 import subprocess
 import threading
@@ -53,7 +74,9 @@ import tkinter as tk
 from tkinter import filedialog, ttk
 
 ENTRY_SCRIPT = "gui_config.py"
+CLI_ENTRY_SCRIPT = "builder_cli.py"
 OUTPUT_NAME = "InstallerBuilder"
+PROJECT_NAME = "mac-style-windows-installer"
 FONT_FAMILY = "Microsoft JhengHei"
 
 BG = "#ffffff"
@@ -63,6 +86,200 @@ MUTED = "#71717a"
 BORDER = "#e4e4e7"
 SUCCESS = "#34C759"
 ERROR = "#FF6B6B"
+
+# 兩顆 exe（GUI 版、CLI 版）都要內嵌的共用深模組：packaging_core.py 讀取
+# installer_core.py/uninstall.py 的 ensure_workspace_files()，跟這兩支各自
+# 匯入的 window_drag.py/disk_space.py/file_assoc.py/lang_detect.py，
+# 必須實際存在於磁碟上才能在 builder.py 另外呼叫的 pyinstaller 子行程裡
+# 被找到。splash_helper.py 只有 GUI 版需要（CLI 沒有 Tkinter 載入畫面）。
+_SHARED_ADD_DATA = [
+    "installer_core.py", "uninstall.py",
+    "window_drag.py", "disk_space.py", "file_assoc.py", "lang_detect.py",
+]
+_GUI_ADD_DATA = _SHARED_ADD_DATA + ["splash_helper.py", "packaging_core.py"]
+_CLI_ADD_DATA = _SHARED_ADD_DATA + ["packaging_core.py", "builder.py"]
+
+_REQUIRED_FILES = [
+    ("gui_config.py", "gui_config.py"),
+    ("builder_cli.py", "builder_cli.py"),
+    ("packaging_core.py", "packaging_core.py"),
+    ("builder.py", "builder.py"),
+    ("ui/config.html", os.path.join("ui", "config.html")),
+    ("ui/index.html", os.path.join("ui", "index.html")),
+    ("installer_core.py", "installer_core.py"),
+    ("uninstall.py", "uninstall.py"),
+    ("splash_helper.py", "splash_helper.py"),
+    ("window_drag.py", "window_drag.py"),
+    ("disk_space.py", "disk_space.py"),
+    ("file_assoc.py", "file_assoc.py"),
+    ("lang_detect.py", "lang_detect.py"),
+]
+
+
+def check_prerequisites():
+    """檢查編譯這兩顆 exe 需要的原始碼檔案跟外部工具是否齊全，回傳問題清單
+    （空清單代表一切正常）。互動模式（BuilderGUI）跟 --cli 模式共用同一份
+    檢查，不會有兩邊標準兜不起來的情況。
+    """
+    problems = [f"找不到 {label}" for label, path in _REQUIRED_FILES if not os.path.exists(path)]
+    if shutil.which("pyinstaller") is None:
+        problems.append("找不到 pyinstaller，請先執行 pip install pyinstaller")
+    return problems
+
+
+def read_version(explicit_version=None):
+    """決定要嵌進輸出檔名的版本號：明確傳入的優先，否則讀取 repo 根目錄的
+    VERSION 檔案（單一真實來源，/released skill 發布時會更新它）。
+    VERSION 不存在時用一個一看就知道是「還沒正式定版」的預設值，不會悄悄
+    冒充一個看起來正常的版本號騙過使用者。
+    """
+    if explicit_version:
+        return explicit_version
+    version_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")
+    try:
+        with open(version_path, "r", encoding="utf-8") as f:
+            version = f.read().strip()
+            if version:
+                return version
+    except Exception:
+        pass
+    print("[警告] 找不到 VERSION 檔案（或內容是空的），使用預設版本號 0.0.0-dev。")
+    return "0.0.0-dev"
+
+
+def build_one_exe(entry_script, output_name, icon_path=None, noconsole=True,
+                   extra_add_data=None, on_log=None, on_progress=None):
+    """建置單一顆 exe：清理 dist/build、組 PyInstaller 指令、跑子行程、
+    串流輸出、檢查產出檔案。互動模式的 BuilderGUI 跟 --cli 非互動模式都
+    呼叫這個函式，核心邏輯只有一份。
+
+    on_log(line: str)：每一行 PyInstaller 輸出都會呼叫一次。
+    on_progress(percent: float, status: str)：進度里程碑會呼叫。
+    回傳 (success: bool, message: str, exe_path: str|None)。
+    """
+    def log(line):
+        if on_log:
+            on_log(line)
+
+    def progress(value, status):
+        if on_progress:
+            on_progress(value, status)
+
+    recent_lines = []
+
+    def track(line):
+        recent_lines.append(line)
+        if len(recent_lines) > 20:
+            recent_lines.pop(0)
+        log(line)
+
+    exe_name = f"{output_name}.exe"
+
+    try:
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        output = subprocess.check_output(
+            f'tasklist /FI "IMAGENAME eq {exe_name}" /NH',
+            shell=True, text=True, stderr=subprocess.DEVNULL, creationflags=creationflags,
+        )
+        if exe_name.lower() in output.lower():
+            return False, (
+                f"打包失敗：偵測到 {exe_name} 目前正在執行中，"
+                f"PyInstaller 無法覆寫正在執行的檔案，請先關閉它再重新打包。"
+            ), None
+    except Exception:
+        pass
+
+    stale_paths = [
+        os.path.join("dist", exe_name),
+        os.path.join("build", output_name),
+        f"{output_name}.spec",
+    ]
+    for stale_path in stale_paths:
+        if not os.path.exists(stale_path):
+            continue
+        remove = shutil.rmtree if os.path.isdir(stale_path) else os.remove
+        last_error = None
+        for attempt in range(3):
+            try:
+                remove(stale_path)
+                last_error = None
+                break
+            except Exception as e:
+                last_error = e
+                time.sleep(1)
+        if last_error is not None:
+            return False, (
+                f"無法清除舊的 {stale_path}，裡面可能有檔案正在被使用中"
+                f"（例如上一次打包出來的 {exe_name} 還在執行、被防毒軟體掃描，"
+                f"或被檔案總管開著預覽）。請關閉相關程式/視窗後再試一次。"
+            ), None
+
+    progress(15, "正在準備打包指令...")
+
+    cmd = ["pyinstaller", "--onefile"]
+    if noconsole:
+        cmd.append("--noconsole")
+    cmd.append(f"--name={output_name}")
+    cmd.append("--add-data=ui;ui")
+    for extra in (extra_add_data or []):
+        cmd.append(f"--add-data={extra};.")
+    cmd += [
+        # pywebview 支援多種 GUI 後端，PyInstaller 靜態分析是保守做法，
+        # 只要程式碼「有可能」用到某個後端就整包塞進去。Windows 上
+        # pywebview 實際只會用 EdgeChromium（靠 pythonnet 接 WebView2），
+        # PyQt5/PySide 這些替代後端一行都用不到，排除掉可以省下相當可觀的體積。
+        "--exclude-module=PyQt5",
+        "--exclude-module=PyQt6",
+        "--exclude-module=PySide2",
+        "--exclude-module=PySide6",
+        "--exclude-module=gi",
+    ]
+    if icon_path:
+        cmd.append(f"--icon={icon_path}")
+    cmd.append(entry_script)
+
+    track("$ " + " ".join(cmd))
+    progress(25, "正在執行 PyInstaller（此步驟需要數十秒）...")
+
+    try:
+        process = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1, universal_newlines=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except FileNotFoundError:
+        return False, "找不到 pyinstaller，請先執行 pip install pyinstaller。", None
+
+    # 這裡送出的只是「目前已知的真實進度目標」，不是畫面上要顯示的數字。
+    # PyInstaller 常常有一大段時間完全不輸出任何一行（尤其 Building EXE 那段），
+    # 如果進度只綁在「每收到一行 +多少」，遇到長時間沒輸出就會整個卡住不動。
+    # 呼叫端（BuilderGUI._poll_log_queue()）用計時器統一處理「追趕、追上後
+    # 緩慢自行往前爬、封頂 99%」的動畫，不受有沒有新輸出行影響；CLI 模式
+    # 則直接印這裡送出的里程碑，不做動畫。
+    progress_target = 30.0
+    for line in process.stdout:
+        line = line.rstrip("\n")
+        if line:
+            track(line)
+        progress_target = min(progress_target + 0.3, 85.0)
+        progress(progress_target, "正在編譯...")
+
+    returncode = process.wait()
+
+    if returncode != 0:
+        joined = "".join(recent_lines)
+        if "PermissionError" in joined or "WinError 5" in joined:
+            return False, (
+                f"打包失敗：存取被拒。{exe_name} 可能還在執行中，"
+                f"或被防毒軟體/檔案總管鎖住，請關閉後再試一次。"
+            ), None
+        return False, "打包失敗，請檢查上方輸出紀錄。", None
+
+    exe_path = os.path.join("dist", exe_name)
+    if not os.path.exists(exe_path):
+        return False, "PyInstaller 回報成功，但找不到產出的 exe，請檢查上方輸出紀錄。", None
+
+    return True, f"打包完成！輸出位置: {os.path.abspath(exe_path)}", os.path.abspath(exe_path)
 
 
 class BuilderGUI:
@@ -149,29 +366,7 @@ class BuilderGUI:
         scrollbar.pack(side="right", fill="y", pady=8)
 
     def _check_prerequisites(self):
-        problems = []
-        if not os.path.exists(ENTRY_SCRIPT):
-            problems.append(f"找不到 {ENTRY_SCRIPT}")
-        if not os.path.exists(os.path.join("ui", "config.html")):
-            problems.append("找不到 ui/config.html")
-        if not os.path.exists(os.path.join("ui", "index.html")):
-            problems.append("找不到 ui/index.html")
-        if not os.path.exists("installer_core.py"):
-            problems.append("找不到 installer_core.py")
-        if not os.path.exists("uninstall.py"):
-            problems.append("找不到 uninstall.py")
-        if not os.path.exists("splash_helper.py"):
-            problems.append("找不到 splash_helper.py")
-        if not os.path.exists("window_drag.py"):
-            problems.append("找不到 window_drag.py")
-        if not os.path.exists("disk_space.py"):
-            problems.append("找不到 disk_space.py")
-        if not os.path.exists("file_assoc.py"):
-            problems.append("找不到 file_assoc.py")
-        if not os.path.exists("lang_detect.py"):
-            problems.append("找不到 lang_detect.py")
-        if shutil.which("pyinstaller") is None:
-            problems.append("找不到 pyinstaller，請先執行 pip install pyinstaller")
+        problems = check_prerequisites()
         if problems:
             self.warning_label.config(text="⚠ " + "；".join(problems) + "，請確認後再打包。")
             self.start_btn.config(state="disabled")
@@ -213,133 +408,18 @@ class BuilderGUI:
             self._log_lines.pop(0)
         self.log_queue.put(("log", line))
 
-    def _recent_log_lines(self):
-        return self._log_lines
-
-    def _is_output_exe_running(self):
-        exe_name = f"{OUTPUT_NAME}.exe"
-        try:
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            output = subprocess.check_output(
-                f'tasklist /FI "IMAGENAME eq {exe_name}" /NH',
-                shell=True, text=True, stderr=subprocess.DEVNULL, creationflags=creationflags,
-            )
-            return exe_name.lower() in output.lower()
-        except Exception:
-            return False
-
-    def _clean_stale_dirs(self):
-        """清除 dist/build，遇到檔案被鎖住時重試幾次，仍然失敗就丟出看得懂的中文錯誤，
-        而不是讓 PyInstaller 在最後一步才丟出一長串 traceback。"""
-        for stale_dir in ("dist", "build"):
-            if not os.path.exists(stale_dir):
-                continue
-            last_error = None
-            for attempt in range(3):
-                try:
-                    shutil.rmtree(stale_dir)
-                    last_error = None
-                    break
-                except Exception as e:
-                    last_error = e
-                    time.sleep(1)
-            if last_error is not None:
-                raise RuntimeError(
-                    f"無法清除舊的 {stale_dir} 資料夾，裡面可能有檔案正在被使用中"
-                    f"（例如上一次打包出來的 {OUTPUT_NAME}.exe 還在執行、被防毒軟體掃描，"
-                    f"或被檔案總管開著預覽）。請關閉相關程式/視窗後再試一次。"
-                )
-
     def _run_build(self):
         try:
-            if self._is_output_exe_running():
-                self.log_queue.put((
-                    "done", False,
-                    f"打包失敗：偵測到 {OUTPUT_NAME}.exe 目前正在執行中，"
-                    f"PyInstaller 無法覆寫正在執行的檔案，請先關閉它再重新打包。",
-                ))
-                return
-
-            self._clean_stale_dirs()
-
-            self.log_queue.put(("progress", 15, "正在準備打包指令..."))
-
-            cmd = [
-                "pyinstaller",
-                "--onefile",
-                "--noconsole",
-                f"--name={OUTPUT_NAME}",
-                "--add-data=ui;ui",
-                "--add-data=installer_core.py;.",
-                "--add-data=uninstall.py;.",
-                "--add-data=splash_helper.py;.",
-                # window_drag.py / disk_space.py / file_assoc.py / lang_detect.py 是
-                # installer_core.py 跟 uninstall.py 共用的深模組——這兩支之後會被
-                # builder.py 另外拉去重新編譯成獨立的 exe（見 gui_config.py 的
-                # ensure_workspace_files()），所以這裡也要當成資源內嵌，執行時才能
-                # 複製到工作目錄讓那次編譯找得到。
-                "--add-data=window_drag.py;.",
-                "--add-data=disk_space.py;.",
-                "--add-data=file_assoc.py;.",
-                "--add-data=lang_detect.py;.",
-                # pywebview 支援多種 GUI 後端，PyInstaller 靜態分析是保守做法，
-                # 只要程式碼「有可能」用到某個後端就整包塞進去。Windows 上
-                # pywebview 實際只會用 EdgeChromium（靠 pythonnet 接 WebView2），
-                # PyQt5/PySide 這些替代後端一行都用不到，排除掉可以省下相當可觀的體積。
-                "--exclude-module=PyQt5",
-                "--exclude-module=PyQt6",
-                "--exclude-module=PySide2",
-                "--exclude-module=PySide6",
-                "--exclude-module=gi",
-            ]
-            if self.icon_path:
-                cmd.append(f"--icon={self.icon_path}")
-            cmd.append(ENTRY_SCRIPT)
-
-            self._append_log("$ " + " ".join(cmd))
-            self.log_queue.put(("progress", 25, "正在執行 PyInstaller（此步驟需要數十秒）..."))
-
-            process = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1, universal_newlines=True,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            success, message, exe_path = build_one_exe(
+                entry_script=ENTRY_SCRIPT,
+                output_name=OUTPUT_NAME,
+                icon_path=self.icon_path or None,
+                noconsole=True,
+                extra_add_data=_GUI_ADD_DATA,
+                on_log=self._append_log,
+                on_progress=lambda value, status: self.log_queue.put(("progress", value, status)),
             )
-
-            # 這裡送出的只是「目前已知的真實進度目標」，不是畫面上要顯示的數字。
-            # PyInstaller 常常有一大段時間完全不輸出任何一行（尤其 Building EXE 那段），
-            # 如果進度只綁在「每收到一行 +多少」，遇到長時間沒輸出就會整個卡住不動。
-            # 實際的動畫（追趕、追上後緩慢自行往前爬、封頂 99%）交給
-            # _poll_log_queue() 用計時器統一處理，不受有沒有新輸出行影響。
-            progress_target = 30.0
-            for line in process.stdout:
-                line = line.rstrip("\n")
-                if line:
-                    self._append_log(line)
-                progress_target = min(progress_target + 0.3, 85.0)
-                self.log_queue.put(("progress", progress_target, "正在編譯..."))
-
-            returncode = process.wait()
-
-            if returncode != 0:
-                if "PermissionError" in "".join(self._recent_log_lines()) or "WinError 5" in "".join(self._recent_log_lines()):
-                    self.log_queue.put((
-                        "done", False,
-                        f"打包失敗：存取被拒。{OUTPUT_NAME}.exe 可能還在執行中，"
-                        f"或被防毒軟體/檔案總管鎖住，請關閉後再試一次。",
-                    ))
-                else:
-                    self.log_queue.put(("done", False, "打包失敗，請檢查上方輸出紀錄。"))
-                return
-
-            exe_path = os.path.join("dist", f"{OUTPUT_NAME}.exe")
-            if not os.path.exists(exe_path):
-                self.log_queue.put(("done", False, "PyInstaller 回報成功，但找不到產出的 exe，請檢查上方輸出紀錄。"))
-                return
-
-            self.log_queue.put(("done", True, f"打包完成！輸出位置: {os.path.abspath(exe_path)}"))
-
-        except FileNotFoundError:
-            self.log_queue.put(("done", False, "找不到 pyinstaller，請先執行 pip install pyinstaller。"))
+            self.log_queue.put(("done", success, message))
         except Exception as e:
             self.log_queue.put(("done", False, f"發生未預期的錯誤: {e}"))
 
@@ -423,7 +503,52 @@ class BuilderGUI:
             self.status_label.config(text=message, fg=ERROR)
 
 
+def run_cli(version=None, icon_path=None):
+    """非互動模式：依序編譯 GUI 版跟 CLI 版兩顆 exe，檔名嵌入版本號。
+    給 /released skill 或其他自動化流程呼叫，不開任何視窗。回傳 process
+    exit code（0 = 兩顆都成功，1 = 任一顆失敗）。
+    """
+    problems = check_prerequisites()
+    if problems:
+        print("環境檢查失敗：", file=sys.stderr)
+        for p in problems:
+            print(f"  - {p}", file=sys.stderr)
+        return 1
+
+    resolved_version = read_version(version)
+    targets = [
+        (ENTRY_SCRIPT, f"{PROJECT_NAME}_GUI_v{resolved_version}", True, _GUI_ADD_DATA),
+        (CLI_ENTRY_SCRIPT, f"{PROJECT_NAME}_CLI_v{resolved_version}", False, _CLI_ADD_DATA),
+    ]
+
+    for entry_script, output_name, noconsole, extra_add_data in targets:
+        print(f"=== 正在編譯 {output_name}.exe（進入點：{entry_script}）===")
+        success, message, exe_path = build_one_exe(
+            entry_script=entry_script,
+            output_name=output_name,
+            icon_path=icon_path,
+            noconsole=noconsole,
+            extra_add_data=extra_add_data,
+            on_log=print,
+            on_progress=lambda value, status: print(f"[{value:.0f}%] {status}"),
+        )
+        print(message)
+        if not success:
+            return 1
+
+    return 0
+
+
 def main():
+    parser = argparse.ArgumentParser(description="打包工具建置器：編譯 InstallerBuilder 的 GUI/CLI 兩顆 exe。")
+    parser.add_argument("--cli", action="store_true", help="非互動模式：依序編譯 GUI/CLI 兩顆 exe，不開視窗")
+    parser.add_argument("--version", default=None, help="嵌進輸出檔名的版本號，沒帶就讀取 VERSION 檔案")
+    parser.add_argument("--icon", default=None, help="輸出 exe 的圖示（.ico，選填）")
+    args = parser.parse_args()
+
+    if args.cli:
+        sys.exit(run_cli(version=args.version, icon_path=args.icon))
+
     # 讓 Windows 在非 100% 縮放比例（例如 125%）下不要把整個視窗畫面當點陣圖拉伸，
     # 這步一定要在建立任何 Tk 視窗之前呼叫才有效。
     try:
