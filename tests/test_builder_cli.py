@@ -93,6 +93,25 @@ class TestLoadPackInput(unittest.TestCase):
         self.assertTrue(data["use_custom_doc_icon"])
         self.assertEqual(doc_icon_path_selected, "C:\\icon.ico")
 
+    def test_no_admin_install_flag_actually_enables_it(self):
+        """真實抓到的 bug：這個旗標原本用 argparse.BooleanOptionalAction，
+        但它的判斷方式是看實際打的 option string 開頭是不是 "--no-"
+        （CPython 原始碼：not option_string.startswith("--no-")）——而這個
+        旗標自己的名字「--no-admin-install」開頭剛好就是 "--no-"，導致
+        不管使用者是想開啟還是關閉，argparse 都會判斷成「關閉」，把值設成
+        False。也就是說這個旗標過去在命令列上從來沒有真的生效過，一路被
+        silently 解讀反了——直到使用者實測發現「打包出來的東西還是要求
+        系統管理員權限、裝到 Program Files」才抓到。鎖住這裡：帶上
+        --no-admin-install 之後，解析出來的值必須是 True，不能是 False。"""
+        args = self._parse(["pack", "--no-admin-install"])
+        data, *_ = builder_cli._load_pack_input(args)
+        self.assertTrue(data["no_admin_install"])
+
+    def test_no_admin_install_not_set_when_flag_absent(self):
+        args = self._parse(["pack"])
+        data, *_ = builder_cli._load_pack_input(args)
+        self.assertNotIn("no_admin_install", data)
+
     def test_local_appdata_files_csv_parsed_into_list(self):
         args = self._parse(["pack", "--local-appdata-files", "cli.exe, tools/helper.exe"])
         data, *_ = builder_cli._load_pack_input(args)

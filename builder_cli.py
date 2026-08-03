@@ -115,9 +115,20 @@ def build_arg_parser():
         "--restart-explorer-on-update", dest="restart_explorer_on_update",
         action=argparse.BooleanOptionalAction, default=None,
     )
+    # 真實抓到的 bug：argparse.BooleanOptionalAction 的 __call__ 判斷「這次是不是
+    # 停用」的方式是看實際打的那個 option string 開頭是不是 "--no-"
+    # （CPython 原始碼：not option_string.startswith("--no-")），完全不管這個
+    # option string 本來就是你唯一定義、想當「啟用」用的那個。而這個旗標
+    # 本身的名字「--no-admin-install」開頭剛好就是 "--no-"——結果不管你是想
+    # 啟用還是停用，argparse 都會把它判斷成「停用」，設成 False。也就是說
+    # 打 --no-admin-install 這個旗標，過去實際上從來沒有真的生效過，一路
+    # 靜默地被 argparse 解讀成「關閉」。改成單純的 store_true（default 仍然
+    # 保留 None，跟其他旗標一樣「命令列沒帶就交給 JSON/預設值決定」的語意），
+    # 放棄「--no-no-admin-install」這個用來明確停用的寫法——反正預設本來就是
+    # False，沒有人需要一個額外的旗標特地把它設回預設值。
     pack_p.add_argument(
         "--no-admin-install", dest="no_admin_install",
-        action=argparse.BooleanOptionalAction, default=None,
+        action="store_true", default=None,
         help="開啟後整個安裝檔完全不要求系統管理員權限，改裝到 %%LOCALAPPDATA%%（免 UAC）",
     )
     pack_p.add_argument(
