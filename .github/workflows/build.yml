@@ -28,6 +28,15 @@ jobs:
   build:
     runs-on: windows-latest
 
+    # 真實抓到的問題：GitHub 的 Windows runner 預設主控台/檔案文字編碼是
+    # 英文語系（cp1252），這個專案到處都有中文提示訊息跟測試裡寫中文內容
+    # 的暫存檔案，本機這台開發機是中文語系測不出來，一搬進 CI 就整批
+    # UnicodeEncodeError。PYTHONUTF8=1 強制 Python 全部文字 I/O
+    # （print()、預設沒指定 encoding 的 open()）都用 UTF-8，不看系統
+    # 語系，一次解決，不用把 tests/ 裡幾十處 open() 一一補上 encoding。
+    env:
+      PYTHONUTF8: "1"
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,7 +49,12 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller pywebview
+          # pywin32 是選填相依套件（只影響建立捷徑功能），但
+          # tests/test_file_associations.py 的捷徑相關測試會
+          # mock.patch("win32com.client.Dispatch", ...)，這個 patch
+          # 本身就需要 win32com 這個模組存在才能被解析到，缺少的話
+          # 不是測試失敗，是直接 ModuleNotFoundError。
+          pip install pyinstaller pywebview pywin32
 
       - name: 決定版本號
         id: version
