@@ -20,8 +20,14 @@
     <title>解除安裝</title>
     <style>
         * { box-sizing: border-box; }
+        /* 這支視窗本身就是唯一的內容（不像 index.html 的彈窗是疊在主安裝畫面
+           上方的一層），所以視窗本身直接就是「卡片」——body 直接用白底填滿
+           整個視窗，不再疊一層灰底畫布 + 裡面又放一張圓角白卡片，那樣在
+           uninstall.exe 這種「整個視窗只有一個對話框」的情境下純粹是多餘的
+           雙層框架，跟 Setup.exe 主安裝畫面（body 本身就是全螢幕內容）的
+           做法其實才是一致的。 */
         body {
-            margin: 0; padding: 0; background-color: #f5f5f7;
+            margin: 0; padding: 0; background-color: white;
             width: 100vw; height: 100vh;
             display: flex; justify-content: center; align-items: center;
             overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -46,11 +52,12 @@
         .css-close-icon::before { transform: translateY(-50%) rotate(45deg); }
         .css-close-icon::after { transform: translateY(-50%) rotate(-45deg); }
 
-        /* 跟 index.html 完全同一套彈窗樣式，內部實作重複、不是新樣式 */
+        /* 內容區塊本身不再是浮在畫布上的卡片（見上面 body 的說明），只負責
+           版面排列：置中、限制文字寬度方便閱讀、內容過長時可以捲動。 */
         .nice-view {
-            background: white; padding: 24px 32px; border-radius: 16px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.08); text-align: center;
-            border: 1px solid #e5e5ea; max-width: 340px;
+            width: 100%; max-width: 480px; padding: 0 32px;
+            max-height: calc(100vh - 32px); overflow-y: auto;
+            text-align: center;
             display: none;
         }
         .nice-view.active { display: block; }
@@ -71,10 +78,129 @@
         .nice-btn.secondary { background: #e5e5ea; color: #1d1d1f; }
         .nice-btn.secondary:hover { background: #d8d8dd; }
 
-        .install-progress-wrap { width: 260px; }
+        /* 真實抓到的 bug：text-align:center 只會置中行內內容，這個固定寬度
+           260px 的區塊本身是 block 元素，沒有 margin:auto 就會貼著父層內容
+           區的左邊，導致進度條頁面看起來歪一邊——跟 index.html 用 flex
+           column + align-items:center 置中不同，這裡簡單用 margin:auto 修。 */
+        /* 拖曳確認畫面：把 App 圖示拖到垃圾桶上放開＝跟按「刪除」按鈕同一件事
+           （比照 macOS 把 App 拖進 Dock 垃圾桶的原生解除安裝手勢）。真實抓到
+           的問題：這裡原本自己另外發明了一套縮小版的版面尺寸（64px 圖示、
+           480x380 視窗），跟 Setup.exe 主安裝畫面（index.html 的
+           .workspace/.icon-box/.icon-wrapper/.arrow-box，600x420 視窗）
+           擠在一起看起來像兩套不同標準的介面。改成直接沿用 index.html 那組
+           class 名稱與尺寸數字（見規格文件 §8.29），不要為解除安裝助手另外
+           發明一套。 */
+
+        /* 真實抓到的問題（規格文件 §8.29 記錄的既有慣例）：圖示區塊要當成
+           獨立一組置中，文字是另外一組、掛在圖示區塊下方，兩者不能被當成
+           同一包內容一起參與置中計算——不然文字的高度會把圖示的視覺中心
+           往上推，圖示因此不是真正置中（index.html 當初把「建立桌面捷徑」
+           勾選項獨立成 .bottom-bar、不參與 main-view 置中，就是同一個道理）。
+           #confirmView 因此不用 .nice-view 預設的「整包置中」，改成自己
+           撐滿整個視窗，.workspace 用 position:absolute 精確置中在視窗正
+           中央，.confirm-text 是另一個獨立定位的區塊，掛在 .workspace
+           下方固定距離，不影響 .workspace 的置中結果。 */
+        #confirmView {
+            position: fixed; inset: 0; width: 100%; max-width: none; padding: 0;
+            max-height: none; overflow: visible;
+        }
+        /* 真實抓到的問題（/apple-design 橫向比對安裝檔實測發現）：把圖示區塊
+           精確置中在視窗正中央（top:50%）看起來反而不平衡——圖示視覺上比較
+           「重」，下面又掛著一樣有重量的文字，兩者加起來的視覺重心自然落在
+           偏下的位置，於是視窗上半段變成一大片空白，下半段被圖示+文字塞滿，
+           兩邊觀感並不對等。這正是 index.html 檔頭修正紀錄裡同一個問題的
+           翻版（那裡的結論是：圖示應該幾乎置中、只微幅偏上，不能真的整個
+           往下推），差別是這裡圖示下面掛的文字比 index.html 的單行標籤重
+           （標題+訊息兩行），所以往上偏移的幅度也要比 index.html 的
+           margin-top:8px（約 2% 視窗高度）更明顯一點，改成整組往上偏移到
+           約 44% 視窗高度，讓視窗上下的留白視覺上更接近對等。 */
+        .workspace {
+            display: flex; align-items: center; justify-content: center; gap: 20px;
+            position: absolute; top: 44%; left: 50%; transform: translate(-50%, -50%);
+            margin: 0;
+        }
+        .confirm-text {
+            position: absolute; left: 0; right: 0; top: calc(44% + 68px);
+            padding: 0 32px; text-align: center;
+        }
+        .icon-box { display: flex; flex-direction: column; align-items: center; width: 160px; text-align: center; }
+        /* 真實抓到的問題：App 圖示跟垃圾桶圖示先前差太多（90px vs 120px），
+           垃圾桶看起來過大；兩邊各自微調一點（App 圖示加大、垃圾桶縮小）
+           後視覺份量比較接近。這裡刻意跟 index.html 的 90px 不一樣，是
+           confirmView 專屬的例外（見規格文件 §8.29）。 */
+        .icon-wrapper {
+            width: 100px; height: 100px; display: flex; justify-content: center; align-items: center;
+            cursor: grab; transition: transform 0.2s;
+        }
+        .icon-wrapper img { width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+        .icon-wrapper:active { cursor: grabbing; transform: scale(0.95); }
+        .arrow-box { height: 90px; display: flex; align-items: center; }
+        .arrow-svg { width: 28px; height: 28px; }
+        /* 垃圾桶本身：桶身＋蓋子兩張圖疊在同一個相對定位容器內，維持素材原始
+           1024x1024 畫布的相對座標關係（不個別置中），疊起來才會還原成完整的
+           垃圾桶圖案。真實抓到的問題：一開始跟左邊 App 圖示（.icon-wrapper）
+           做一樣的 90x90，垃圾桶本身圖案線條較粗、留白較少，同樣尺寸視覺
+           份量比圖示輕，改成 120x120 又太大；最後兩邊各自微調（App 圖示
+           100x100、垃圾桶 110x110）比較接近平衡。 */
+        /* 真實抓到的 bug：拖曳應用程式圖示到垃圾桶時常常「愛理不理」，圖示
+           明明已經在垃圾桶範圍內卻沒觸發開蓋動畫——原因是 .trash-can 這個
+           div 是 #trashDropTarget 底下的子元素，滑鼠/拖曳游標從
+           #trashDropTarget 的內距移到 .trash-can 本身時，等於跨越了一個
+           DOM 元素邊界，瀏覽器原生 HTML5 拖放會因此多觸發一組
+           dragleave/dragenter，造成狀態忽開忽關。加上 pointer-events:none
+           讓 .trash-can（以及裡面的圖片，已經是 none）完全不接收拖放事件，
+           事件只會落在 #trashDropTarget 本身，不會再有子元素邊界造成的
+           忽閃忽滅。 */
+        .trash-can { position: relative; width: 110px; height: 110px; transition: filter 0.2s; pointer-events: none; }
+        .trash-can img { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+        .trash-lid {
+            /* 真實抓到的問題：支點原本抓在左側，蓋子往右掀時支點應該在右側
+               （鉸鏈靠近桶身右後方），這樣打開時蓋子下緣才會一直貼著桶身，
+               不會整片浮起來。角度由 JS 的彈簧動畫驅動，不用 CSS
+               transition——見下方 createAngleSpring()，這樣才能在使用者快速
+               拖進拖出時，從目前角度與速度接續動畫，不會卡頓或跳幀。 */
+            transform-origin: 82% 82%;
+        }
+        #trashDropTarget.drag-over .trash-can {
+            /* 真實抓到的問題：放大效果（先前 1.06 倍、後來收斂到 1.02 倍）
+               疊加蓋子旋轉，兩個效果加在一起看起來很怪——尤其縮到 1.02 倍
+               這種幾乎看不出來的放大反而顯得不上不下。拿掉縮放，只靠蓋子
+               旋轉本身＋陰影當作回饋，動作更單純乾脆。
+               陰影原本帶紅色（rgba(255,59,48,...)），語意上紅色是警示/危險色，
+               但這裡蓋子彈開動畫本身已經完整傳達狀態改變了，紅色暈影是多餘
+               且錯置的訊號，改成中性（無彩色）。
+               真實抓到的問題：一開始只疊了單一層 drop-shadow（大 blur、
+               中等透明度），結果整片暈開的濃淡很平均，不像真實陰影——真實
+               陰影是貼著物體的地方最深，往外擴散幾乎立刻就變淡。改成疊兩層
+               drop-shadow：一層 blur 小、透明度高（貼合物體邊緣的「接觸
+               陰影」），另一層 blur 大、透明度低（外圍模糊的「環境陰影」），
+               兩層疊起來才有真實陰影那種「近深遠淺」的漸層感，而不是均勻
+               一片。 */
+            filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.4)) drop-shadow(0 6px 12px rgba(0, 0, 0, 0.12));
+        }
+
+        /* 真實抓到的問題：#progressView 裡標題(margin-bottom:6px)、進度條、
+           復原按鈕(原本 margin-top:16px)彼此間距不一致，忽緊忽鬆看起來
+           隨意、沒設計過。統一改成一致的 20px 節奏，讓三者感覺是同一組、
+           有規律地分佈，而不是擠成一團。
+           另外原本試過在標題上方加一顆會轉的 spinner icon 撐視覺重量，
+           但畫面下面已經有一條明確顯示百分比的進度條，兩者一起出現語意
+           會打架（spinner 通常代表「不確定要多久」，跟底下明確進度矛盾），
+           使用者實測後回報很怪，已經拿掉。也試過只加寬加粗進度條本身，
+           使用者實測後仍覺得不平衡：標題文字（4 個字）比下面按鈕文字
+           （2 個字）視覺重，光靠進度條加寬加粗不足以抵銷，整體還是偏上。
+           改成維持標題原本位置不動，把進度條＋按鈕這組往下方多推一點
+           （在 install-progress-wrap 上加 margin-top），加大標題跟下面
+           內容的距離，讓視覺重心不要那麼靠近標題。使用者接著回報標題
+           本身也要再往下一點點，補上小幅 margin-top。 */
+        #progressView .nice-title { margin-top: 48px; margin-bottom: 20px; }
+        .install-progress-wrap { width: 320px; margin: 40px auto 0 auto; }
         .install-progress-text { font-size: 11px; color: #86868b; text-align: center; margin-bottom: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .install-progress-track { width: 100%; height: 4px; background: #e5e5ea; border-radius: 2px; overflow: hidden; }
+        .install-progress-track { width: 100%; height: 6px; background: #e5e5ea; border-radius: 3px; overflow: hidden; }
         .install-progress-fill { width: 0%; height: 100%; background: #0071e3; transition: width 0.2s ease; }
+        /* 反悔倒數期間的「復原」按鈕，只在倒數的前 4 秒顯示；倒數結束
+           （或使用者按下）之後就會被隱藏，不佔用版面。 */
+        .undo-btn { margin-top: 20px; }
     </style>
 </head>
 <body>
@@ -86,11 +212,28 @@
     </div>
 
     <div class="nice-view" id="confirmView">
-        <div class="nice-icon warn"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L14.7 3.86a2 2 0 0 0-3.4 0z"></path></svg></div>
-        <div class="nice-title" id="confirmTitle" data-i18n="confirm_title">解除安裝助手</div>
-        <div class="nice-message" id="confirmMessage" style="text-align:center;"></div>
-        <button class="nice-btn secondary" onclick="onCancel()" data-i18n="btn_cancel">取消</button>
-        <button class="nice-btn" onclick="onDelete()" data-i18n="btn_delete">刪除</button>
+        <div class="workspace">
+            <div class="icon-box">
+                <div class="icon-wrapper" id="dragAppIcon" draggable="true">
+                    <img src="app_icon.png" alt="App">
+                </div>
+            </div>
+            <div class="arrow-box">
+                <svg class="arrow-svg" viewBox="0 0 24 24">
+                    <path d="M5 12h14M12 5l7 7-7 7" stroke="#a1a1a6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+                </svg>
+            </div>
+            <div class="icon-box" id="trashDropTarget">
+                <div class="trash-can">
+                    <img class="trash-body" src="trash_body.svg" alt="">
+                    <img class="trash-lid" id="trashLid" src="trash_lid.svg" alt="">
+                </div>
+            </div>
+        </div>
+        <div class="confirm-text">
+            <div class="nice-title" id="confirmTitle" data-i18n="confirm_title">解除安裝助手</div>
+            <div class="nice-message" id="confirmMessage" style="text-align:center;"></div>
+        </div>
     </div>
 
     <div class="nice-view" id="lockingProcessesView">
@@ -114,6 +257,11 @@
             <div class="install-progress-text" id="progressText"></div>
             <div class="install-progress-track"><div class="install-progress-fill" id="progressFill"></div></div>
         </div>
+        <!-- 反悔倒數期間顯示的「復原」按鈕：放開滑鼠後不是馬上真的刪除，
+             而是先跑一段 4 秒的反悔倒數（進度條 0-25%），這段期間按這顆按鈕
+             可以取消，回到 confirmView 重新拖曳；倒數結束後這顆按鈕會被
+             隱藏並停用，才真正呼叫 run_uninstall()。 -->
+        <button class="nice-btn secondary undo-btn" id="undoBtn" onclick="onUndoDelete()" data-i18n="btn_undo" style="display:none;">復原</button>
     </div>
 
     <div class="nice-view" id="doneView">
@@ -137,9 +285,7 @@
             "zh-TW": {
                 close_title: "關閉",
                 confirm_title: "解除安裝助手",
-                confirm_message: "您確定要刪除「{{name}}」及其所有元件嗎？",
-                btn_cancel: "取消",
-                btn_delete: "刪除",
+                confirm_message: "拖動圖標以解除安裝「{{name}}」",
                 locking_title: "偵測到程式鎖定檔案",
                 locking_message: "偵測到「{{name}}」的部分檔案目前被下列程式鎖定：{{processes}}。\n需要先結束這些程式才能完整移除相關檔案，是否繼續？\n\n（選「否」解除安裝仍會繼續，但可能有檔案因為還在使用中而無法刪除。）",
                 btn_no: "否",
@@ -148,6 +294,7 @@
                 process_running_message: "「{{name}}」目前正在執行中，請先關閉程式後再解除安裝。",
                 btn_ok: "了解",
                 progress_title: "正在解除安裝...",
+                btn_undo: "復原",
                 done_title: "解除安裝完成",
                 done_message: "「{{name}}」已成功移除。",
                 btn_done: "完成",
@@ -161,9 +308,7 @@
             "en": {
                 close_title: "Close",
                 confirm_title: "Uninstaller",
-                confirm_message: "Are you sure you want to remove \"{{name}}\" and all of its components?",
-                btn_cancel: "Cancel",
-                btn_delete: "Delete",
+                confirm_message: "Drag the icon to uninstall \"{{name}}\"",
                 locking_title: "Files are locked by other programs",
                 locking_message: "Some files belonging to \"{{name}}\" are currently locked by: {{processes}}.\nThese programs need to be closed first to fully remove the related files. Continue?\n\n(Choosing \"No\" still continues the uninstall, but some in-use files may fail to be removed.)",
                 btn_no: "No",
@@ -172,6 +317,7 @@
                 process_running_message: "\"{{name}}\" is currently running. Please close it before uninstalling.",
                 btn_ok: "OK",
                 progress_title: "Uninstalling...",
+                btn_undo: "Undo",
                 done_title: "Uninstall Complete",
                 done_message: "\"{{name}}\" has been removed successfully.",
                 btn_done: "Done",
@@ -221,6 +367,91 @@
             });
         })();
 
+        /* 輕量彈簧動畫（不依賴外部函式庫，這是離線的本機頁面，不能掛 CDN）：
+           驅動垃圾桶蓋子的旋轉角度。跟 /apple-design 的 damping/response
+           參數化方式一致，而不是用固定時長的 CSS transition/keyframes——
+           這樣使用者快速把 App 圖示拖進拖出垃圾桶時，動畫會從目前的角度與
+           速度接續，不會卡頓、也不會在方向反轉時瞬間跳幀。 */
+        function createAngleSpring(el, opts) {
+            const { closedAngle = 0, openAngle = 9, openDamping = 0.85, closeDamping = 1.0, response = 0.35 } = opts || {};
+            let angle = closedAngle;
+            let velocity = 0;
+            let target = closedAngle;
+            let damping = closeDamping;
+            let rafId = null;
+            let lastTime = null;
+
+            function step(now) {
+                if (lastTime === null) lastTime = now;
+                const dt = Math.min((now - lastTime) / 1000, 1 / 30);
+                lastTime = now;
+                const angularFreq = (2 * Math.PI) / response;
+                const dampingCoeff = 2 * damping * angularFreq;
+                const springCoeff = angularFreq * angularFreq;
+                const displacement = angle - target;
+                const accel = -springCoeff * displacement - dampingCoeff * velocity;
+                velocity += accel * dt;
+                angle += velocity * dt;
+
+                if (Math.abs(displacement) > 0.05 || Math.abs(velocity) > 0.05) {
+                    el.style.transform = `rotate(${angle}deg)`;
+                    rafId = requestAnimationFrame(step);
+                } else {
+                    angle = target;
+                    velocity = 0;
+                    el.style.transform = `rotate(${angle}deg)`;
+                    rafId = null;
+                    lastTime = null;
+                }
+            }
+
+            function setOpen(open) {
+                target = open ? openAngle : closedAngle;
+                damping = open ? openDamping : closeDamping;
+                if (rafId === null) { lastTime = null; rafId = requestAnimationFrame(step); }
+            }
+
+            return { setOpen };
+        }
+
+        const trashLidSpring = createAngleSpring(document.getElementById('trashLid'));
+
+        // 拖曳 App 圖示到垃圾桶：跟 index.html 的拖放邏輯（HTML5 原生
+        // dragstart/dragover/drop）同一套寫法，這是 confirmView 唯一的操作
+        // 方式（真實抓到的問題：原本下面還留了「取消」「刪除」兩個按鈕，
+        // 但拖曳本身就是解除安裝的觸發動作，兩套機制同時存在只是佔位置又
+        // 令人困惑；主安裝畫面也只有拖曳沒有額外按鈕，這裡改成一致——
+        // 取消／關閉沿用左上角既有的 X 關閉鈕即可，不用另外重複一份）。
+        // 放開在垃圾桶範圍內＝呼叫 onDelete()；拖出範圍或沒有放上去＝蓋子
+        // 彈簧自然收回，不做任何刪除動作。
+        (function setupTrashDragDrop() {
+            const dragAppIcon = document.getElementById('dragAppIcon');
+            const trashDropTarget = document.getElementById('trashDropTarget');
+
+            dragAppIcon.addEventListener('dragstart', (e) => {
+                e.dataTransfer.setData('text/plain', 'delete-trigger');
+            });
+
+            trashDropTarget.addEventListener('dragenter', (e) => {
+                e.preventDefault();
+                trashDropTarget.classList.add('drag-over');
+                trashLidSpring.setOpen(true);
+            });
+            trashDropTarget.addEventListener('dragover', (e) => { e.preventDefault(); });
+            trashDropTarget.addEventListener('dragleave', () => {
+                trashDropTarget.classList.remove('drag-over');
+                trashLidSpring.setOpen(false);
+            });
+            trashDropTarget.addEventListener('drop', (e) => {
+                e.preventDefault();
+                trashDropTarget.classList.remove('drag-over');
+                trashLidSpring.setOpen(false);
+                if (e.dataTransfer.getData('text/plain') === 'delete-trigger') {
+                    onDelete();
+                }
+            });
+        })();
+
         let appName = "";
 
         function showView(id) {
@@ -243,14 +474,24 @@
                 showView('lockingProcessesView');
                 return;
             }
-            startUninstall(false);
+            startUninstallWithGrace();
         }
 
+        // 鎖定中程序／主程式執行中這兩個分支，使用者已經在額外畫面上做過一次
+        // 明確選擇（onLockingProceed），不需要再疊加一次反悔倒數，維持原本
+        // 「立即開始、無反悔期」的行為。
         function onLockingProceed(kill) { startUninstall(kill); }
+
+        // 拖曳放開後（沒有鎖定/佔用問題那個分支）走的是反悔倒數流程：真正的
+        // run_uninstall() 回報的 0-100 進度，需要映射到 25-100 這個尾段，
+        // 前 0-25 是純前端倒數動畫，這個旗標決定 updateUninstallProgress
+        // 是否要做映射。
+        let remapProgressToTail = false;
 
         window.updateUninstallProgress = function (percent, message) {
             document.getElementById('progressText').innerText = message;
-            document.getElementById('progressFill').style.width = percent + '%';
+            const visualPercent = remapProgressToTail ? (25 + percent * 0.75) : percent;
+            document.getElementById('progressFill').style.width = visualPercent + '%';
         };
 
         async function startUninstall(killLockingProcesses) {
@@ -263,6 +504,86 @@
                 document.getElementById('errorMessage').innerText = result.message || '';
                 showView('errorView');
             }
+        }
+
+        // --- 反悔倒數（拖曳放開後的預設路徑）---
+        // 真實抓到的設計取捨：使用者放開滑鼠後如果馬上真的開始刪除，中間沒有
+        // 任何反悔機會；但額外跳一個確認彈窗又容易被盲目點過去、也跟「只留
+        // 拖曳手勢、拿掉取消/刪除按鈕」的簡化方向矛盾。改成進度條分兩段：
+        // 放開滑鼠後畫面就進到 progressView、進度條開始往前跑，前 1/4（0-25%）
+        // 是 4 秒的反悔倒數（可按「復原」取消），倒數結束才真正呼叫
+        // run_uninstall()，其回報的真實進度映射到剩下的 25-100，同一條進度條
+        // 無縫接續，不會有倒退或跳動感。
+        //
+        // 倒數動畫刻意不是勻速：參考 ui/config.html 的 progressTick 已經用過的
+        // 「跟目標差距決定速度、且有最小步進下限」曲線（差距越大追得越快，
+        // 越接近目標越慢，但下限保證不會真的停住）。這裡另外加上以
+        // performance.now() 算的牆鐘時間，確保 4 秒整這個里程碑跟裝置更新率
+        // 無關；靠曲線本身很難剛好在 4 秒整精確落在 25%，所以刻意讓曲線在
+        // 4 秒時還沒到 25%（仍有下限速度在動），倒數真正結束那一刻才把進度條
+        // 校正到精確的 25%，這個極小的收尾誤差不易察覺。
+        const GRACE_DURATION_MS = 4000;
+        const GRACE_TARGET = 25;
+        const GRACE_RATE = 1.0;   // 差距的每秒收斂比例（時間常數約 1 秒）
+        const GRACE_FLOOR = 1.0;  // 每秒最小爬升量，避免曲線在尾段看起來停住
+
+        let graceRafId = null;
+        let graceTimeoutId = null;
+        let graceLastTime = null;
+        let graceDisplayed = 0;
+        let graceCancelled = false;
+
+        function graceTick(now) {
+            if (graceCancelled) return;
+            if (graceLastTime === null) graceLastTime = now;
+            const dt = Math.min((now - graceLastTime) / 1000, 1 / 30);
+            graceLastTime = now;
+            const gap = GRACE_TARGET - graceDisplayed;
+            const step = Math.max(GRACE_FLOOR * dt, gap * GRACE_RATE * dt);
+            graceDisplayed = Math.min(graceDisplayed + step, GRACE_TARGET);
+            document.getElementById('progressFill').style.width = graceDisplayed + '%';
+            graceRafId = requestAnimationFrame(graceTick);
+        }
+
+        async function startUninstallWithGrace() {
+            showView('progressView');
+            document.getElementById('progressText').innerText = '';
+            document.getElementById('progressFill').style.width = '0%';
+
+            graceDisplayed = 0;
+            graceCancelled = false;
+            graceLastTime = null;
+            const undoBtn = document.getElementById('undoBtn');
+            undoBtn.style.display = '';
+            undoBtn.disabled = false;
+
+            graceRafId = requestAnimationFrame(graceTick);
+            graceTimeoutId = setTimeout(async () => {
+                if (graceCancelled) return;
+                cancelAnimationFrame(graceRafId);
+                undoBtn.style.display = 'none';
+                document.getElementById('progressFill').style.width = GRACE_TARGET + '%';
+
+                remapProgressToTail = true;
+                const result = await pywebview.api.run_uninstall(false);
+                remapProgressToTail = false;
+                if (result.status === 'success') {
+                    document.getElementById('doneMessage').innerText = t('done_message', { name: appName });
+                    showView('doneView');
+                } else {
+                    document.getElementById('errorMessage').innerText = result.message || '';
+                    showView('errorView');
+                }
+            }, GRACE_DURATION_MS);
+        }
+
+        function onUndoDelete() {
+            graceCancelled = true;
+            if (graceRafId !== null) cancelAnimationFrame(graceRafId);
+            if (graceTimeoutId !== null) clearTimeout(graceTimeoutId);
+            document.getElementById('undoBtn').style.display = 'none';
+            document.getElementById('progressFill').style.width = '0%';
+            showView('confirmView');
         }
 
         async function onFinish() {

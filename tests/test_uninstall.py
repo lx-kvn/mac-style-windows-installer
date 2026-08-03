@@ -219,26 +219,40 @@ class TestUninstallerAPI(unittest.TestCase):
         self.assertEqual(result["status"], "error")
         self.assertIn("boom", result["message"])
 
-    def test_finish_and_exit_writes_log_and_schedules_delete(self):
+    def test_finish_and_exit_writes_log_schedules_delete_and_hard_exits(self):
+        """真實抓到的 bug（第一輪）：改用 os._exit() 而不是 window.destroy()
+        是因為 WinForms/WebView2 的訊息迴圈不保證乾脆返回，行程沒真的結束，
+        exe 檔案就一直被鎖住、自我刪除永遠不會成功。這裡驗證 os._exit(0)
+        真的被呼叫（mock 掉，不然測試行程自己會被砍掉）。
+
+        真實抓到的 bug（第二輪）：os._exit(0) 讓行程立刻終止沒錯，但
+        WebView2 是硬體加速合成畫面，行程終止後 Windows 桌面合成器不一定
+        馬上回收視窗殘留畫面，使用者會感覺「按下去卡住一兩秒才消失」。
+        修法：先呼叫 window.hide()（輕量的 WinForms Form.Hide()）讓視窗
+        立刻從畫面上消失，這裡驗證它在 os._exit() 之前被呼叫。"""
         api = self._make_api()
         api._safe_to_remove_whole_dir = True
         fake_window = mock.Mock()
         with mock.patch.object(un, "window", fake_window, create=True), \
              mock.patch("uninstall._write_uninstall_log") as mock_log, \
-             mock.patch("uninstall._schedule_self_delete") as mock_schedule:
+             mock.patch("uninstall._schedule_self_delete") as mock_schedule, \
+             mock.patch("uninstall.os._exit") as mock_exit:
             api.finish_and_exit()
+        fake_window.hide.assert_called_once()
         mock_log.assert_called_once()
         mock_schedule.assert_called_once_with(self.tmp_dir, sys.argv[0], True)
-        fake_window.destroy.assert_called_once()
+        mock_exit.assert_called_once_with(0)
 
-    def test_cancel_destroys_window_without_deleting(self):
+    def test_cancel_hard_exits_without_deleting(self):
         api = self._make_api()
         fake_window = mock.Mock()
         with mock.patch.object(un, "window", fake_window, create=True), \
-             mock.patch("uninstall._schedule_self_delete") as mock_schedule:
+             mock.patch("uninstall._schedule_self_delete") as mock_schedule, \
+             mock.patch("uninstall.os._exit") as mock_exit:
             api.cancel()
+        fake_window.hide.assert_called_once()
         mock_schedule.assert_not_called()
-        fake_window.destroy.assert_called_once()
+        mock_exit.assert_called_once_with(0)
 
 
 class TestLoadUninstallContext(unittest.TestCase):
@@ -291,6 +305,74 @@ class TestUpgradeSelfDeleteGating(unittest.TestCase):
 
     def test_self_delete_scheduled_when_not_upgrade(self):
         self.assertTrue(un._should_schedule_self_delete(is_upgrade=False))
+
+
+class TestScheduleSelfDelete(unittest.TestCase):
+    """真實抓到的 bug（第一輪）：_schedule_self_delete() 原本固定延遲約 1 秒
+    就砍一次、不管成不成功——這在純 console 程式上大致成立，但 uninstall.exe
+    現在內嵌了 WebView2 runtime，行程真正結束可能不只 1 秒，del/rmdir 失敗時
+    又被靜默吞掉、不會重試，導致解除安裝完成後常常沒有真的把自己刪掉。
+
+    真實抓到的 bug（第二輪）：`--noconsole` 編譯之後這支 exe 沒有主控台，
+    stdin/stdout/stderr 是無效控制代碼，subprocess.Popen(shell=True) 沒有
+    明確指定這三個會嘗試繼承、導致 CreateProcess 直接失敗、自我刪除完全
+    沒被排上去。修正：明確指定 stdin/stdout/stderr=DEVNULL。
+
+    真實抓到的 bug（第三輪，用「持有檔案控制代碼 5 秒後放開」實際重現才抓到）：
+    第一輪改用的 `for /l %i in (...) do (...)` 重試迴圈，實測發現 cmd.exe
+    把整個迴圈主體當一次性解析的靜態區塊，即使檔案的鎖真的在中途放開了，
+    同一個迴圈後續每一輪還是持續回報刪除失敗，20 次重試全部落空。改成寫
+    一個暫存 `.bat`，用傳統 `:retry`/`goto retry` 標籤式重試（每次 goto
+    跳回都是重新解析那一行開始的內容，不是包在同一組括號裡的靜態區塊），
+    實測鎖一放開就能立刻在下一輪重試成功。這裡直接讓 `_schedule_self_delete()`
+    真的把 .bat 寫到磁碟（tempfile.gettempdir()，只是暫存檔，測試結束後
+    清掉），檢查寫出來的內容而不是回去斷言真的執行整個 cmd 重試流程（那
+    需要模擬真實的檔案鎖定情境）。
+    """
+
+    def _run_and_capture_bat(self, current_dir, exe_path, safe_to_remove_whole_dir):
+        with mock.patch("uninstall.subprocess.Popen") as mock_popen:
+            un._schedule_self_delete(current_dir, exe_path, safe_to_remove_whole_dir)
+        mock_popen.assert_called_once()
+        cmd = mock_popen.call_args[0][0]
+        bat_path = cmd.strip('"')
+        self.assertTrue(os.path.exists(bat_path), f"預期 .bat 已寫入磁碟：{bat_path}")
+        with open(bat_path, "r", encoding="mbcs") as f:
+            content = f.read()
+        os.remove(bat_path)
+        return content, mock_popen
+
+    def test_retries_delete_and_rmdir_when_safe_to_remove_whole_dir(self):
+        content, mock_popen = self._run_and_capture_bat("C:\\App", "C:\\App\\uninstall.exe", True)
+        self.assertIn(":retry", content)
+        self.assertIn(":giveup", content)
+        self.assertIn('del /f /q "C:\\App\\uninstall.exe"', content)
+        self.assertIn('rmdir /s /q "C:\\App"', content)
+        self.assertIn('del /f /q "%~f0"', content)
+        self.assertTrue(mock_popen.call_args.kwargs.get("shell"))
+
+    def test_retries_delete_without_rmdir_when_not_safe(self):
+        content, _ = self._run_and_capture_bat("C:\\App", "C:\\App\\uninstall.exe", False)
+        self.assertIn('del /f /q "C:\\App\\uninstall.exe"', content)
+        self.assertNotIn("rmdir", content)
+
+    def test_redirects_stdio_to_devnull_to_avoid_noconsole_invalid_handle(self):
+        _, mock_popen = self._run_and_capture_bat("C:\\App", "C:\\App\\uninstall.exe", True)
+        kwargs = mock_popen.call_args.kwargs
+        self.assertEqual(kwargs.get("stdin"), un.subprocess.DEVNULL)
+        self.assertEqual(kwargs.get("stdout"), un.subprocess.DEVNULL)
+        self.assertEqual(kwargs.get("stderr"), un.subprocess.DEVNULL)
+
+    def test_popen_failure_is_swallowed(self):
+        try:
+            with mock.patch("uninstall.subprocess.Popen", side_effect=OSError("boom")):
+                un._schedule_self_delete("C:\\App", "C:\\App\\uninstall.exe", True)  # 不應該拋出
+        finally:
+            bat_path = os.path.join(
+                tempfile.gettempdir(), f"_mswi_uninstall_cleanup_{os.getpid()}.bat"
+            )
+            if os.path.exists(bat_path):
+                os.remove(bat_path)
 
 
 class TestRemoveFromPath(unittest.TestCase):

@@ -480,26 +480,87 @@ def _schedule_self_delete(current_dir, exe_path, safe_to_remove_whole_dir):
     清空了（safe_to_remove_whole_dir）才會連資料夾一起 rmdir；還有剩東西
     的話，只刪自己，資料夾跟裡面剩下的內容保留給使用者。互動/靜默兩條
     路徑共用。
+
+    真實抓到的 bug（第一輪）：原本只固定延遲約 1 秒（`ping -n 2`）就砍一次、
+    不管成不成功——這個假設在純 console 程式上大致成立，但現在這支 exe 內嵌了
+    WebView2 runtime，`window.destroy()` 之後行程真正結束（含 WebView2
+    自己的輔助行程收尾）可能不只 1 秒，`del`/`rmdir` 失敗時又被 `&` 串接
+    靜默吞掉、不會重試，導致解除安裝完成後常常沒有真的把自己刪掉。現在
+    改成反覆重試 `del` 直到成功（最多 20 次、每次間隔約 1 秒，足夠涵蓋
+    WebView2 關閉的合理延遲，又不會無限期占用背景行程），確認檔案真的
+    刪除之後才視情況接著 `rmdir` 整個資料夾。
+
+    真實抓到的 bug（第二輪，更關鍵）：`builder.py` 這次幫 `uninstall.exe`
+    加上了 `--noconsole`（見規格文件 §8.28），這支 exe 現在完全沒有主控台，
+    `GetStdHandle()` 對 stdin/stdout/stderr 回傳的是無效控制代碼。
+    `subprocess.Popen(..., shell=True)` 如果沒有明確指定
+    stdin/stdout/stderr，預設會嘗試繼承父行程的這幾個控制代碼——在有主控台
+    的舊版 console 程式上這樣沒問題，但在 `--noconsole` 的行程裡繼承無效
+    控制代碼會讓 `CreateProcess` 直接失敗，`Popen()` 拋出例外
+    （`OSError: [WinError 6] The handle is invalid` 之類），整個自我刪除
+    背景指令根本沒有真的被排上去。這個檔案裡其他呼叫子行程的地方
+    （`is_process_running()`/`_process_image_name()`/`_kill_processes()`）
+    都明確指定了 `stdout`/`stderr`（用 `subprocess.check_output()` 或
+    明確傳 `stdout=subprocess.DEVNULL`），唯獨這裡漏掉，現在補上跟它們一致
+    的 `stdin=stdout=stderr=subprocess.DEVNULL`。另外外層包一層
+    `try/except`：這一步本來就是 best-effort（跟這個檔案其他系統呼叫函式
+    一致的設計），排程失敗也不該讓呼叫端（`finish_and_exit()`）沒辦法把
+    視窗關掉。
+
+    真實抓到的 bug（第三輪，實測用「持有檔案控制代碼 5 秒後放開」重現才抓到）：
+    第一輪的重試迴圈是用 `for /l %i in (1,1,20) do (del ... & if not exist
+    (...) & ping ...)` 這種「整個迴圈主體包在一組括號裡」的寫法——cmd.exe
+    對這種括號內的複合指令是**一次性解析、整段當成同一個靜態區塊重複執行**
+    （用 `echo %time%` 實測可以看到每一輪印出的時間完全相同，代表 `%` 變數
+    展開只在解析當下做一次，不是每輪重新展開），而 `if not exist` 這個條件
+    雖然不是 `%` 變數、理論上應該每輪重新求值，但實測發現只要檔案曾經在
+    某一輪判定為「還被鎖住」，之後就算鎖真的釋放了，同一個 `for /l` 迴圈
+    後續每一輪的 `del`/`if not exist` 依然持續回報失敗，直到 20 次全部
+    跑完、迴圈結束，檔案跟資料夾整個沒被刪掉——實測完整重現了使用者回報
+    「這次真的等超過 20 秒也一樣沒刪掉」的狀況。改成寫一個暫存 `.bat` 檔案，
+    用傳統的 `:retry` / `goto retry` 標籤式重試（不是包在同一組括號裡的
+    `for` 迴圈主體，而是每次 `goto` 跳回 `:retry` 都是重新從那一行開始
+    解析執行），同樣的「持有鎖 5 秒後放開」情境下，實測一放開鎖就立刻在
+    下一輪重試成功、正常刪除——這才是真正可靠的寫法。`.bat` 檔案本身在
+    最後一行呼叫 `del /f /q "%~f0"` 自我刪除（cmd.exe 逐行讀取批次檔，
+    執行到刪除自己那一行時，前面的內容早就讀進記憶體了，這是刪除批次檔
+    的標準手法，這裡只是拿來清掉這個暫時產生的 `.bat`，跟安裝目錄本身的
+    刪除邏輯無關）。
     """
     if safe_to_remove_whole_dir:
-        cmd_command = (
-            f'cd /d "{current_dir}" && '
-            f'ping 127.0.0.1 -n 2 > nul & '
-            f'del /f /q "{exe_path}" & '
-            f'cd .. & '
-            f'rmdir /s /q "{current_dir}"'
-        )
+        cleanup_line = f'cd .. & rmdir /s /q "{current_dir}"'
     else:
-        cmd_command = (
-            f'cd /d "{current_dir}" && '
-            f'ping 127.0.0.1 -n 2 > nul & '
-            f'del /f /q "{exe_path}"'
-        )
-    subprocess.Popen(
-        cmd_command,
-        shell=True,
-        creationflags=subprocess.CREATE_NO_WINDOW,
+        cleanup_line = ""
+    bat_content = (
+        "@echo off\r\n"
+        f'cd /d "{current_dir}"\r\n'
+        "set retries=0\r\n"
+        ":retry\r\n"
+        f'del /f /q "{exe_path}" >nul 2>&1\r\n'
+        f'if not exist "{exe_path}" goto success\r\n'
+        "set /a retries=%retries%+1\r\n"
+        "if %retries% geq 20 goto giveup\r\n"
+        "ping 127.0.0.1 -n 2 >nul\r\n"
+        "goto retry\r\n"
+        ":success\r\n"
+        f"{cleanup_line}\r\n"
+        ":giveup\r\n"
+        'del /f /q "%~f0"\r\n'
     )
+    bat_path = os.path.join(tempfile.gettempdir(), f"_mswi_uninstall_cleanup_{os.getpid()}.bat")
+    try:
+        with open(bat_path, "w", encoding="mbcs") as f:
+            f.write(bat_content)
+        subprocess.Popen(
+            f'"{bat_path}"',
+            shell=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
 
 
 def _perform_uninstall_steps(ctx, locking_processes, kill_locking_processes, log, report_progress=None):
@@ -746,18 +807,55 @@ class UninstallerAPI:
             return {"status": "error", "message": str(e)}
 
     def finish_and_exit(self):
-        """使用者在完成畫面按下「完成」：寫 log、排自我刪除、關閉視窗。"""
+        """使用者在完成畫面按下「完成」：寫 log、排自我刪除，然後立刻硬結束
+        行程（`os._exit()`，不是關閉視窗再等它自然結束）。
+
+        真實抓到的 bug：原本是呼叫 `window.destroy()` 請 WinForms 關閉視窗，
+        指望 `webview.start()` 內部的 `Application.Run()` 訊息迴圈自己返回、
+        行程自然結束。舊版（純 console，沒有 GUI 框架、沒有 WebView2）
+        跑完 `main()` 就是行程結束，這個假設在那個版本上成立；但這支 exe
+        現在內嵌了 WebView2 runtime，`Application.Run()`/WebView2 瀏覽器
+        行程的收尾不保證會在合理時間內真的返回——只要這個行程還活著，
+        它自己的 exe 檔案就會一直被鎖住，背景那個自我刪除的重試迴圈
+        （見 `_schedule_self_delete()`）再怎麼重試都不會成功，這正是解除
+        安裝「完成」了卻永遠刪不掉自己的根本原因。修法：background 自我
+        刪除指令一排上去（這一步不依賴視窗或 GUI 框架，獨立行程），就直接
+        `os._exit(0)` 讓整個行程在作業系統層級立刻終止，不等待、也不
+        依賴任何框架的優雅關閉流程。
+
+        真實抓到的 bug（第二輪）：改成 `os._exit(0)` 之後，行程本身確實立刻
+        終止，但使用者實際感受到的是「按下按鈕後畫面卡住一兩秒才消失」——
+        WebView2 是硬體加速合成的畫面，行程被終止的當下，Windows 桌面合成
+        器（DWM）不一定會立刻回收那個視窗殘留的最後一幀畫面，視覺上就會
+        像是「沒反應、過一陣子才突然消失」，容易讓使用者誤以為程式卡住。
+        修法：先呼叫 `window.hide()`（WinForms 的 `Form.Hide()`，單純把視窗
+        設成不可見，不牽涉 WebView2 收尾，執行很快）讓視窗立刻從畫面上消失、
+        給使用者「按下去馬上有反應」的回饋，再繼續原本的收尾動作（寫 log、
+        排自我刪除）跟 `os._exit(0)`——即使行程真正終止還要花一兩秒，使用者
+        已經看不到那個視窗了。
+        """
+        global window
+        try:
+            window.hide()
+        except Exception:
+            pass
         _write_uninstall_log(self._log_lines, self.app_name, sys.argv)
         if _should_schedule_self_delete(_is_upgrade_call(sys.argv)):
             _schedule_self_delete(self.current_dir, sys.argv[0], self._safe_to_remove_whole_dir)
-        global window
-        window.destroy()
+        os._exit(0)
 
     def cancel(self):
-        """使用者在確認畫面按下「取消」，或在「主程式正在執行中」畫面按下
-        「了解」：單純關閉視窗，不做任何刪除動作。"""
+        """使用者在確認畫面按下 X 關閉，或在「主程式正在執行中」畫面按下
+        「了解」：不做任何刪除動作。跟 finish_and_exit() 一樣，先
+        `window.hide()` 讓視窗立刻消失，再 `os._exit(0)` 硬結束行程，理由
+        同 finish_and_exit() 的說明（避免 WebView2 畫面收尾的視覺延遲讓
+        使用者誤以為卡住）。"""
         global window
-        window.destroy()
+        try:
+            window.hide()
+        except Exception:
+            pass
+        os._exit(0)
 
 
 def main():
@@ -779,12 +877,25 @@ def main():
     if silent:
         sys.exit(run_silent_uninstall(ctx, is_upgrade, sys.argv))
 
+    # 讓 Windows 在非 100% 縮放比例下不要把整個視窗畫面當點陣圖拉伸，避免
+    # 版面尺寸跟視窗實際像素尺寸對不上（跟 installer_core.py 同一個坑，
+    # 這裡沿用完全一樣的宣告方式）。
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # PROCESS_SYSTEM_DPI_AWARE
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
     global window
     api = UninstallerAPI(ctx)
     html_path = get_resource_path(os.path.join("ui", "uninstall.html"))
+    # 視窗尺寸/版面直接沿用 installer_core.py 主安裝畫面的規格（見規格文件
+    # §8.29），不要為解除安裝助手另外發明一套尺寸標準。
     window = webview.create_window(
         title="解除安裝", url=html_path, js_api=api,
-        width=420, height=280, resizable=False, frameless=True, easy_drag=False,
+        width=600, height=420, resizable=False, frameless=True, easy_drag=False,
     )
     webview.start(debug=False)
     sys.exit(0)

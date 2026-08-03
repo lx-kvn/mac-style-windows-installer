@@ -96,7 +96,7 @@ Full documentation: see [`使用說明書.md`](使用說明書.md) (Traditional 
 
 ### Roadmap
 
-- [ ] Code signing for `InstallerBuilder.exe`, via [SignPath Foundation](https://signpath.io/solutions/open-source-community)'s free open-source program (requires this repo plus a GitHub Actions build pipeline — installers *produced* by the tool would still be unsigned, since they're compiled locally rather than through this repo's CI)
+- [ ] Code signing for `InstallerBuilder.exe`, via [SignPath Foundation](https://signpath.org/)'s free open-source program (requires this repo plus a GitHub Actions build pipeline — installers *produced* by the tool would still be unsigned, since they're compiled locally rather than through this repo's CI)
 - [ ] Multi-language UI — **not started, feasibility still under consideration.** Low priority unless there's real demand from non-Chinese-speaking users
 - [ ] An optional stronger hash for integrity verification (currently CRC32; a cryptographic hash could be offered for higher-assurance use cases)
 - [ ] A path to signing the *output* installers too (would mean moving the build step into CI — a bigger architectural change)
@@ -198,7 +198,7 @@ python build_config_tool.py
 
 ### 未來方向
 
-- [ ] 幫 `InstallerBuilder.exe` 透過 [SignPath Foundation](https://signpath.io/solutions/open-source-community) 的免費開源方案做數位簽章（需要這個 repo 本身加上 GitHub Actions 建置流程；注意打包工具**產出**的安裝檔還是簽不到，因為那些是在使用者本機編譯出來的，不經過這個 repo 的 CI）
+- [ ] 幫 `InstallerBuilder.exe` 透過 [SignPath Foundation](https://signpath.org/) 的免費開源方案做數位簽章（需要這個 repo 本身加上 GitHub Actions 建置流程；注意打包工具**產出**的安裝檔還是簽不到，因為那些是在使用者本機編譯出來的，不經過這個 repo 的 CI）
 - [ ] 多語言介面——**還沒開始，可行性仍在評估。** 除非真的有非中文使用者提出需求，否則優先度偏低
 - [ ] 完整性驗證的雜湊演算法升級選項（目前是 CRC32，未來可以考慮為更高安全需求的情境提供更強的密碼學雜湊）
 - [ ] 讓**輸出的安裝檔**也能被簽章（代表要把編譯流程搬進 CI，是比較大的架構調整）
