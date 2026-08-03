@@ -1,0 +1,104 @@
+name: Build
+
+# 只做「建置」這件事：編出 GUI/CLI/Setup 三支 exe 並上傳成 workflow 附件，
+# 不建立 GitHub Release、不簽章（簽章要等 SignPath 那邊申請好、額外接一段
+# 才會加進來）。這是把 /released skill 目前完全在本機手動跑的建置流程，
+# 先搬進這裡確認能自動重現一次，之後 SignPath 才有「這是從這個 repo 的
+# CI 建置出來的」這個公開紀錄可以驗證。
+#
+# 觸發時機：
+# - push 一個 v* 開頭的 tag（跟 /released skill 步驟 10 打的 tag 格式一致）
+# - 或手動觸發（GitHub 網頁 Actions 頁籤按 "Run workflow"），方便在還沒有
+#   真的要發布新版本時，先測試這條自動化流程本身能不能順利跑完。
+#
+# 見 CLAUDE.md：v* tag 只能透過 /released skill 打，這裡只是「反應」tag
+# 被推上去這件事，不會自己產生 tag。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本號（不含 v 前綴，例如 0.12.0）。手動觸發時必填；由 tag 觸發時會自動從 tag 名稱解析，不需要填。"
+        required: false
+        default: ""
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller pywebview
+
+      - name: 決定版本號
+        id: version
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "push") {
+            # tag 格式是 v0.12.0，去掉開頭的 v 才是 builder_cli.py 需要的版本號
+            $version = "${{ github.ref_name }}" -replace '^v', ''
+          } else {
+            $version = "${{ github.event.inputs.version }}"
+            if ([string]::IsNullOrWhiteSpace($version)) {
+              throw "手動觸發時必須填 version 這個輸入欄位。"
+            }
+          }
+          echo "value=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "本次建置版本號：$version"
+
+      - name: 跑測試套件
+        run: python -m unittest discover -s tests -p "test_*.py"
+
+      - name: 編譯打包工具 GUI + CLI
+        run: |
+          python build_config_tool.py --cli --version ${{ steps.version.outputs.value }} --icon branding/icon.ico
+
+      - name: 準備暫存資料夾（不能直接用 dist/，builder_cli.py pack 會清空它）
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path stage | Out-Null
+          Copy-Item "dist/mac-style-windows-installer_GUI_v${{ steps.version.outputs.value }}.exe" "stage/mswi-gui.exe"
+          Copy-Item "dist/mac-style-windows-installer_CLI_v${{ steps.version.outputs.value }}.exe" "stage/mswi-cli.exe"
+
+      - name: 打包成 Setup.exe
+        run: >
+          python builder_cli.py pack
+          --app-dir stage
+          --png-icon branding/icon.png
+          --ico-icon branding/icon.ico
+          --app-name "mac-style-windows-installer"
+          --version ${{ steps.version.outputs.value }}
+          --publisher "lx.k"
+          --exe-name "Setup_mac-style-windows-installer_v${{ steps.version.outputs.value }}"
+          --main-exe "mswi-gui.exe"
+          --add-to-path
+          --path-target-exe "mswi-cli.exe"
+          --local-appdata-files "mswi-cli.exe"
+
+      - name: 還原 GUI/CLI exe（builder_cli.py pack 清空過 dist/，暫存資料夾裡的是打包用的中繼檔，不是最終產物）
+        shell: pwsh
+        run: |
+          Copy-Item "stage/mswi-gui.exe" "dist/mac-style-windows-installer_GUI_v${{ steps.version.outputs.value }}.exe"
+          Copy-Item "stage/mswi-cli.exe" "dist/mac-style-windows-installer_CLI_v${{ steps.version.outputs.value }}.exe"
+
+      - name: 上傳建置產物
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-style-windows-installer-v${{ steps.version.outputs.value }}
+          path: |
+            dist/mac-style-windows-installer_GUI_v${{ steps.version.outputs.value }}.exe
+            dist/mac-style-windows-installer_CLI_v${{ steps.version.outputs.value }}.exe
+            dist/Setup_mac-style-windows-installer_v${{ steps.version.outputs.value }}.exe
+          if-no-files-found: error
