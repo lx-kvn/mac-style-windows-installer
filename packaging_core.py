@@ -36,7 +36,7 @@ ENTRY_SCRIPTS = ["installer_core.py", "uninstall.py"]
 SHARED_DEEP_MODULES = [
     "window_drag.py", "disk_space.py", "file_assoc.py", "lang_detect.py",
     "restart_manager.py", "dependency_defs.py", "install_scope.py",
-    "self_delete.py", "system_entries.py",
+    "self_delete.py", "system_entries.py", "explorer_lock_release.py",
 ]
 
 

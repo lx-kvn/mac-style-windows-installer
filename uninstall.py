@@ -100,6 +100,7 @@ import restart_manager
 import lang_detect
 import self_delete
 import system_entries
+import explorer_lock_release
 from window_drag import WindowDragController
 
 # 跟 installer_core.py 的介面語言支援範圍一致：解除安裝助手的畫面 chrome
@@ -149,66 +150,6 @@ def remove_registry_entry(app_name, no_admin_install=False):
 
 def remove_shortcut(app_name, desktop=False, no_admin_install=False):
     return system_entries.remove_shortcut(app_name, desktop, no_admin_install, registry=winreg)
-
-
-def _process_image_name(pid):
-    """回傳 pid 對應的執行檔檔名（例如 "explorer.exe"），查不到回傳空字串。
-
-    Restart Manager（見 restart_manager.find_locking_processes()）回傳的
-    是使用者友善名稱（explorer.exe 常會顯示成「Windows 檔案總管」之類的
-    localized 字串），不能拿來判斷「這是不是 explorer.exe」，要另外用
-    pid 查真正的執行檔檔名。
-    """
-    try:
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        output = subprocess.check_output(
-            f'tasklist /FI "PID eq {pid}" /NH /FO CSV',
-            shell=True, text=True, stderr=subprocess.DEVNULL, creationflags=creationflags,
-        )
-        first_line = output.strip().splitlines()[0] if output.strip() else ""
-        return first_line.split(",")[0].strip('"')
-    except Exception:
-        return ""
-
-
-def _kill_processes(processes):
-    """逐一 taskkill /f /pid 結束 processes（通常來自
-    restart_manager.find_locking_processes()，[(pid, friendly_name), ...]，
-    真正是誰鎖住就結束誰，不是無差別地假設一定是 explorer.exe）。
-
-    真實情境：應用程式如果註冊了 Windows 檔案總管殼層擴充功能（Shell
-    Extension DLL，例如右鍵選單擴充），只要 explorer.exe 還活著就會把這支
-    DLL 常駐載入在自己的記憶體裡，刪除/覆寫會被擋下來——這跟系統管理員
-    權限完全無關，重試也沒用，只能真的把持有它的處理程序關掉。舊做法是
-    寫死 taskkill /im explorer.exe，只涵蓋這一種情境；改用
-    restart_manager（包 Windows Restart Manager API）實際偵測，涵蓋任何
-    真正鎖住這些檔案的進程，不只是 explorer.exe。這是打包時永遠內建開啟
-    的能力（見 install_manifest.json 的 restart_explorer_on_update），
-    最終要不要真的結束偵測到的進程還是由使用者在確認對話框裡決定。
-
-    回傳被結束的進程清單 [(pid, image_name), ...]（image_name 用
-    _process_image_name() 另外查真正的執行檔檔名，不是 Restart Manager
-    回傳的使用者友善名稱），供呼叫端決定後續要不要重啟：目前只有
-    explorer.exe 值得自動重啟（殺掉它會讓使用者的桌面/工作列消失），其他
-    被偵測到鎖定檔案的進程通常是使用者自己的應用程式（或其他跟這次解除
-    安裝無關的第三方程式），不該自動幫使用者重新開啟。
-    """
-    killed = []
-    for pid, _friendly_name in processes:
-        image_name = _process_image_name(pid)
-        try:
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            subprocess.run(
-                ["taskkill", "/f", "/pid", str(pid)],
-                creationflags=creationflags, timeout=10,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            killed.append((pid, image_name))
-        except Exception:
-            pass
-    if killed:
-        time.sleep(1)  # 給處理程序終止、控制代碼釋放一點緩衝時間
-    return killed
 
 
 def _wants_lock_release(manifest, argv):
@@ -460,64 +401,77 @@ def _perform_uninstall_steps(ctx, locking_processes, kill_locking_processes, log
         base_dir = local_appdata_dir if (local_appdata_dir and is_local_appdata_file(rel)) else current_dir
         return os.path.join(base_dir, rel)
 
-    if kill_locking_processes and locking_processes:
-        log("正在結束鎖定安裝檔案的程式，以釋放檔案（例如殼層擴充功能 DLL）...")
-        _kill_processes(locking_processes)
-
-    if files_to_remove:
-        # 有清單：只刪清單內記錄的檔案，使用者事後自己產生的檔案不會被誤刪。
-        # 部分檔案打包時可能被指定落地到 %LOCALAPPDATA%\Programs\<folder_name>
-        # （見 installer_core.py 的 local_appdata_files），要從那邊刪，
-        # 不是安裝目錄（current_dir）。
-        for rel in files_to_remove:
-            if os.path.basename(rel) == self_name:
-                continue  # 自己交給下面的自我刪除流程處理，執行中無法自刪
-            item_path = _target_path(rel)
-            try:
-                if os.path.exists(item_path):
-                    os.remove(item_path)
-            except Exception as e:
-                log(f"[警告] 無法刪除 {rel}: {e}")
-
-        # 清掉刪空的子目錄（安裝目錄與別位的 local_appdata 目錄分開清）
-        for root, dirs, files in os.walk(current_dir, topdown=False):
-            for d in dirs:
-                dpath = os.path.join(root, d)
-                try:
-                    if not os.listdir(dpath):
-                        os.rmdir(dpath)
-                except Exception:
-                    pass
-        if local_appdata_dir:
-            _cleanup_empty_dirs(local_appdata_dir)
-        log(f"已依安裝清單刪除 {len(files_to_remove)} 個檔案")
-
-        # 清單刪完之後，看看資料夾裡除了自己還剩什麼——這才是真正決定能不能
-        # 整個 rmdir 的依據，不能像原本那樣不管三七二十一直接砍。
-        remaining = [item for item in os.listdir(current_dir) if item != self_name]
-        if remaining:
-            log(
-                f"安裝目錄內還有清單之外的 {len(remaining)} 個項目（可能是使用者自行產生的資料），"
-                f"保留資料夾，只刪除解除安裝程式本身：{remaining}"
+    # 實際的釋放邏輯（先只關閉瀏覽 current_dir 的檔案總管視窗，不夠才暫停
+    # AutoRestartShell、強制關殼層）收在 explorer_lock_release.py。
+    # forced_down_state 非 None 代表這次有強制關過殼層，不管接下來的刪除
+    # 步驟成功、失敗、還是中途拋出未預期例外，都要在 finally 補做「重啟
+    # explorer.exe / 恢復 AutoRestartShell」，不能讓使用者被留在殼層沒被
+    # 復原的狀態。
+    forced_down_state = None
+    try:
+        if kill_locking_processes and locking_processes:
+            log("正在結束鎖定安裝檔案的程式，以釋放檔案（例如殼層擴充功能 DLL）...")
+            processes = [{"pid": pid, "name": name} for pid, name in locking_processes]
+            forced_down_state = explorer_lock_release.release_locking_processes(
+                processes, path=current_dir, log=log,
             )
-            safe_to_remove_whole_dir = False
+
+        if files_to_remove:
+            # 有清單：只刪清單內記錄的檔案，使用者事後自己產生的檔案不會被誤刪。
+            # 部分檔案打包時可能被指定落地到 %LOCALAPPDATA%\Programs\<folder_name>
+            # （見 installer_core.py 的 local_appdata_files），要從那邊刪，
+            # 不是安裝目錄（current_dir）。
+            for rel in files_to_remove:
+                if os.path.basename(rel) == self_name:
+                    continue  # 自己交給下面的自我刪除流程處理，執行中無法自刪
+                item_path = _target_path(rel)
+                try:
+                    if os.path.exists(item_path):
+                        os.remove(item_path)
+                except Exception as e:
+                    log(f"[警告] 無法刪除 {rel}: {e}")
+
+            # 清掉刪空的子目錄（安裝目錄與別位的 local_appdata 目錄分開清）
+            for root, dirs, files in os.walk(current_dir, topdown=False):
+                for d in dirs:
+                    dpath = os.path.join(root, d)
+                    try:
+                        if not os.listdir(dpath):
+                            os.rmdir(dpath)
+                    except Exception:
+                        pass
+            if local_appdata_dir:
+                _cleanup_empty_dirs(local_appdata_dir)
+            log(f"已依安裝清單刪除 {len(files_to_remove)} 個檔案")
+
+            # 清單刪完之後，看看資料夾裡除了自己還剩什麼——這才是真正決定能不能
+            # 整個 rmdir 的依據，不能像原本那樣不管三七二十一直接砍。
+            remaining = [item for item in os.listdir(current_dir) if item != self_name]
+            if remaining:
+                log(
+                    f"安裝目錄內還有清單之外的 {len(remaining)} 個項目（可能是使用者自行產生的資料），"
+                    f"保留資料夾，只刪除解除安裝程式本身：{remaining}"
+                )
+                safe_to_remove_whole_dir = False
+            else:
+                safe_to_remove_whole_dir = True
         else:
+            log("[警告] 找不到安裝清單，改為整個安裝目錄清除")
+            for item in os.listdir(current_dir):
+                item_path = os.path.join(current_dir, item)
+                try:
+                    if item == self_name:
+                        continue
+                    if os.path.isdir(item_path):
+                        shutil.rmtree(item_path)
+                    else:
+                        os.remove(item_path)
+                except Exception as e:
+                    log(f"[警告] 無法刪除 {item}: {e}")
+            # 找不到清單這個分支，設計上本來就是要整個清空，維持原行為
             safe_to_remove_whole_dir = True
-    else:
-        log("[警告] 找不到安裝清單，改為整個安裝目錄清除")
-        for item in os.listdir(current_dir):
-            item_path = os.path.join(current_dir, item)
-            try:
-                if item == self_name:
-                    continue
-                if os.path.isdir(item_path):
-                    shutil.rmtree(item_path)
-                else:
-                    os.remove(item_path)
-            except Exception as e:
-                log(f"[警告] 無法刪除 {item}: {e}")
-        # 找不到清單這個分支，設計上本來就是要整個清空，維持原行為
-        safe_to_remove_whole_dir = True
+    finally:
+        explorer_lock_release.restore_after_lock_release(forced_down_state)
 
     progress(95, "正在寫入解除安裝紀錄...")
     return safe_to_remove_whole_dir

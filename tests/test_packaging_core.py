@@ -102,6 +102,8 @@ class TestEnsureWorkspaceFiles(unittest.TestCase):
             f.write("# NEW self_delete content")
         with open(os.path.join(self.embedded_dir, "system_entries.py"), "w") as f:
             f.write("# NEW system_entries content")
+        with open(os.path.join(self.embedded_dir, "explorer_lock_release.py"), "w") as f:
+            f.write("# NEW explorer_lock_release content")
         os.makedirs(os.path.join(self.embedded_dir, "ui"))
         with open(os.path.join(self.embedded_dir, "ui", "index.html"), "w") as f:
             f.write("<!-- NEW index.html -->")

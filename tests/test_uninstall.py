@@ -25,59 +25,86 @@ from _fakes import FakeWinReg
 import uninstall as un
 
 
-class TestExplorerRestartHelpers(unittest.TestCase):
-    """_process_image_name() / _kill_processes()：更新覆蓋安裝或解除安裝時
-    用來釋放被鎖住的檔案。main() 本身涉及 MessageBoxW/is_admin()/sys.argv
-    等 GUI/系統層面的東西，這個檔案原本就沒有整合測試 main()，這裡只測
-    可以獨立驗證的這幾個 best-effort 函式本身。
+class TestPerformUninstallStepsLockRelease(unittest.TestCase):
+    """_perform_uninstall_steps()：需要結束鎖定檔案的程式時，實際的釋放
+    邏輯（先關瀏覽視窗、不夠才暫停 AutoRestartShell 強制關殼層）收在
+    explorer_lock_release.py，這裡只驗證整合面——有沒有把 current_dir
+    當 path 帶進去、有沒有在檔案刪除步驟做完（不管成功或失敗）之後補呼叫
+    restore_after_lock_release()。
 
     真實抓到的 bug：舊版 _kill_explorer() 寫死「一定是 explorer.exe 鎖住」，
-    只涵蓋殼層擴充功能這一種情境。現在改用 restart_manager（包 Windows
-    Restart Manager API）實際偵測是哪些進程鎖住了要刪除的檔案，
-    _kill_processes() 逐一結束真正的鎖定者（不是無差別 taskkill /im
-    explorer.exe）。
+    只涵蓋殼層擴充功能這一種情境；後來改用 restart_manager 實際偵測，但
+    砍 explorer.exe 這個殼層行程本身還是會讓桌面/工作列全部重啟，而且
+    Windows 的 AutoRestartShell 機制會讓它幾乎瞬間自動復活、在檔案操作
+    完成前搶著重新鎖住同一個檔案——這是 explorer_lock_release.py 現在
+    處理的問題，見該模組的說明。"""
 
-    真實抓到的另一個問題：原本結束掉的進程裡如果有 explorer.exe，會另外
-    呼叫 subprocess.Popen(["explorer.exe"]) 主動重啟它。實測發現這個呼叫
-    會跳出一個瀏覽視窗——只有『目前沒有任何 explorer.exe 在跑』時，執行
-    explorer.exe 才會直接成為桌面/工作列（不開視窗）；跳出視窗代表呼叫
-    當下 shell 其實已經被復原了，這一步已經是多餘、甚至會多跳出一個
-    使用者沒有要求的視窗，所以拿掉了這個明確重啟的步驟。"""
+    def _make_ctx(self, current_dir, manifest=None):
+        return {
+            "app_name": "MyApp",
+            "manifest": manifest or {},
+            "current_dir": current_dir,
+            "no_admin_install": False,
+        }
 
-    def test_process_image_name_parses_tasklist_csv_output(self):
-        fake_output = '"explorer.exe","1234","Console","1","12,345 K"\r\n'
-        with mock.patch("uninstall.subprocess.check_output", return_value=fake_output):
-            result = un._process_image_name(1234)
-        self.assertEqual(result, "explorer.exe")
+    def setUp(self):
+        self.current_dir = tempfile.mkdtemp()
+        self.self_name = "uninstall.exe"
+        with open(os.path.join(self.current_dir, self.self_name), "w") as f:
+            f.write("fake")
+        self.argv_patcher = mock.patch.object(un.sys, "argv", [os.path.join(self.current_dir, self.self_name)])
+        self.argv_patcher.start()
 
-    def test_process_image_name_swallows_failure(self):
-        with mock.patch("uninstall.subprocess.check_output", side_effect=RuntimeError("模擬失敗")):
-            result = un._process_image_name(1234)
-        self.assertEqual(result, "")
+    def tearDown(self):
+        self.argv_patcher.stop()
+        shutil.rmtree(self.current_dir, ignore_errors=True)
 
-    def test_kill_processes_taskkills_each_pid_and_returns_image_names(self):
-        with mock.patch("uninstall.subprocess.run") as mock_run, \
-             mock.patch("uninstall.subprocess.check_output", return_value='"explorer.exe","111",""\r\n'), \
-             mock.patch("uninstall.time.sleep"):
-            killed = un._kill_processes([(111, "Windows 檔案總管")])
-        args, kwargs = mock_run.call_args
-        self.assertEqual(args[0], ["taskkill", "/f", "/pid", "111"])
-        self.assertEqual(killed, [(111, "explorer.exe")])
+    def test_passes_current_dir_as_path_and_restores_after_success(self):
+        ctx = self._make_ctx(self.current_dir, manifest={"files": []})
+        locking_processes = [(111, "Windows 檔案總管")]
+        with mock.patch(
+            "uninstall.explorer_lock_release.release_locking_processes", return_value=None,
+        ) as mock_release, mock.patch(
+            "uninstall.explorer_lock_release.restore_after_lock_release",
+        ) as mock_restore:
+            un._perform_uninstall_steps(ctx, locking_processes, True, log=lambda m: None)
 
-    def test_kill_processes_swallows_per_pid_failure_and_continues(self):
-        with mock.patch("uninstall.subprocess.run", side_effect=RuntimeError("模擬失敗")), \
-             mock.patch("uninstall.subprocess.check_output", return_value=""), \
-             mock.patch("uninstall.time.sleep"):
-            killed = un._kill_processes([(111, "app")])  # 不應該拋例外
-        self.assertEqual(killed, [])
+        args, kwargs = mock_release.call_args
+        self.assertEqual(args, ([{"pid": 111, "name": "Windows 檔案總管"}],))
+        self.assertEqual(kwargs["path"], self.current_dir)
+        mock_restore.assert_called_once_with(None)
 
-    def test_kill_processes_empty_list_does_not_sleep(self):
-        with mock.patch("uninstall.subprocess.run") as mock_run, \
-             mock.patch("uninstall.time.sleep") as mock_sleep:
-            killed = un._kill_processes([])
-        mock_run.assert_not_called()
-        mock_sleep.assert_not_called()
-        self.assertEqual(killed, [])
+    def test_does_not_call_release_when_kill_not_requested(self):
+        ctx = self._make_ctx(self.current_dir, manifest={"files": []})
+        with mock.patch(
+            "uninstall.explorer_lock_release.release_locking_processes",
+        ) as mock_release, mock.patch(
+            "uninstall.explorer_lock_release.restore_after_lock_release",
+        ) as mock_restore:
+            un._perform_uninstall_steps(ctx, [], True, log=lambda m: None)
+
+        mock_release.assert_not_called()
+        mock_restore.assert_called_once_with(None)
+
+    def test_restores_even_when_delete_step_raises(self):
+        """刪除清單裡逐一刪檔那段本身有 try/except，個別檔案刪除失敗不會
+        往外拋（只記警告 log）；這裡改用清單刪完後「看資料夾裡還剩什麼」
+        那一步（沒有包 try/except）製造一個真的會往外拋的未預期例外，
+        驗證 finally 還是會補呼叫 restore_after_lock_release()。"""
+        ctx = self._make_ctx(self.current_dir, manifest={"files": []})
+        locking_processes = [(222, "Windows 檔案總管")]
+        fake_state = {"previous_auto_restart_shell": "1"}
+        with mock.patch(
+            "uninstall.explorer_lock_release.release_locking_processes", return_value=fake_state,
+        ), mock.patch(
+            "uninstall.explorer_lock_release.restore_after_lock_release",
+        ) as mock_restore, mock.patch(
+            "uninstall.os.listdir", side_effect=RuntimeError("模擬未預期例外"),
+        ):
+            with self.assertRaises(RuntimeError):
+                un._perform_uninstall_steps(ctx, locking_processes, True, log=lambda m: None)
+
+        mock_restore.assert_called_once_with(fake_state)
 
 
 class TestWantsLockRelease(unittest.TestCase):

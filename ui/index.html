@@ -696,6 +696,7 @@
         // 清單），讓這裡跳出「關閉此程式／取消」的彈窗，不用逼使用者自己
         // 去工作管理員手動關閉。跟 process_running 是同一種互動模式。
         let lastLockingProcesses = [];
+        let lastLockedPath = '';
 
         function cancelFileLockedModal() {
             document.getElementById('fileLockedModal').classList.remove('active');
@@ -705,7 +706,7 @@
 
         async function closeLockingProcessAndRetry() {
             document.getElementById('fileLockedModal').classList.remove('active');
-            await pywebview.api.close_locking_processes(lastLockingProcesses);
+            await pywebview.api.close_locking_processes(lastLockingProcesses, lastLockedPath);
             attemptInstall(lastCreateDesktopShortcut);
         }
 
@@ -733,6 +734,7 @@
                 resetInstallUiAfterCancelOrFailure();
                 pathPreview.innerText = pathPreview.dataset.beforeInstall || '';
                 lastLockingProcesses = result.processes || [];
+                lastLockedPath = result.path || '';
                 document.getElementById('fileLockedMessage').innerText = result.message;
                 document.getElementById('fileLockedModal').classList.add('active');
             } else {

@@ -40,6 +40,7 @@ import lang_detect
 import restart_manager
 import dependency_defs
 import system_entries
+import explorer_lock_release
 from install_scope import InstallScope, local_appdata_root
 
 # 目前介面 chrome（ui/index.html 裡固定的標籤、按鈕、提示文字）支援的語言，
@@ -261,6 +262,11 @@ class InstallerAPI:
         # 都要能把這份備份搬回原位，見 _backup_existing_install() / _restore_upgrade_backup()。
         self._upgrade_backup_path = None
         self._upgrade_backup_original_path = None
+        # close_locking_processes() 如果為了釋放鎖定而強制關過殼層（見
+        # explorer_lock_release.py），回傳的狀態物件存在這裡，讓
+        # trigger_installation() 結束時（不管成功、失敗、還是中途例外）
+        # 都能補做「重啟 explorer.exe / 恢復 AutoRestartShell」。
+        self._explorer_forced_down_state = None
 
     @property
     def _scope(self):
@@ -506,26 +512,38 @@ class InstallerAPI:
           - is_same：版本完全一致（單純重裝，維持原本的提示樣式）。
           - is_older：這次要裝的版本比已安裝的舊（本機版本比較新，該用警示樣式，
             明確告知使用者要裝的版本比較舊，讓使用者自己決定要不要繼續）。
+
+        真實抓到的 bug：原本只查這次設定（no_admin_install）算出來的單一
+        hive，如果舊版本是用不同的 no_admin_install 設定裝的（例如舊版本
+        裝在需要管理員權限的 HKLM，這次改用免權限設定重新打包），會完全
+        查不到舊版本的登錄表紀錄，誤判成「沒裝過」，跳過「是否要更新」的
+        提示。改成兩邊 hive 都查（優先查這次設定對應的 hive），找到的話
+        額外回報是在哪個 hive 找到的（"HKLM"/"HKCU"），供
+        run_upgrade_uninstall() 判斷要不要跨 UAC 呼叫舊版解除安裝程式。
         """
         import winreg
         reg_path = f"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{self.app_name}"
-        hive = self._scope.registry_hive
-        try:
-            with winreg.OpenKey(hive, reg_path) as key:
-                install_loc, _ = winreg.QueryValueEx(key, "InstallLocation")
-                old_version, _ = winreg.QueryValueEx(key, "DisplayVersion")
-                comparison = _compare_versions(self.version, old_version)
-                return {
-                    "exists": True,
-                    "install_path": install_loc,
-                    "version": old_version,
-                    "new_version": self.version,
-                    "is_newer": comparison > 0,
-                    "is_same": comparison == 0,
-                    "is_older": comparison < 0,
-                }
-        except Exception:
-            return {"exists": False}
+        primary_hive = self._scope.registry_hive
+        other_hive = winreg.HKEY_CURRENT_USER if primary_hive == winreg.HKEY_LOCAL_MACHINE else winreg.HKEY_LOCAL_MACHINE
+        for hive in (primary_hive, other_hive):
+            try:
+                with winreg.OpenKey(hive, reg_path) as key:
+                    install_loc, _ = winreg.QueryValueEx(key, "InstallLocation")
+                    old_version, _ = winreg.QueryValueEx(key, "DisplayVersion")
+                    comparison = _compare_versions(self.version, old_version)
+                    return {
+                        "exists": True,
+                        "install_path": install_loc,
+                        "version": old_version,
+                        "new_version": self.version,
+                        "is_newer": comparison > 0,
+                        "is_same": comparison == 0,
+                        "is_older": comparison < 0,
+                        "hive": "HKLM" if hive == winreg.HKEY_LOCAL_MACHINE else "HKCU",
+                    }
+            except Exception:
+                continue
+        return {"exists": False}
 
     def _backup_existing_install(self, install_path):
         """更新覆蓋安裝前，把舊安裝資料夾整份複製到暫存區。
@@ -625,6 +643,68 @@ class InstallerAPI:
                     return
                 time.sleep(interval)
 
+    def _is_current_process_elevated(self):
+        try:
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            return False
+
+    def _run_uninstall_exe_elevated(self, uninstall_exe, args, timeout_ms=30000):
+        """透過 ShellExecuteExW + "runas" 動詞啟動舊版 uninstall.exe 並等待
+        完成，取代 subprocess.run() 在需要跨 UAC 情境下的角色。
+
+        真實抓到的問題：Windows 的 manifest 自動提權（跳 UAC 詢問）只有
+        透過 ShellExecute 這條路徑才會被認得；subprocess.run() 底層是
+        CreateProcess，不會觸發提權，而是直接用目前（未提權）行程的權杖
+        把子行程跑起來——如果舊版 uninstall.exe 本身需要管理員權限（例如
+        裝在 Program Files、登錄表寫在 HKLM），子行程會在寫入/刪除這些
+        受保護的位置時默默失敗，卻不會拋出任何例外，看起來像是「正常
+        執行完了」，實際上舊版本根本沒清乾淨。
+        """
+        class SHELLEXECUTEINFOW(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", ctypes.c_ulong),
+                ("fMask", ctypes.c_ulong),
+                ("hwnd", ctypes.c_void_p),
+                ("lpVerb", ctypes.c_wchar_p),
+                ("lpFile", ctypes.c_wchar_p),
+                ("lpParameters", ctypes.c_wchar_p),
+                ("lpDirectory", ctypes.c_wchar_p),
+                ("nShow", ctypes.c_int),
+                ("hInstApp", ctypes.c_void_p),
+                ("lpIDList", ctypes.c_void_p),
+                ("lpClass", ctypes.c_wchar_p),
+                ("hKeyClass", ctypes.c_void_p),
+                ("dwHotKey", ctypes.c_ulong),
+                ("hIcon", ctypes.c_void_p),
+                ("hProcess", ctypes.c_void_p),
+            ]
+
+        SEE_MASK_NOCLOSEPROCESS = 0x00000040
+        SW_HIDE = 0
+        WAIT_TIMEOUT = 0x00000102
+
+        params = " ".join(f'"{a}"' if " " in a else a for a in args)
+        sei = SHELLEXECUTEINFOW()
+        sei.cbSize = ctypes.sizeof(sei)
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS
+        sei.hwnd = None
+        sei.lpVerb = "runas"
+        sei.lpFile = uninstall_exe
+        sei.lpParameters = params
+        sei.lpDirectory = None
+        sei.nShow = SW_HIDE
+
+        ok = ctypes.windll.shell32.ShellExecuteExW(ctypes.pointer(sei))
+        if not ok:
+            raise OSError("無法以系統管理員權限啟動舊版解除安裝程式（使用者可能取消了 UAC 提示）。")
+        try:
+            wait_result = ctypes.windll.kernel32.WaitForSingleObject(sei.hProcess, timeout_ms)
+            if wait_result == WAIT_TIMEOUT:
+                raise TimeoutError("舊版解除安裝程式執行逾時。")
+        finally:
+            ctypes.windll.kernel32.CloseHandle(sei.hProcess)
+
     def run_upgrade_uninstall(self):
         """更新覆蓋安裝流程：先備份舊安裝資料夾，再靜默呼叫舊版本的解除安裝
         助手移除乾淨，之後才繼續安裝新版本。
@@ -676,10 +756,17 @@ class InstallerAPI:
             # 指令，避免那段非同步指令事後把這次新複製的檔案一起砍掉
             # （見 _wait_for_selected_path_writable() docstring 與
             # self_delete.py）。
-            cmd = [uninstall_exe, "--silent", "--upgrade"]
+            args = ["--silent", "--upgrade"]
             if self.restart_explorer_on_update:
-                cmd.append("--restart-explorer")
-            subprocess.run(cmd, timeout=30, creationflags=creationflags)
+                args.append("--restart-explorer")
+            # 舊版本裝在需要管理員權限的位置（登錄表在 HKLM），但目前這個
+            # 行程本身沒有提權：subprocess.run() 不會觸發 UAC，直接呼叫會
+            # 因為權限不足而默默失敗。改用 ShellExecuteExW + "runas" 跨 UAC
+            # 呼叫（見 _run_uninstall_exe_elevated() 的說明）。
+            if info.get("hive") == "HKLM" and not self._is_current_process_elevated():
+                self._run_uninstall_exe_elevated(uninstall_exe, args, timeout_ms=30000)
+            else:
+                subprocess.run([uninstall_exe] + args, timeout=30, creationflags=creationflags)
             self._wait_for_selected_path_writable()
             return {"status": "success"}
         except Exception as e:
@@ -972,6 +1059,19 @@ class InstallerAPI:
             system_entries.remove_registry_entry(self.app_name, self.no_admin_install)
 
     def trigger_installation(self, create_desktop_shortcut=True, skip_process_check=False):
+        """薄包裝：實際安裝邏輯在 _trigger_installation_impl()。這裡只負責
+        「不管這次安裝成功、失敗、還是中途拋出未預期例外，只要之前
+        close_locking_processes() 為了釋放鎖定強制關過殼層，最後都要補做
+        重啟 explorer.exe / 恢復 AutoRestartShell」，用 try/finally 涵蓋
+        所有出口，不能像原本那樣散在各個 return 分支各自補一次、容易漏掉。
+        """
+        try:
+            return self._trigger_installation_impl(create_desktop_shortcut, skip_process_check)
+        finally:
+            explorer_lock_release.restore_after_lock_release(self._explorer_forced_down_state)
+            self._explorer_forced_down_state = None
+
+    def _trigger_installation_impl(self, create_desktop_shortcut=True, skip_process_check=False):
         log_lines = [f"=== {self.app_name} 安裝紀錄 {datetime.now().isoformat()} ==="]
         copied_rel_paths = []  # 提前宣告：任何階段失敗都要能安全參照這個變數做回滾
         current_copy_target = None  # 目前正在寫入的目的地路徑，複製失敗時用來查是誰鎖住它
@@ -1209,6 +1309,7 @@ class InstallerAPI:
                     return {
                         "status": "file_locked", "message": message,
                         "processes": [{"pid": pid, "name": name} for pid, name in processes],
+                        "path": current_copy_target,
                     }
             return {"status": "error", "message": message}
         except Exception as e:
@@ -1259,7 +1360,9 @@ class InstallerAPI:
             file_label = f"「{os.path.basename(dest_file)}」" if dest_file else "某個檔案"
             return (
                 f"安裝失敗：{file_label}正被其他程式使用中，暫時無法覆寫。{locker_hint}"
-                f"請先關閉相關程式後再重試安裝。"
+                f"請先關閉相關程式後再重試安裝。\n"
+                f"若按下「關閉此程式」後問題持續發生，也可能是防毒/安全軟體攔截了"
+                f"終止系統關鍵行程（例如檔案總管）的動作，請確認相關防護設定是否允許此操作。"
             )
         if winerror == 5:
             return (
@@ -1284,28 +1387,39 @@ class InstallerAPI:
         共用同一組 winerror 判斷，抽出來避免兩處各自寫一份魔法數字。"""
         return getattr(error, "winerror", None) in (32, 33)
 
-    def close_locking_processes(self, processes):
+    def _log_explorer_lock_release(self, msg):
+        """explorer_lock_release.py 各步驟的 log(msg) callback 落地成一個
+        固定、事後可以翻閱的除錯紀錄檔（%TEMP% 底下，累加寫入）。
+
+        真實抓到的問題：一旦「按下關閉此程式後，砍 explorer.exe 看起來
+        沒效果」，如果完全沒有留下任何痕跡，事後根本無從判斷是「這個 pid
+        沒被正確解析成 explorer.exe」「taskkill 有跑但失敗」還是其他原因，
+        只能靠猜——所以這裡一定要把每一步實際發生的事寫下來，供下次重現
+        問題時直接翻紀錄檔，而不是繼續憑空推測。best-effort，寫入失敗
+        （例如 %TEMP% 不可寫）不影響安裝流程本身。
+        """
+        try:
+            log_path = os.path.join(tempfile.gettempdir(), "mswi_explorer_lock_debug.log")
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"[{datetime.now().isoformat()}] {msg}\n")
+        except Exception:
+            pass
+
+    def close_locking_processes(self, processes, path=None):
         """使用者在安裝失敗跳出的『檔案使用中』畫面按下「關閉此程式」時
         呼叫：processes 是前端原封不動把 trigger_installation() 回傳的
-        file_locked 狀態裡的 processes 傳回來的 [{"pid":.., "name":..}, ...]。
-        逐一 taskkill /f /pid（寫法比照 close_running_main_exe()：
-        CREATE_NO_WINDOW、吞例外、不做分層重試）。
+        file_locked 狀態裡的 processes 傳回來的 [{"pid":.., "name":..}, ...]，
+        path 是同一個狀態裡的 path（目前正在寫入、被鎖住的檔案路徑）。
 
-        真實抓到的問題：原本如果關閉的裡面有 explorer.exe，會額外呼叫
-        subprocess.Popen(["explorer.exe"]) 主動重啟它——實測發現這個呼叫
-        會跳出一個瀏覽視窗，代表呼叫當下 shell 其實已經被復原了，這一步
-        是多餘的，還會多跳出一個使用者沒有要求的視窗，所以拿掉了。
+        實際的釋放邏輯（先只關閉瀏覽 path 的檔案總管視窗，不夠才暫停
+        AutoRestartShell、強制關殼層）收在 explorer_lock_release.py，這裡
+        只是薄包裝——把回傳的 forced_down 狀態存起來，讓 trigger_installation()
+        之後補做「重啟 explorer.exe / 恢復 AutoRestartShell」，並把
+        explorer_lock_release.py 內部的 log(msg) 接到 _log_explorer_lock_release()。
         """
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        for proc in processes:
-            try:
-                subprocess.run(
-                    ["taskkill", "/f", "/pid", str(proc["pid"])],
-                    creationflags=creationflags, timeout=10,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
-            except Exception:
-                pass
+        self._explorer_forced_down_state = explorer_lock_release.release_locking_processes(
+            processes, path=path, log=self._log_explorer_lock_release,
+        )
 
     def close_running_main_exe(self):
         """使用者在「偵測到主程式執行中」的彈窗按下「關閉程式並繼續安裝」時

@@ -69,6 +69,30 @@ Windows 針對「使用者選過這個副檔名要用什麼開」記住的三層
 `mock.patch.object(un, "winreg", fake)`，這種情境下 `uninstall.py` 呼叫
 `InstallScope` 時要把自己那個（可能已被 patch 掉的）`winreg` 名字傳進去。
 
+## 跨 no_admin_install 模式的升級偵測與跨 UAC 呼叫
+
+真實抓到的 bug：`installer_core.py.check_existing_install()` 原本只查
+「這次打包設定」算出來的單一 hive，如果舊版本是用不同的 `no_admin_install`
+設定裝的（例如舊版本用預設設定裝在 Program Files、登錄表寫在 HKLM，
+這次改用 `--no-admin-install` 重新打包），完全查不到舊版本的登錄表紀錄，
+誤判成「沒裝過」，跳過「是否要更新」的提示，新舊兩份安裝各自獨立存在。
+修正：兩邊 hive 都查，回傳值多一個 `"hive"` 欄位（`"HKLM"`/`"HKCU"`，
+記錄實際找到的那一邊）。
+
+延伸出另一個問題：`run_upgrade_uninstall()` 呼叫舊版 `uninstall.exe`
+原本一律用 `subprocess.run()`（底層是 `CreateProcess`）。Windows 的
+manifest 自動提權（跳 UAC 詢問）只有透過 `ShellExecute` 這條路徑才會被
+認得，`CreateProcess` 不會觸發提權，會直接用目前（未提權）行程的權杖把
+子行程跑起來——如果舊版本需要管理員權限（`hive == "HKLM"`）但這次新
+安裝檔是免權限執行，舊版 `uninstall.exe` 會在寫入 Program Files／刪除
+HKLM 機碼時默默失敗，卻不拋出任何例外，看起來像是清乾淨了、實際上沒有。
+修正：新增 `_is_current_process_elevated()`（`IsUserAnAdmin()`）判斷目前
+行程是否已提權，`hive == "HKLM"` 且未提權時改用
+`_run_uninstall_exe_elevated()`（`ShellExecuteExW` + `"runas"` 動詞 +
+`WaitForSingleObject` 等待完成）跨 UAC 呼叫，其餘情況維持原本的
+`subprocess.run()`。這條路徑的真實 UAC 互動沒辦法在開發環境模擬，只能
+用 mock 驗證呼叫參數正確，實際跳 UAC 的行為需要在實機驗證。
+
 ## system_entries（登錄表項目/捷徑/PATH 的移除原語）
 
 `system_entries.py` 收斂了三個「移除」原語：`remove_registry_entry()`、
@@ -138,3 +162,30 @@ current_dir, exe_path, safe_to_remove_whole_dir)` 把「要不要排程」（看
 `argv` 裡有沒有 `--upgrade`）跟「真的排程」收在同一個介面，呼叫端
 （`uninstall.py` 的 `run_silent_uninstall()`/`UninstallerAPI.finish_and_exit()`）
 不用自己先檢查前置條件。
+
+## explorer_lock_release（檔案鎖定釋放：分層策略）
+
+`explorer_lock_release.py` 收斂了「檔案被 explorer.exe 鎖住時怎麼釋放」這件
+事，取代原本 `close_locking_processes()`/`_kill_processes()` 裡「無腦
+taskkill 整個殼層行程」的做法。分兩層：
+
+- **關窗**（`close_windows_browsing_path()`）——先只關閉正在瀏覽目標路徑的
+  檔案總管**視窗**（`Shell.Application` COM，呼叫 `.Quit()`），不動
+  `explorer.exe` 這個殼層**行程**本身。工作管理員裡「應用程式」跟
+  「Windows 處理程序」兩個 `explorer.exe` 項目行為不同就是這個道理：前者
+  是單一視窗，關掉不影響桌面/工作列；後者才是整個殼層行程。
+- **強制關殼層**（`release_locking_processes()`/`_terminate_process()`）——
+  只有關窗解決不了才進到這一步：暫停 `AutoRestartShell`（避免
+  `explorer.exe` 結束後瞬間自動復活、在檔案操作完成前搶回同一個鎖）、直接
+  呼叫 `OpenProcessToken`/`AdjustTokenPrivileges` 啟用 `SeDebugPrivilege`
+  後 `TerminateProcess`（不是 `taskkill.exe`——它預設不啟用這個權限，對
+  `explorer.exe` 會回報存取被拒），檔案操作完成後（`try/finally`，不管
+  成功失敗）呼叫 `restore_after_lock_release()` 補重啟殼層、寫回原值。
+
+**已知限制**：即使兩層都正確執行，第三方防毒/端點防護軟體（例如把
+`explorer.exe` 列為「關鍵行程保護」對象）仍可能在核心層攔截
+`TerminateProcess`（`OpenProcess` 成功、`TerminateProcess` 回報存取被拒）。
+這是防毒軟體的合理行為，不是這支安裝程式的 bug，也不該嘗試繞過——遇到
+這種情況只能提示使用者去檢查防毒/安全軟體設定（`_describe_install_os_error()`
+的訊息已補上這句提示）。整條流程的除錯紀錄落地在
+`%TEMP%\mswi_explorer_lock_debug.log`，供事後排查用。

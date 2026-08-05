@@ -154,6 +154,33 @@ class TestCheckExistingInstall(unittest.TestCase):
         self.assertTrue(result["is_same"])
         self.assertFalse(result["is_older"])
 
+    def test_finds_existing_install_in_hklm_even_when_current_settings_use_hkcu(self):
+        """真實抓到的 bug：舊版本用預設設定（需要管理員權限）裝在
+        Program Files、登錄表寫在 HKLM，這次改用 no_admin_install=True
+        重新打包，只查 HKCU 會完全找不到舊版本、誤判成「沒裝過」，跳過
+        「是否要更新」的提示。改成兩邊都查，找到的話額外回報是在哪個
+        hive 找到的，供 run_upgrade_uninstall() 判斷要不要跨 UAC 呼叫。"""
+        self._seed_existing("MyApp", "1.0.0")  # 寫在 HKLM
+        api = make_installer_api(app_name="MyApp", version="2.0.0", no_admin_install=True)
+        result = api.check_existing_install()
+        self.assertTrue(result["exists"])
+        self.assertEqual(result["hive"], "HKLM")
+
+    def test_finds_existing_install_in_hkcu_even_when_current_settings_use_hklm(self):
+        reg_path = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\MyApp"
+        self.fake_reg.set_hkcu(reg_path, {"InstallLocation": "C:\\Users\\Tester\\AppData\\Local\\Programs\\MyApp", "DisplayVersion": "1.0.0"})
+        api = make_installer_api(app_name="MyApp", version="2.0.0", no_admin_install=False)
+        result = api.check_existing_install()
+        self.assertTrue(result["exists"])
+        self.assertEqual(result["hive"], "HKCU")
+
+    def test_hive_matches_current_settings_when_only_that_hive_has_a_record(self):
+        self._seed_existing("MyApp", "1.0.0")  # 寫在 HKLM
+        api = make_installer_api(app_name="MyApp", version="2.0.0", no_admin_install=False)
+        result = api.check_existing_install()
+        self.assertTrue(result["exists"])
+        self.assertEqual(result["hive"], "HKLM")
+
 
 class TestAddToPathEnv(unittest.TestCase):
     def setUp(self):
@@ -413,8 +440,15 @@ class TestRunUpgradeUninstall(unittest.TestCase):
         self.new_install_dir = tempfile.mkdtemp()
         shutil.rmtree(self.new_install_dir)  # 讓 os.makedirs() 有東西可以建立
         self.api = make_installer_api(app_name="MyApp", version="2.0.0", selected_path=self.new_install_dir)
+        # 這個 class 底下的測試關心的是備份/復原、命令列參數傳遞這些跟提權
+        # 無關的行為，一律視為「目前這個行程本身已經是提權的」，走既有的
+        # subprocess.run() 路徑——是否要跨 UAC 呼叫的判斷邏輯本身另外在
+        # TestRunUpgradeUninstallElevation 測。
+        self.elevated_patcher = mock.patch.object(self.api, "_is_current_process_elevated", return_value=True)
+        self.elevated_patcher.start()
 
     def tearDown(self):
+        self.elevated_patcher.stop()
         self.patcher.stop()
         shutil.rmtree(self.old_install_dir, ignore_errors=True)
         shutil.rmtree(self.new_install_dir, ignore_errors=True)
@@ -494,6 +528,119 @@ class TestRunUpgradeUninstall(unittest.TestCase):
             self.api.run_upgrade_uninstall()
 
         self.assertIn("--upgrade", captured_cmd["cmd"])
+
+
+class TestRunUpgradeUninstallElevation(unittest.TestCase):
+    """真實抓到的問題：舊版本如果是用需要管理員權限的設定裝的（登錄表寫在
+    HKLM），但這次新安裝檔是免權限（no_admin_install=True）執行，直接用
+    subprocess.run() 呼叫舊版 uninstall.exe 不會跳 UAC——Windows 的 manifest
+    自動提權只有透過 ShellExecute 這條路徑才會生效，subprocess.run() 底層
+    是 CreateProcess，會用目前（未提權）的權杖把子行程跑起來，導致寫入
+    Program Files/刪除 HKLM 機碼時默默失敗卻不拋例外。改成偵測到這種情境
+    時改用 _run_uninstall_exe_elevated()（ShellExecuteExW + "runas"）。"""
+
+    def setUp(self):
+        self.fake_reg = FakeWinReg()
+        self.patcher = mock.patch.dict(sys.modules, {"winreg": self.fake_reg})
+        self.patcher.start()
+        self.old_install_dir = tempfile.mkdtemp()
+        with open(os.path.join(self.old_install_dir, "uninstall.exe"), "w") as f:
+            f.write("fake")
+        self.new_install_dir = tempfile.mkdtemp()
+        shutil.rmtree(self.new_install_dir)
+        self.api = make_installer_api(app_name="MyApp", version="2.0.0", selected_path=self.new_install_dir)
+
+    def tearDown(self):
+        self.patcher.stop()
+        shutil.rmtree(self.old_install_dir, ignore_errors=True)
+        shutil.rmtree(self.new_install_dir, ignore_errors=True)
+        if self.api._upgrade_backup_path and os.path.exists(self.api._upgrade_backup_path):
+            shutil.rmtree(self.api._upgrade_backup_path, ignore_errors=True)
+
+    def _seed_hklm(self):
+        self.fake_reg.set_hklm(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\MyApp", {
+            "InstallLocation": self.old_install_dir, "DisplayVersion": "1.0.0",
+        })
+
+    def _seed_hkcu(self):
+        self.fake_reg.set_hkcu(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\MyApp", {
+            "InstallLocation": self.old_install_dir, "DisplayVersion": "1.0.0",
+        })
+
+    def test_uses_elevated_call_when_hive_is_hklm_and_current_process_not_elevated(self):
+        self._seed_hklm()
+        with mock.patch.object(self.api, "_is_current_process_elevated", return_value=False), \
+             mock.patch.object(self.api, "_run_uninstall_exe_elevated") as mock_elevated, \
+             mock.patch("installer_core.subprocess.run") as mock_run:
+            result = self.api.run_upgrade_uninstall()
+        self.assertEqual(result["status"], "success")
+        mock_elevated.assert_called_once()
+        mock_run.assert_not_called()
+
+    def test_uses_subprocess_run_when_hive_is_hkcu(self):
+        self._seed_hkcu()
+        self.api.no_admin_install = True
+        with mock.patch.object(self.api, "_is_current_process_elevated", return_value=False), \
+             mock.patch.object(self.api, "_run_uninstall_exe_elevated") as mock_elevated, \
+             mock.patch("installer_core.subprocess.run") as mock_run:
+            self.api.run_upgrade_uninstall()
+        mock_run.assert_called_once()
+        mock_elevated.assert_not_called()
+
+    def test_uses_subprocess_run_when_current_process_already_elevated(self):
+        self._seed_hklm()
+        with mock.patch.object(self.api, "_is_current_process_elevated", return_value=True), \
+             mock.patch.object(self.api, "_run_uninstall_exe_elevated") as mock_elevated, \
+             mock.patch("installer_core.subprocess.run") as mock_run:
+            self.api.run_upgrade_uninstall()
+        mock_run.assert_called_once()
+        mock_elevated.assert_not_called()
+
+
+class TestRunUninstallExeElevated(unittest.TestCase):
+    """_run_uninstall_exe_elevated()：透過 ShellExecuteExW + "runas" 動詞
+    啟動舊版 uninstall.exe 並等待完成，取代 subprocess.run() 在需要跨 UAC
+    情境下的角色。"""
+
+    def setUp(self):
+        self.api = make_installer_api()
+
+    def test_raises_when_shell_execute_fails(self):
+        """ShellExecuteExW 回傳 0（失敗，例如使用者在 UAC 提示按下取消）
+        要讓呼叫端看到明確的例外。"""
+        with mock.patch("installer_core.ctypes.windll.shell32.ShellExecuteExW", return_value=0):
+            with self.assertRaises(Exception):
+                self.api._run_uninstall_exe_elevated("C:\\App\\uninstall.exe", ["--silent"])
+
+    def test_waits_for_process_and_closes_handle(self):
+        WAIT_OBJECT_0 = 0
+
+        def fake_shell_execute(sei_ptr):
+            sei_ptr.contents.hProcess = 12345
+            return 1
+
+        with mock.patch("installer_core.ctypes.windll.shell32.ShellExecuteExW", side_effect=fake_shell_execute), \
+             mock.patch("installer_core.ctypes.windll.kernel32.WaitForSingleObject", return_value=WAIT_OBJECT_0) as mock_wait, \
+             mock.patch("installer_core.ctypes.windll.kernel32.CloseHandle") as mock_close:
+            self.api._run_uninstall_exe_elevated("C:\\App\\uninstall.exe", ["--silent"], timeout_ms=5000)
+
+        mock_wait.assert_called_once()
+        self.assertEqual(mock_wait.call_args.args[0], 12345)
+        mock_close.assert_called_once_with(12345)
+
+    def test_raises_on_timeout(self):
+        WAIT_TIMEOUT = 0x102
+
+        def fake_shell_execute(sei_ptr):
+            sei_ptr.contents.hProcess = 12345
+            return 1
+
+        with mock.patch("installer_core.ctypes.windll.shell32.ShellExecuteExW", side_effect=fake_shell_execute), \
+             mock.patch("installer_core.ctypes.windll.kernel32.WaitForSingleObject", return_value=WAIT_TIMEOUT), \
+             mock.patch("installer_core.ctypes.windll.kernel32.CloseHandle") as mock_close:
+            with self.assertRaises(Exception):
+                self.api._run_uninstall_exe_elevated("C:\\App\\uninstall.exe", ["--silent"], timeout_ms=100)
+        mock_close.assert_called_once_with(12345)  # 逾時也要記得收尾釋放控制代碼
 
 
 class TestWaitForSelectedPathWritable(unittest.TestCase):
@@ -926,6 +1073,24 @@ class TestDescribeInstallOsError(unittest.TestCase):
             message = api._describe_install_os_error(error, r"C:\app\locked.dll")
         self.assertIn("正被其他程式使用中", message)
 
+    def test_lock_violation_message_hints_at_antivirus_blocking_termination(self):
+        """真實抓到的問題：使用者按下「關閉此程式」之後，即使
+        explorer_lock_release.py 那一整套（先關窗、不夠再暫停
+        AutoRestartShell 強制終止）都正確執行，防毒/安全軟體（實測案例：
+        火絨的「關鍵進程保護」→「資源管理器」→自動阻止）仍然可能在核心層
+        直接否決終止系統關鍵行程的動作，讓 OpenProcess 成功但
+        TerminateProcess 回報存取被拒——這種情況使用者只會看到「檔案
+        使用中」畫面一直卡住，完全沒有線索去查防毒軟體設定。訊息裡要
+        提示這個可能性，不能讓使用者卡在無限重試迴圈裡。"""
+        api = make_installer_api()
+        error = _FakeWinError(32)
+        with mock.patch(
+            "installer_core.restart_manager.find_locking_processes",
+            return_value=[(111, "Windows 檔案總管")],
+        ):
+            message = api._describe_install_os_error(error, r"C:\app\locked.dll")
+        self.assertIn("防毒", message)
+
     def test_access_denied_does_not_suggest_running_as_admin(self):
         api = make_installer_api()
         error = _FakeWinError(5)
@@ -972,38 +1137,59 @@ class TestIsLockViolation(unittest.TestCase):
 
 class TestCloseLockingProcesses(unittest.TestCase):
     """close_locking_processes()：使用者在安裝失敗跳出的『檔案使用中』畫面
-    按下「關閉此程式」時呼叫，寫法比照既有的 close_running_main_exe()
-    （taskkill /f、CREATE_NO_WINDOW、吞例外）。
+    按下「關閉此程式」時呼叫。實際的釋放邏輯（先關瀏覽視窗、不夠才暫停
+    AutoRestartShell 強制關殼層）收在 explorer_lock_release.py，這裡只是
+    薄包裝——把回傳的 forced_down 狀態存起來，供 trigger_installation()
+    之後補做「重啟 explorer.exe / 恢復 AutoRestartShell」。"""
 
-    真實抓到的問題：原本如果關閉的程式裡有 explorer.exe，會額外呼叫
-    subprocess.Popen(["explorer.exe"]) 主動重啟它——實測發現這個呼叫會
-    跳出一個瀏覽視窗，代表呼叫當下 shell 其實已經被復原了，這一步是多餘
-    的，還會多跳出一個使用者沒有要求的視窗，所以拿掉了，不管關閉的程式
-    裡有沒有 explorer.exe 都不會呼叫 Popen。"""
-
-    def test_taskkills_each_pid(self):
+    def test_delegates_to_explorer_lock_release_and_stores_state(self):
         api = make_installer_api()
-        with mock.patch("installer_core.subprocess.run") as mock_run, \
-             mock.patch("installer_core.subprocess.Popen") as mock_popen:
-            api.close_locking_processes([{"pid": 111, "name": "notepad.exe"}, {"pid": 222, "name": "word.exe"}])
-        calls = [c.args[0] for c in mock_run.call_args_list]
-        self.assertIn(["taskkill", "/f", "/pid", "111"], calls)
-        self.assertIn(["taskkill", "/f", "/pid", "222"], calls)
-        mock_popen.assert_not_called()
+        fake_state = {"previous_auto_restart_shell": "1"}
+        with mock.patch(
+            "installer_core.explorer_lock_release.release_locking_processes",
+            return_value=fake_state,
+        ) as mock_release:
+            api.close_locking_processes(
+                [{"pid": 111, "name": "notepad.exe"}], path="C:\\Apps\\MyApp",
+            )
+        args, kwargs = mock_release.call_args
+        self.assertEqual(args, ([{"pid": 111, "name": "notepad.exe"}],))
+        self.assertEqual(kwargs["path"], "C:\\Apps\\MyApp")
+        self.assertTrue(callable(kwargs["log"]))
+        self.assertEqual(api._explorer_forced_down_state, fake_state)
 
-    def test_does_not_restart_explorer_even_when_it_was_among_the_closed_processes(self):
+    def test_stores_none_state_when_release_does_not_force_shell_restart(self):
         api = make_installer_api()
-        with mock.patch("installer_core.subprocess.run"), \
-             mock.patch("installer_core.subprocess.Popen") as mock_popen:
-            api.close_locking_processes([{"pid": 111, "name": "explorer.exe"}])
-        mock_popen.assert_not_called()
+        with mock.patch(
+            "installer_core.explorer_lock_release.release_locking_processes",
+            return_value=None,
+        ):
+            api.close_locking_processes([{"pid": 111, "name": "notepad.exe"}])
+        self.assertIsNone(api._explorer_forced_down_state)
 
-    def test_swallows_per_process_failure_and_continues(self):
+    def test_log_callback_appends_timestamped_line_to_debug_log_file(self):
+        """實測發現砍 explorer.exe 沒效果時完全無從追查是哪一步壞掉——
+        explorer_lock_release.py 內部雖然有 log() 可以注入，但沒有實際
+        落地到檔案的話，使用者下次重現問題時還是拿不出任何線索。這裡驗證
+        close_locking_processes() 真的會把訊息寫進一個固定、可以事後翻閱
+        的除錯紀錄檔（%TEMP% 底下），不是只在記憶體裡飄一下就消失。"""
         api = make_installer_api()
-        with mock.patch("installer_core.subprocess.run", side_effect=RuntimeError("模擬失敗")), \
-             mock.patch("installer_core.subprocess.Popen") as mock_popen:
-            api.close_locking_processes([{"pid": 111, "name": "notepad.exe"}])  # 不應該拋例外
-        mock_popen.assert_not_called()
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            with mock.patch("installer_core.tempfile.gettempdir", return_value=tmp_dir), \
+                 mock.patch(
+                     "installer_core.explorer_lock_release.release_locking_processes",
+                     side_effect=lambda *a, **kw: kw["log"]("測試訊息 pid=999"),
+                 ):
+                api.close_locking_processes([{"pid": 999, "name": "test.exe"}])
+
+            log_files = [f for f in os.listdir(tmp_dir) if "lock" in f.lower()]
+            self.assertTrue(log_files, "沒有找到除錯紀錄檔")
+            with open(os.path.join(tmp_dir, log_files[0]), encoding="utf-8") as f:
+                content = f.read()
+            self.assertIn("測試訊息 pid=999", content)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 class TestTriggerInstallationFileLocked(unittest.TestCase):
@@ -1047,6 +1233,7 @@ class TestTriggerInstallationFileLocked(unittest.TestCase):
 
         self.assertEqual(result["status"], "file_locked")
         self.assertEqual(result["processes"], [{"pid": 111, "name": "explorer.exe"}])
+        self.assertIn("path", result)
         self.assertIn("message", result)
 
     def test_falls_back_to_generic_error_when_no_process_detected(self):
@@ -1060,6 +1247,86 @@ class TestTriggerInstallationFileLocked(unittest.TestCase):
 
         self.assertEqual(result["status"], "error")
         self.assertNotIn("processes", result)
+
+
+class TestTriggerInstallationRestoresExplorerLock(unittest.TestCase):
+    """trigger_installation() 呼叫端如果之前透過 close_locking_processes()
+    強制關過殼層（self._explorer_forced_down_state 非 None），不管這次
+    安裝結果是成功、一般錯誤、還是中途拋出未預期例外，最後都要呼叫一次
+    explorer_lock_release.restore_after_lock_release() 補做「重啟
+    explorer.exe / 恢復 AutoRestartShell」，不能因為某條分支忘記補而讓
+    使用者被留在殼層沒被復原的狀態。"""
+
+    def _make_api(self, resource_dir, install_dir):
+        return make_installer_api(
+            app_name="MyApp", main_exe="app.exe", selected_path=install_dir,
+            file_associations=[], add_to_path=False,
+        )
+
+    def setUp(self):
+        self.resource_dir = tempfile.mkdtemp()
+        self.app_contents_dir = os.path.join(self.resource_dir, "app_contents")
+        os.makedirs(self.app_contents_dir)
+        with open(os.path.join(self.app_contents_dir, "app.exe"), "wb") as f:
+            f.write(b"fake-app")
+        self.install_dir = tempfile.mkdtemp()
+        shutil.rmtree(self.install_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.resource_dir, ignore_errors=True)
+        shutil.rmtree(self.install_dir, ignore_errors=True)
+
+    def test_restores_after_successful_install(self):
+        api = self._make_api(self.resource_dir, self.install_dir)
+        api._explorer_forced_down_state = {"previous_auto_restart_shell": "1"}
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_register_uninstall_entry"), \
+             mock.patch("installer_core.explorer_lock_release.restore_after_lock_release") as mock_restore:
+            result = api.trigger_installation(create_desktop_shortcut=False)
+
+        self.assertEqual(result["status"], "success")
+        mock_restore.assert_called_once_with({"previous_auto_restart_shell": "1"})
+        self.assertIsNone(api._explorer_forced_down_state)
+
+    def test_restores_after_error_result(self):
+        api = self._make_api(self.resource_dir, self.install_dir)
+        api._explorer_forced_down_state = {"previous_auto_restart_shell": "1"}
+        with mock.patch("installer_core.get_resource_path", return_value="C:\\does-not-exist"), \
+             mock.patch("installer_core.explorer_lock_release.restore_after_lock_release") as mock_restore:
+            result = api.trigger_installation(create_desktop_shortcut=False)
+
+        self.assertEqual(result["status"], "error")
+        mock_restore.assert_called_once_with({"previous_auto_restart_shell": "1"})
+        self.assertIsNone(api._explorer_forced_down_state)
+
+    def test_restores_even_when_impl_raises_unexpectedly(self):
+        """_trigger_installation_impl() 本身已經有一個很寬的
+        except Exception 分支，把安裝過程中的例外都轉換成 error 狀態
+        （不會真的往外拋）——但 trigger_installation() 這層的 try/finally
+        不該假設「impl 永遠不會拋例外」，這裡直接把 impl 換成一個會拋例外
+        的假實作，驗證就算真的拋出來，finally 還是會補做恢復。"""
+        api = self._make_api(self.resource_dir, self.install_dir)
+        api._explorer_forced_down_state = {"previous_auto_restart_shell": "1"}
+        with mock.patch.object(
+            api, "_trigger_installation_impl", side_effect=RuntimeError("模擬未預期例外"),
+        ), mock.patch("installer_core.explorer_lock_release.restore_after_lock_release") as mock_restore:
+            with self.assertRaises(RuntimeError):
+                api.trigger_installation(create_desktop_shortcut=False)
+        mock_restore.assert_called_once_with({"previous_auto_restart_shell": "1"})
+        self.assertIsNone(api._explorer_forced_down_state)
+
+    def test_does_not_call_restore_when_nothing_was_forced_down(self):
+        api = self._make_api(self.resource_dir, self.install_dir)
+        api._explorer_forced_down_state = None
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_register_uninstall_entry"), \
+             mock.patch("installer_core.explorer_lock_release.restore_after_lock_release") as mock_restore:
+            api.trigger_installation(create_desktop_shortcut=False)
+        mock_restore.assert_called_once_with(None)
 
 
 class TestGetDependencyWarnings(unittest.TestCase):
