@@ -110,7 +110,7 @@ def build_all(
     main_exe, eula_texts=None, eula_default_lang="", dependencies=None, file_associations=None, doc_icon_path="",
     doc_icons=None, add_to_path=False, path_target_exe="", local_appdata_files=None,
     restart_explorer_on_update=False, no_admin_install=False, pre_install_script="", post_install_script="",
-    custom_dependencies=None, bundle_dependencies=None, signing=None,
+    custom_dependencies=None, bundle_dependencies=None, signing=None, custom_install_dir="",
     workspace_dir=".", progress_callback=None,
 ):
     """流水線：產生配置 -> 編譯反安裝檔 -> 編譯主安裝檔
@@ -206,6 +206,7 @@ def build_all(
         "local_appdata_files": local_appdata_files,
         "restart_explorer_on_update": bool(restart_explorer_on_update),
         "no_admin_install": bool(no_admin_install),
+        "custom_install_dir": custom_install_dir,
         "pre_install_script": pre_install_embedded,
         "post_install_script": post_install_embedded,
     }

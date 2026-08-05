@@ -77,6 +77,13 @@
         .nice-btn:hover { background: #0077ED; }
         .nice-btn.secondary { background: #e5e5ea; color: #1d1d1f; }
         .nice-btn.secondary:hover { background: #d8d8dd; }
+        /* 「略過偵測，強制繼續」這類最後手段選項：視覺份量刻意比 .secondary
+           更輕，不跟主要按鈕搶注意力，避免使用者養成習慣每次都跳過偵測 */
+        .nice-btn.tertiary {
+            background: transparent; color: #86868b; padding: 8px 12px;
+            font-size: 12px; text-decoration: underline; text-underline-offset: 2px;
+        }
+        .nice-btn.tertiary:hover { color: #1d1d1f; background: transparent; }
 
         /* 真實抓到的 bug：text-align:center 只會置中行內內容，這個固定寬度
            260px 的區塊本身是 block 元素，沒有 margin:auto 就會貼著父層內容
@@ -248,7 +255,9 @@
         <div class="nice-icon error"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></div>
         <div class="nice-title" id="processRunningTitle" data-i18n="process_running_title">程式正在執行</div>
         <div class="nice-message" id="processRunningMessage" style="text-align:center;"></div>
-        <button class="nice-btn" onclick="onCancel()" data-i18n="btn_ok">了解</button>
+        <button class="nice-btn secondary" onclick="onCancel()" data-i18n="btn_ok">了解</button>
+        <button class="nice-btn" onclick="closeRunningAppAndRetry()" data-i18n="btn_close_and_continue">關閉應用程式並繼續解除安裝</button>
+        <div><button class="nice-btn tertiary" onclick="forceContinueUninstall()" data-i18n="btn_force_continue">關閉沒有用？略過偵測，強制繼續解除安裝</button></div>
     </div>
 
     <div class="nice-view" id="progressView">
@@ -291,8 +300,10 @@
                 btn_no: "否",
                 btn_yes: "是",
                 process_running_title: "程式正在執行",
-                process_running_message: "「{{name}}」目前正在執行中，請先關閉程式後再解除安裝。",
+                process_running_message: "「{{name}}」目前正在執行中。\n請先關閉程式後再解除安裝。",
                 btn_ok: "了解",
+                btn_close_and_continue: "關閉應用程式並繼續解除安裝",
+                btn_force_continue: "關閉沒有用？略過偵測，強制繼續解除安裝",
                 progress_title: "正在解除安裝...",
                 btn_undo: "復原",
                 done_title: "解除安裝完成",
@@ -314,8 +325,10 @@
                 btn_no: "No",
                 btn_yes: "Yes",
                 process_running_title: "Application is running",
-                process_running_message: "\"{{name}}\" is currently running. Please close it before uninstalling.",
+                process_running_message: "\"{{name}}\" is currently running.\nPlease close it before uninstalling.",
                 btn_ok: "OK",
+                btn_close_and_continue: "Close it and continue uninstalling",
+                btn_force_continue: "Closing didn't help? Skip detection and continue anyway",
                 progress_title: "Uninstalling...",
                 btn_undo: "Undo",
                 done_title: "Uninstall Complete",
@@ -461,12 +474,28 @@
 
         function onCancel() { pywebview.api.cancel(); }
 
-        async function onDelete() {
-            const running = await pywebview.api.check_main_exe_running();
-            if (running) {
-                document.getElementById('processRunningMessage').innerText = t('process_running_message', { name: appName });
-                showView('processRunningView');
-                return;
+        async function closeRunningAppAndRetry() {
+            await pywebview.api.close_running_main_exe();
+            onDelete();
+        }
+
+        // 保底選項：極少數情況下偵測會卡死（例如目標程式在系統層級留下
+        // Windows 工作管理員都看不到、但行程表裡還存在的殭屍行程，
+        // taskkill 對這種情況也沒用，只有重開機才會恢復正常）——這種情境
+        // 讓使用者一直被卡在「關閉程式並繼續」也沒用的迴圈裡沒有意義，
+        // 提供一個明確跳過偵測、強制繼續的出口。
+        function forceContinueUninstall() {
+            onDelete(true);
+        }
+
+        async function onDelete(forceSkipProcessCheck) {
+            if (!forceSkipProcessCheck) {
+                const running = await pywebview.api.check_main_exe_running();
+                if (running) {
+                    document.getElementById('processRunningMessage').innerText = t('process_running_message', { name: appName });
+                    showView('processRunningView');
+                    return;
+                }
             }
             const processes = await pywebview.api.get_locking_process_names();
             if (processes && processes.length > 0) {

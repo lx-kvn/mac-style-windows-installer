@@ -39,6 +39,8 @@ import file_assoc
 import lang_detect
 import restart_manager
 import dependency_defs
+import system_entries
+from install_scope import InstallScope, local_appdata_root
 
 # 目前介面 chrome（ui/index.html 裡固定的標籤、按鈕、提示文字）支援的語言，
 # 跟 ui/index.html 內嵌的 I18N 翻譯表一一對應。EULA 文字語言不受此限制——
@@ -237,6 +239,7 @@ class InstallerAPI:
         self.local_appdata_files = []
         self.restart_explorer_on_update = False
         self.no_admin_install = False
+        self.custom_install_dir = ""
         self.pre_install_script = ""
         self.post_install_script = ""
         self.ui_language = lang_detect.detect_system_language(SUPPORTED_UI_LANGUAGES, DEFAULT_UI_LANGUAGE)
@@ -245,14 +248,12 @@ class InstallerAPI:
         self.default_path = os.path.join(program_files, self.app_name)
         self.selected_path = self.default_path
         self.load_config()
-        # no_admin_install 開啟時，預設安裝根目錄改成使用者層級的
-        # %LOCALAPPDATA%\Programs\<folder_name>（沿用既有的 _local_appdata_root()），
-        # 完全不需要系統管理員權限；否則維持原本的 Program Files 行為。
-        # folder_name 沒填的話 load_config() 已經 fallback 成 app_name，行為不變。
-        if self.no_admin_install:
-            self.default_path = self._local_appdata_root()
-        else:
-            self.default_path = os.path.join(program_files, self.folder_name or self.app_name)
+        # no_admin_install 這個布林值衍生出的「用哪個 hive/目錄」判斷，收在
+        # install_scope.InstallScope 裡（見下面 _scope property），
+        # installer_core.py 跟 uninstall.py 共用同一份規則，不用各自重新
+        # 推導。folder_name 沒填的話 load_config() 已經 fallback 成
+        # app_name，行為不變。
+        self.default_path = self._compute_default_path()
         self.selected_path = self.default_path
         self._drag = WindowDragController()
         # 更新覆蓋安裝的復原用備份：run_upgrade_uninstall() 靜默刪掉舊版本前，
@@ -260,6 +261,32 @@ class InstallerAPI:
         # 都要能把這份備份搬回原位，見 _backup_existing_install() / _restore_upgrade_backup()。
         self._upgrade_backup_path = None
         self._upgrade_backup_original_path = None
+
+    @property
+    def _scope(self):
+        """真實抓到的問題：一開始把這個算好存成 self._scope（建構時算一次
+        就存住），但測試（跟部分呼叫端）會在建構完成後才直接
+        `api.no_admin_install = True` 這樣改屬性，存住的 _scope 就跟
+        no_admin_install 對不起來、吃到舊值。改成 property，每次存取都
+        用當下的 self.no_admin_install 重新算，InstallScope 本身只是包一個
+        布林值，重新建構沒有額外成本。"""
+        return InstallScope(self.no_admin_install)
+
+    def _compute_default_path(self):
+        """算出這次安裝的預設安裝路徑：`custom_install_dir` 有值時優先
+        套用（用 os.path.expandvars() 展開 %APPDATA% 這類環境變數寫法，
+        照『使用者這台電腦當下』的環境變數解析，不是打包當下開發者電腦的
+        值），否則照 no_admin_install 決定 Program Files 還是
+        %LOCALAPPDATA%\\Programs\\<folder>（見 InstallScope）。
+
+        寫成獨立方法而不是只在 __init__ 裡算一次：跟 _scope property 同一個
+        理由——測試（跟部分呼叫端）會在 InstallerAPI() 建構完成後才直接用
+        setattr 覆蓋 custom_install_dir/no_admin_install，方法每次呼叫都
+        重新算才不會吃到建構當下的舊值。
+        """
+        if self.custom_install_dir:
+            return os.path.expandvars(self.custom_install_dir)
+        return self._scope.default_install_root(self.app_name, self.folder_name)
 
     def start_drag(self, cursor_x, cursor_y):
         global window
@@ -296,6 +323,7 @@ class InstallerAPI:
                     self.local_appdata_files = config.get("local_appdata_files", [])
                     self.restart_explorer_on_update = bool(config.get("restart_explorer_on_update", False))
                     self.no_admin_install = bool(config.get("no_admin_install", False))
+                    self.custom_install_dir = config.get("custom_install_dir", "")
                     self.pre_install_script = config.get("pre_install_script", "")
                     self.post_install_script = config.get("post_install_script", "")
         except Exception as e:
@@ -481,7 +509,7 @@ class InstallerAPI:
         """
         import winreg
         reg_path = f"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{self.app_name}"
-        hive = winreg.HKEY_CURRENT_USER if self.no_admin_install else winreg.HKEY_LOCAL_MACHINE
+        hive = self._scope.registry_hive
         try:
             with winreg.OpenKey(hive, reg_path) as key:
                 install_loc, _ = winreg.QueryValueEx(key, "InstallLocation")
@@ -583,7 +611,7 @@ class InstallerAPI:
         跑完——這其實是個更嚴重的競態（那個背景 rmdir 事後觸發時會把新版本
         已經複製好的檔案一起砍掉，導致「安裝回報成功但檔案不完整」），已經
         改用 --upgrade 命令列旗標請舊版 uninstall.exe 完全不排這段背景指令
-        來根治（見 uninstall.py 的 _should_schedule_self_delete()），不是
+        來根治（見 self_delete.py），不是
         靠這裡的重試等待解決。這個函式現在只需要處理殘餘的、影響小得多的
         單一檔案層級 pending-delete 情況。
         """
@@ -620,7 +648,7 @@ class InstallerAPI:
         rmdir 指令——那段指令原本會在這裡的 subprocess.run() 已經返回、
         新版本已經開始複製檔案之後的某個時間點才真正觸發，如果複製時間
         跨過那個延遲視窗，會把整個資料夾（含新複製好的檔案）一起砍掉。
-        詳細根因見 uninstall.py 的 _should_schedule_self_delete()。
+        詳細根因見 self_delete.py。
 
         已知限制：如果目前安裝的舊版本本身是用更早、還沒有 --upgrade 支援
         的舊版 uninstall.exe，這個旗標對它沒有意義（舊版 exe 根本不認得
@@ -647,7 +675,7 @@ class InstallerAPI:
             # 不要排出它尾端那段延遲執行的背景自我刪除／整個資料夾 rmdir
             # 指令，避免那段非同步指令事後把這次新複製的檔案一起砍掉
             # （見 _wait_for_selected_path_writable() docstring 與
-            # uninstall.py 的 _should_schedule_self_delete()）。
+            # self_delete.py）。
             cmd = [uninstall_exe, "--silent", "--upgrade"]
             if self.restart_explorer_on_update:
                 cmd.append("--restart-explorer")
@@ -695,8 +723,8 @@ class InstallerAPI:
         reg_path = f"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{self.app_name}"
         # no_admin_install 開啟時整個安裝流程完全不要求提權，解除安裝登錄表
         # 也對應寫進 HKEY_CURRENT_USER（每個使用者各自的解除安裝清單），
-        # 不是需要系統管理員權限才能寫入的 HKLM。
-        hive = winreg.HKEY_CURRENT_USER if self.no_admin_install else winreg.HKEY_LOCAL_MACHINE
+        # 不是需要系統管理員權限才能寫入的 HKLM——見 install_scope.InstallScope。
+        hive = self._scope.registry_hive
         try:
             estimated_size_kb = self._required_size() // 1024
         except Exception:
@@ -733,25 +761,10 @@ class InstallerAPI:
             import win32com.client
 
             # no_admin_install 開啟時，捷徑改建在「目前使用者自己」的桌面/開始
-            # 功能表（%USERPROFILE%\Desktop、%APPDATA%\...\Start Menu），這兩個
-            # 位置一般使用者本來就有寫入權限；預設（需要系統管理員權限的安裝）
-            # 維持原本「所有使用者共用」的位置（Public Desktop、ProgramData），
-            # 這樣裝一次全部使用者都看得到捷徑。
-            if self.no_admin_install:
-                if desktop:
-                    base = os.path.join(os.path.expanduser("~"), "Desktop")
-                else:
-                    base = os.path.join(
-                        os.environ.get("APPDATA", os.path.join(os.path.expanduser("~"), "AppData", "Roaming")),
-                        "Microsoft", "Windows", "Start Menu", "Programs",
-                    )
-            elif desktop:
-                base = "C:\\Users\\Public\\Desktop"
-            else:
-                base = os.path.join(
-                    os.environ.get("ProgramData", "C:\\ProgramData"),
-                    "Microsoft", "Windows", "Start Menu", "Programs",
-                )
+            # 功能表，預設（需要系統管理員權限的安裝）維持原本「所有使用者
+            # 共用」的位置，這樣裝一次全部使用者都看得到捷徑——見
+            # install_scope.InstallScope.shortcut_dir()。
+            base = self._scope.shortcut_dir(desktop=desktop)
             os.makedirs(base, exist_ok=True)
             shortcut_path = os.path.join(base, f"{self.app_name}.lnk")
             main_exe_path = self._resolve_installed_path(self.main_exe)
@@ -807,10 +820,7 @@ class InstallerAPI:
         會是那個提權帳號的，不是原本操作安裝程式那個使用者的——多數情境
         下 UAC 沿用同一個帳號的提權權杖，不會踩到這個邊界案例。
         """
-        base = os.environ.get("LOCALAPPDATA") or os.path.join(
-            os.path.expanduser("~"), "AppData", "Local"
-        )
-        return os.path.join(base, "Programs", self.folder_name or self.app_name)
+        return local_appdata_root(self.folder_name or self.app_name)
 
     def _is_local_appdata_file(self, rel_path):
         if not rel_path:
@@ -849,13 +859,9 @@ class InstallerAPI:
     def _add_to_path_env(self):
         import winreg
         target_dir = self._path_target_dir()
-        # no_admin_install 時寫使用者層級的 PATH（HKCU\Environment，本來就
-        # 不需要提權即可寫入），否則維持原本的系統層級 PATH（HKLM，需要
-        # 系統管理員權限，跟這支安裝檔本來就要求提權一致）。
-        if self.no_admin_install:
-            hive, sub_key = winreg.HKEY_CURRENT_USER, "Environment"
-        else:
-            hive, sub_key = winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
+        # no_admin_install 時寫使用者層級的 PATH，否則維持原本的系統層級
+        # PATH——見 install_scope.InstallScope.path_env_hive_and_key。
+        hive, sub_key = self._scope.path_env_hive_and_key
         # 不吞例外：理由同上，讓 PATH 寫入失敗時整個安裝流程失敗回滾。
         key = winreg.OpenKey(hive, sub_key, 0, winreg.KEY_ALL_ACCESS)
         try:
@@ -927,11 +933,19 @@ class InstallerAPI:
         except Exception as e:
             return False, str(e)
 
-    def _rollback(self, copied_rel_paths, log=None):
-        """安裝失敗時的回滾：把這次安裝已經複製出去的檔案清掉，盡量讓系統回到
-        安裝前的乾淨狀態。只清掉『這次安裝自己複製出去的檔案』，不會動到
+    def _rollback(self, copied_rel_paths, log=None, *,
+                  registry_entry_created=False, shortcuts_created=None,
+                  file_associations_registered=False, path_directory=None):
+        """安裝失敗時的回滾：把這次安裝已經寫入的東西清掉，盡量讓系統回到
+        安裝前的乾淨狀態。只清掉『這次安裝這一輪自己寫入的部分』，不會動到
         selected_path（或 local_appdata_files 落地的 _local_appdata_root()）
         底下其他既有內容（例如使用者選了一個已經有東西的資料夾）。
+
+        真實抓到的缺口：原本只清複製出去的檔案，但安裝流程後段還會依序寫入
+        解除安裝登錄表項目/捷徑/檔案關聯/PATH——這幾步任何一步後面的步驟
+        失敗，前面已經成功寫入的部分完全不會被回滾。這裡依「後寫的先復原」
+        順序（跟安裝時 _register_uninstall_entry → _create_shortcut →
+        file_assoc.register → _add_to_path_env 的順序相反）補上這四類。
         """
         removed = 0
         for rel in copied_rel_paths:
@@ -948,10 +962,26 @@ class InstallerAPI:
         if log:
             log(f"安裝失敗，已回滾刪除 {removed} 個已複製的檔案")
 
-    def trigger_installation(self, create_desktop_shortcut=True):
+        if path_directory:
+            system_entries.remove_from_path(path_directory, self.no_admin_install)
+        if file_associations_registered:
+            file_assoc.unregister(self.file_associations)
+        for desktop in (shortcuts_created or []):
+            system_entries.remove_shortcut(self.app_name, desktop=desktop, no_admin_install=self.no_admin_install)
+        if registry_entry_created:
+            system_entries.remove_registry_entry(self.app_name, self.no_admin_install)
+
+    def trigger_installation(self, create_desktop_shortcut=True, skip_process_check=False):
         log_lines = [f"=== {self.app_name} 安裝紀錄 {datetime.now().isoformat()} ==="]
         copied_rel_paths = []  # 提前宣告：任何階段失敗都要能安全參照這個變數做回滾
         current_copy_target = None  # 目前正在寫入的目的地路徑，複製失敗時用來查是誰鎖住它
+        # 這幾個一樣提前宣告：登錄表/捷徑/檔案關聯/PATH 任何一步之後才失敗，
+        # 都要能安全參照這幾個變數，讓 _rollback() 知道哪些系統項目已經真的
+        # 寫入、需要回滾（見 _rollback() 的說明）。
+        registry_entry_created = False
+        shortcuts_created = []
+        file_associations_registered = False
+        path_directory = None
 
         def log(msg):
             log_lines.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
@@ -976,11 +1006,17 @@ class InstallerAPI:
             # 主程式執行中偵測：回傳獨立於一般 "error" 的狀態值，讓前端可以
             # 跳出「關閉程式並繼續安裝／取消」的互動選擇，而不是直接判定
             # 安裝失敗、逼使用者自己手動關閉程式再重新來一次。
-            if self.main_exe and _is_process_running(os.path.basename(self.main_exe)):
+            # skip_process_check：保底選項，給「偵測卡死關不掉」的邊緣情況
+            # 用（例如某支程式在系統匣選單 callback 裡崩潰，留下 Windows
+            # 行程表裡真的還存在、但工作管理員已經看不到的殭屍行程，重開機
+            # 前 tasklist 都會回報還在執行，taskkill 也殺不掉——這是 Windows
+            # 本身的行程狀態問題，不是這裡偵測邏輯的 bug，需要一個讓使用者
+            # 不會被卡死的出口）。
+            if not skip_process_check and self.main_exe and _is_process_running(os.path.basename(self.main_exe)):
                 self._restore_upgrade_backup()
                 return {
                     "status": "process_running",
-                    "message": f"偵測到「{self.main_exe}」正在執行中，請先關閉程式後再繼續安裝。",
+                    "message": f"偵測到「{self.main_exe}」正在執行中。\n請先關閉程式後再繼續安裝。",
                 }
 
             # 覆蓋安裝：使用者在拖曳圖示前的彈窗只是「確認要不要繼續」，真正
@@ -1092,16 +1128,19 @@ class InstallerAPI:
             self._report_progress(90, "正在註冊系統項目...")
             try:
                 self._register_uninstall_entry()
+                registry_entry_created = True
             except Exception as e:
                 raise RuntimeError(f"寫入解除安裝登錄表失敗：{e}") from e
-            self._create_shortcut(desktop=False, log=log)
-            if create_desktop_shortcut:
-                self._create_shortcut(desktop=True, log=log)
+            if self._create_shortcut(desktop=False, log=log):
+                shortcuts_created.append(False)
+            if create_desktop_shortcut and self._create_shortcut(desktop=True, log=log):
+                shortcuts_created.append(True)
             if self.file_associations:
                 main_exe_path = self._resolve_installed_path(self.main_exe)
                 icon_refs = self._resolve_doc_icon_refs(main_exe_path)
                 try:
                     file_assoc.register(self.file_associations, main_exe_path, self.app_name, icon_refs, log=log)
+                    file_associations_registered = True
                 except Exception as e:
                     raise RuntimeError(f"檔案關聯註冊失敗：{e}") from e
                 log(f"已註冊檔案關聯: {self.file_associations}")
@@ -1157,11 +1196,27 @@ class InstallerAPI:
             return {"status": "success", "message": "安裝成功", "main_exe_path": main_exe_path}
 
         except OSError as e:
-            self._rollback(copied_rel_paths, log)
+            self._rollback(
+                copied_rel_paths, log,
+                registry_entry_created=registry_entry_created, shortcuts_created=shortcuts_created,
+                file_associations_registered=file_associations_registered, path_directory=path_directory,
+            )
             self._restore_upgrade_backup()
-            return {"status": "error", "message": self._describe_install_os_error(e, current_copy_target)}
+            message = self._describe_install_os_error(e, current_copy_target)
+            if self._is_lock_violation(e) and current_copy_target:
+                processes = restart_manager.find_locking_processes([current_copy_target])
+                if processes:
+                    return {
+                        "status": "file_locked", "message": message,
+                        "processes": [{"pid": pid, "name": name} for pid, name in processes],
+                    }
+            return {"status": "error", "message": message}
         except Exception as e:
-            self._rollback(copied_rel_paths, log)
+            self._rollback(
+                copied_rel_paths, log,
+                registry_entry_created=registry_entry_created, shortcuts_created=shortcuts_created,
+                file_associations_registered=file_associations_registered, path_directory=path_directory,
+            )
             self._restore_upgrade_backup()
             return {"status": "error", "message": f"發生未知錯誤：\n{str(e)}"}
 
@@ -1204,9 +1259,7 @@ class InstallerAPI:
             file_label = f"「{os.path.basename(dest_file)}」" if dest_file else "某個檔案"
             return (
                 f"安裝失敗：{file_label}正被其他程式使用中，暫時無法覆寫。{locker_hint}"
-                f"請先關閉相關程式後再重試安裝。\n"
-                f"（這跟系統管理員權限無關——這支安裝程式本身已經是以系統管理員身分執行，"
-                f"用系統管理員身分重試不會有幫助。）"
+                f"請先關閉相關程式後再重試安裝。"
             )
         if winerror == 5:
             return (
@@ -1225,23 +1278,57 @@ class InstallerAPI:
             )
         return f"安裝失敗：{error}"
 
+    def _is_lock_violation(self, error):
+        """判斷是不是「檔案被其他程式鎖住」這一類 OSError（Windows 的
+        sharing violation / lock violation），跟 _describe_install_os_error()
+        共用同一組 winerror 判斷，抽出來避免兩處各自寫一份魔法數字。"""
+        return getattr(error, "winerror", None) in (32, 33)
+
+    def close_locking_processes(self, processes):
+        """使用者在安裝失敗跳出的『檔案使用中』畫面按下「關閉此程式」時
+        呼叫：processes 是前端原封不動把 trigger_installation() 回傳的
+        file_locked 狀態裡的 processes 傳回來的 [{"pid":.., "name":..}, ...]。
+        逐一 taskkill /f /pid（寫法比照 close_running_main_exe()：
+        CREATE_NO_WINDOW、吞例外、不做分層重試）。
+
+        真實抓到的問題：原本如果關閉的裡面有 explorer.exe，會額外呼叫
+        subprocess.Popen(["explorer.exe"]) 主動重啟它——實測發現這個呼叫
+        會跳出一個瀏覽視窗，代表呼叫當下 shell 其實已經被復原了，這一步
+        是多餘的，還會多跳出一個使用者沒有要求的視窗，所以拿掉了。
+        """
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        for proc in processes:
+            try:
+                subprocess.run(
+                    ["taskkill", "/f", "/pid", str(proc["pid"])],
+                    creationflags=creationflags, timeout=10,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                pass
+
     def close_running_main_exe(self):
         """使用者在「偵測到主程式執行中」的彈窗按下「關閉程式並繼續安裝」時
         呼叫：強制關閉正在執行的主程式，讓前端可以接著重新呼叫
         trigger_installation()。寫法比照 uninstall.py 既有的慣例
         （taskkill /f、CREATE_NO_WINDOW、吞例外回傳布林值），不做「先禮貌
         關閉、失敗才強制」這種分層。
+
+        回傳值檢查 taskkill 的 returncode，不是「呼叫沒拋例外就一律回傳
+        True」——找不到目標程序時 taskkill 會用非 0 的 returncode 表示
+        失敗（stderr 導到 DEVNULL，呼叫端原本從沒檢查過），這裡改成
+        如實反映有沒有真的成功。
         """
         if not self.main_exe:
             return False
         try:
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            subprocess.run(
+            result = subprocess.run(
                 ["taskkill", "/f", "/im", os.path.basename(self.main_exe)],
                 creationflags=creationflags, timeout=10,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
-            return True
+            return result.returncode == 0
         except Exception:
             return False
 

@@ -21,6 +21,24 @@ import os
 import shutil
 import subprocess
 
+import packaging_settings
+
+# installer_core.py/uninstall.py 這兩支 entry point 實際 import 的專案內部
+# 深模組。真實抓到的 bug：install_scope.py/self_delete.py/system_entries.py
+# 先後都漏列過，導致 frozen exe（mswi-gui.exe/mswi-cli.exe）打包出來的
+# 安裝檔一執行就 ModuleNotFoundError——.py 直接執行完全不會踩到（工作目錄
+# 本來就是原始碼目錄，什麼都找得到），只有透過這份清單被複製進工作目錄
+# （ensure_workspace_files()）、也只有先被 build_config_tool.py 的
+# --add-data 內嵌進 exe 裡，frozen exe 才真的找得到。新增任何一個
+# installer_core.py/uninstall.py 會 import 的專案內部模組，都要同步加進
+# 這裡（tests/test_shared_module_packaging.py 會自動比對、漏加會紅燈）。
+ENTRY_SCRIPTS = ["installer_core.py", "uninstall.py"]
+SHARED_DEEP_MODULES = [
+    "window_drag.py", "disk_space.py", "file_assoc.py", "lang_detect.py",
+    "restart_manager.py", "dependency_defs.py", "install_scope.py",
+    "self_delete.py", "system_entries.py",
+]
+
 
 def get_resource_path(relative_path):
     """獲取資源絕對路徑，相容 .py 直接執行與 PyInstaller onefile 打包後的環境。
@@ -34,16 +52,33 @@ def get_resource_path(relative_path):
     return os.path.join(os.path.abspath("."), relative_path)
 
 
+def default_workspace_dir():
+    """frozen exe 情境下，保證可寫入的預設工作目錄。
+
+    真實抓到的 bug：原本固定用「exe 自己所在的資料夾」，這支工具（GUI 版）
+    如果被裝在 Program Files，一般權限執行時寫不進自己所在的資料夾，
+    dist/、build/ 這些編譯產物建不出來，編譯/打包直接失敗——「裝完立刻
+    啟動」之所以能用，是因為那次啟動繼承了安裝程式（--uac-admin）的
+    提權權杖，之後從開始功能表/桌面捷徑正常雙擊打開就會踩到這個問題。
+    改成固定用使用者層級、一定寫得進去的位置，跟這支 exe 裝在哪完全脫鉤。
+    """
+    base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Local")
+    return os.path.join(base, "mac-style-windows-installer", "workspace")
+
+
 def get_workspace_dir():
     """決定這次建置作業要用的工作目錄。
 
     .py 直接執行：就是目前的工作目錄（跟原始碼放在一起，維持原行為）。
-    frozen exe：固定用「exe 所在的資料夾」，因為 builder.py 需要在這裡找到
-    （或被 ensure_workspace_files() 解壓出）installer_core.py、uninstall.py、
-    ui/index.html，dist/、build/ 等編譯產物也會落在這裡，方便使用者找到輸出結果。
+    frozen exe：優先用使用者透過 GUI 自訂並記住的位置（見
+    packaging_settings.py），沒有自訂過就用 default_workspace_dir()。
+    builder.py 需要在這裡找到（或被 ensure_workspace_files() 解壓出）
+    installer_core.py、uninstall.py、ui/index.html，dist/、build/ 等編譯
+    產物也會落在這裡。
     """
     if hasattr(sys, "_MEIPASS"):
-        return os.path.dirname(sys.executable)
+        custom = packaging_settings.load_settings().get("workspace_dir")
+        return custom or default_workspace_dir()
     return os.path.abspath(".")
 
 
@@ -108,6 +143,20 @@ def check_build_environment():
     return result
 
 
+def list_app_dir_files(app_dir):
+    """掃描 app_dir 底下所有檔案的相對路徑（不限副檔名，含子資料夾，用
+    正斜線分隔），供 GUI 的分支圖勾選（gui_config.py 的 ConfigAPI）跟
+    CLI 的 list-files 指令（builder_cli.py）共用同一份掃描邏輯。"""
+    if not app_dir or not os.path.exists(app_dir):
+        return []
+    results = []
+    for root, dirs, files in os.walk(app_dir):
+        for f in files:
+            rel = os.path.relpath(os.path.join(root, f), app_dir)
+            results.append(rel.replace("\\", "/"))
+    return sorted(results)
+
+
 def ensure_workspace_files(workspace_dir):
     """確保 installer_core.py、uninstall.py、以及 ui/ 資料夾底下所有靜態資源
     （index.html、folder_icon.png 等）都存在於工作目錄。
@@ -133,14 +182,9 @@ def ensure_workspace_files(workspace_dir):
         return None
 
     # installer_core.py / uninstall.py 是要被 builder.py 各自拉去重新編譯成
-    # 獨立 exe 的進入點；window_drag.py / disk_space.py / file_assoc.py /
-    # lang_detect.py / restart_manager.py 是它們匯入的共用深模組，同樣要在
-    # 工作目錄裡才能被那兩次 pyinstaller 呼叫找到。
-    required_scripts = [
-        "installer_core.py", "uninstall.py",
-        "window_drag.py", "disk_space.py", "file_assoc.py", "lang_detect.py",
-        "restart_manager.py", "dependency_defs.py",
-    ]
+    # 獨立 exe 的進入點；SHARED_DEEP_MODULES 是它們匯入的共用深模組，同樣
+    # 要在工作目錄裡才能被那兩次 pyinstaller 呼叫找到。
+    required_scripts = ENTRY_SCRIPTS + SHARED_DEEP_MODULES
 
     try:
         os.makedirs(os.path.join(workspace_dir, "ui"), exist_ok=True)
@@ -172,6 +216,81 @@ def ensure_workspace_files(workspace_dir):
             f"請確認這個資料夾有寫入權限（例如不要放在 C:\\Program Files 底下），"
             f"或改把打包工具移到有寫入權限的資料夾再執行。"
         )
+
+
+def _validate_signing_config(signing_raw):
+    """驗證 signing 設定，回傳 (signing_dict_or_None, error_or_None)。
+
+    signing 的驗證規則（憑證檔案存在、密碼環境變數有值）只跟 signing 自己
+    有關，跟 custom_dependencies/no_admin_install 等其他欄位完全無關，
+    原本混在 validate_and_build_pack_data() 那個大函式裡，只是因為大家都
+    要塞進同一個 pack_data dict——獨立成一個函式，才能不用建構一整包
+    app_dir/png_path 等其他欄位，直接單獨測 signing 的驗證規則。"""
+    if not signing_raw:
+        return None, None
+    cert_path = str(signing_raw.get("cert_path", "")).strip()
+    cert_password_env = str(signing_raw.get("cert_password_env", "")).strip()
+    timestamp_url = str(signing_raw.get("timestamp_url", "")).strip()
+    if not cert_path or not os.path.exists(cert_path):
+        return None, "欄位驗證失敗：<br>signing.cert_path 必須指向一個實際存在的憑證檔案（.pfx）。"
+    if not cert_password_env:
+        return None, "欄位驗證失敗：<br>signing.cert_password_env 必須指定存放憑證密碼的環境變數名稱（密碼本身不放在設定檔裡）。"
+    if not os.environ.get(cert_password_env):
+        return None, f"欄位驗證失敗：<br>環境變數「{cert_password_env}」目前沒有值，請先設定好憑證密碼再打包。"
+    return {
+        "cert_path": cert_path,
+        "cert_password_env": cert_password_env,
+        "timestamp_url": timestamp_url or "http://timestamp.digicert.com",
+    }, None
+
+
+def _validate_dependency_policy(dependencies, custom_dependencies_raw, bundle_dependencies_raw):
+    """驗證 custom_dependencies/bundle_dependencies，回傳
+    (custom_dependencies, bundle_dependencies, error_or_None)。
+
+    這三個欄位只跟彼此有關——bundle_dependencies 要交叉比對
+    custom_dependencies 算出來的 key 清單，才知道「內嵌」這個要求指的是
+    哪個相依元件——跟 signing/no_admin_install 這些不相關的欄位無關，
+    獨立成一個函式才能單獨測交叉驗證的規則，不用管其他欄位。"""
+    built_in_dependency_keys = {"vcredist_x64", "dotnet_desktop"}
+    custom_dependencies = []
+    seen_custom_keys = set()
+    for entry in custom_dependencies_raw:
+        if not isinstance(entry, dict):
+            return None, None, "欄位驗證失敗：<br>custom_dependencies 裡每一筆都必須是物件（字典）。"
+        key = str(entry.get("key", "")).strip()
+        display_name = str(entry.get("display_name", "")).strip()
+        download_url = str(entry.get("download_url", "")).strip()
+        registry_check = entry.get("registry_check", {}) or {}
+        if not key or not display_name or not download_url or not registry_check.get("path"):
+            return None, None, "欄位驗證失敗：<br>custom_dependencies 裡每一筆都必須填 key、display_name、download_url、registry_check.path。"
+        if key in built_in_dependency_keys:
+            return None, None, f"欄位驗證失敗：<br>custom_dependencies 的 key「{key}」跟內建的相依元件撞名，請改用其他名稱。"
+        if key in seen_custom_keys:
+            return None, None, f"欄位驗證失敗：<br>custom_dependencies 的 key「{key}」重複了。"
+        seen_custom_keys.add(key)
+        custom_dependencies.append({
+            "key": key,
+            "display_name": display_name,
+            "download_url": download_url,
+            "silent_args": list(entry.get("silent_args", []) or []),
+            "registry_check": {
+                "hive": registry_check.get("hive", "HKLM"),
+                "path": registry_check.get("path", ""),
+                "value_name": registry_check.get("value_name"),
+                "expected": registry_check.get("expected"),
+            },
+        })
+
+    if isinstance(bundle_dependencies_raw, str):
+        bundle_dependencies_raw = bundle_dependencies_raw.replace("，", ",").split(",")
+    bundle_dependencies = [str(k).strip() for k in bundle_dependencies_raw if str(k).strip()]
+    known_dependency_keys = set(dependencies) | seen_custom_keys | built_in_dependency_keys
+    for key in bundle_dependencies:
+        if key not in known_dependency_keys or key not in dependencies:
+            return None, None, f"欄位驗證失敗：<br>bundle_dependencies 的「{key}」必須同時列在 dependencies 清單裡，才知道要內嵌哪個相依元件。"
+
+    return custom_dependencies, bundle_dependencies, None
 
 
 def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_path_selected):
@@ -206,8 +325,12 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     add_to_path = bool(data.get("add_to_path", False))
     path_target_exe = data.get("path_target_exe", "").strip()
     local_appdata_files_raw = data.get("local_appdata_files", []) or []
-    restart_explorer_on_update = bool(data.get("restart_explorer_on_update", False))
+    # 偵測並結束鎖定安裝檔案的程式：最終決定權還是在使用者手上（互動式
+    # 解除安裝一定會先跳警示問過使用者才會真的結束），打包時讓開發者關掉
+    # 這個偵測反而只是徒增要理解的設定項，改成不管傳什麼一律內建開啟。
+    restart_explorer_on_update = True
     no_admin_install = bool(data.get("no_admin_install", False))
+    custom_install_dir = data.get("custom_install_dir", "").strip() if isinstance(data.get("custom_install_dir"), str) else ""
     pre_install_script = data.get("pre_install_script", "").strip() if isinstance(data.get("pre_install_script"), str) else ""
     post_install_script = data.get("post_install_script", "").strip() if isinstance(data.get("post_install_script"), str) else ""
     custom_dependencies_raw = data.get("custom_dependencies", []) or []
@@ -297,68 +420,18 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
         if script_rel and not os.path.exists(os.path.join(app_dir, script_rel)):
             return None, f"欄位驗證失敗：<br>指定的{'安裝前置' if script_field == 'pre_install_script' else '安裝後置'}腳本「{script_rel}」不存在於應用程式資料夾中，請重新選擇。"
 
-    # custom_dependencies：只能透過 JSON 提供（巢狀結構塞進命令列不實際，
-    # 跟 eula_texts/doc_icons 同樣理由）。key 不能重複、不能跟內建的
-    # vcredist_x64/dotnet_desktop 撞名，必填欄位要齊全。
-    built_in_dependency_keys = {"vcredist_x64", "dotnet_desktop"}
-    custom_dependencies = []
-    seen_custom_keys = set()
-    for entry in custom_dependencies_raw:
-        if not isinstance(entry, dict):
-            return None, "欄位驗證失敗：<br>custom_dependencies 裡每一筆都必須是物件（字典）。"
-        key = str(entry.get("key", "")).strip()
-        display_name = str(entry.get("display_name", "")).strip()
-        download_url = str(entry.get("download_url", "")).strip()
-        registry_check = entry.get("registry_check", {}) or {}
-        if not key or not display_name or not download_url or not registry_check.get("path"):
-            return None, "欄位驗證失敗：<br>custom_dependencies 裡每一筆都必須填 key、display_name、download_url、registry_check.path。"
-        if key in built_in_dependency_keys:
-            return None, f"欄位驗證失敗：<br>custom_dependencies 的 key「{key}」跟內建的相依元件撞名，請改用其他名稱。"
-        if key in seen_custom_keys:
-            return None, f"欄位驗證失敗：<br>custom_dependencies 的 key「{key}」重複了。"
-        seen_custom_keys.add(key)
-        custom_dependencies.append({
-            "key": key,
-            "display_name": display_name,
-            "download_url": download_url,
-            "silent_args": list(entry.get("silent_args", []) or []),
-            "registry_check": {
-                "hive": registry_check.get("hive", "HKLM"),
-                "path": registry_check.get("path", ""),
-                "value_name": registry_check.get("value_name"),
-                "expected": registry_check.get("expected"),
-            },
-        })
+    # custom_dependencies/bundle_dependencies 只跟彼此有關，驗證規則收在
+    # _validate_dependency_policy()（見上方），這裡不用知道細節。
+    custom_dependencies, bundle_dependencies, error = _validate_dependency_policy(
+        dependencies, custom_dependencies_raw, bundle_dependencies_raw
+    )
+    if error:
+        return None, error
 
-    # bundle_dependencies：只能是這次打包實際會用到的相依元件 key
-    # （dependencies 清單裡的內建 key，或上面驗證過的 custom_dependencies key），
-    # 不然打包時不知道要去哪裡下載這個 key 對應的安裝檔。
-    if isinstance(bundle_dependencies_raw, str):
-        bundle_dependencies_raw = bundle_dependencies_raw.replace("，", ",").split(",")
-    bundle_dependencies = [str(k).strip() for k in bundle_dependencies_raw if str(k).strip()]
-    known_dependency_keys = set(dependencies) | seen_custom_keys | built_in_dependency_keys
-    for key in bundle_dependencies:
-        if key not in known_dependency_keys or key not in dependencies:
-            return None, f"欄位驗證失敗：<br>bundle_dependencies 的「{key}」必須同時列在 dependencies 清單裡，才知道要內嵌哪個相依元件。"
-
-    # signing：只能透過 JSON 提供，密碼只存環境變數名稱（不放明文），
-    # 打包當下就要能讀到，簽不成不該等到 signtool 執行時才失敗。
-    signing = None
-    if signing_raw:
-        cert_path = str(signing_raw.get("cert_path", "")).strip()
-        cert_password_env = str(signing_raw.get("cert_password_env", "")).strip()
-        timestamp_url = str(signing_raw.get("timestamp_url", "")).strip()
-        if not cert_path or not os.path.exists(cert_path):
-            return None, "欄位驗證失敗：<br>signing.cert_path 必須指向一個實際存在的憑證檔案（.pfx）。"
-        if not cert_password_env:
-            return None, "欄位驗證失敗：<br>signing.cert_password_env 必須指定存放憑證密碼的環境變數名稱（密碼本身不放在設定檔裡）。"
-        if not os.environ.get(cert_password_env):
-            return None, f"欄位驗證失敗：<br>環境變數「{cert_password_env}」目前沒有值，請先設定好憑證密碼再打包。"
-        signing = {
-            "cert_path": cert_path,
-            "cert_password_env": cert_password_env,
-            "timestamp_url": timestamp_url or "http://timestamp.digicert.com",
-        }
+    # signing 只跟自己有關，驗證規則收在 _validate_signing_config()（見上方）。
+    signing, error = _validate_signing_config(signing_raw)
+    if error:
+        return None, error
 
     pack_data = dict(data)
     pack_data["folder_name"] = folder_name
@@ -374,6 +447,7 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     pack_data["local_appdata_files"] = local_appdata_files
     pack_data["restart_explorer_on_update"] = restart_explorer_on_update
     pack_data["no_admin_install"] = no_admin_install
+    pack_data["custom_install_dir"] = custom_install_dir
     pack_data["pre_install_script"] = pre_install_script
     pack_data["post_install_script"] = post_install_script
     pack_data["custom_dependencies"] = custom_dependencies

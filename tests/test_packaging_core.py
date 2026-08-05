@@ -29,18 +29,50 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import packaging_core
 
 
+class TestDefaultWorkspaceDir(unittest.TestCase):
+    """真實抓到的 bug：舊版 get_workspace_dir() 在 frozen exe 情境下固定用
+    「這支 exe 自己被安裝到的資料夾」，如果這支工具（GUI 版）被裝在
+    Program Files，一般權限執行時寫不進去，編譯/打包直接失敗——跟這支
+    exe 裝在哪個位置脫鉤，改用一個保證可寫入的使用者層級固定位置。"""
+
+    def test_uses_localappdata_subfolder(self):
+        with mock.patch.dict(os.environ, {"LOCALAPPDATA": "C:\\Users\\Tester\\AppData\\Local"}):
+            self.assertEqual(
+                packaging_core.default_workspace_dir(),
+                os.path.join(
+                    "C:\\Users\\Tester\\AppData\\Local", "mac-style-windows-installer", "workspace",
+                ),
+            )
+
+
 class TestGetWorkspaceDir(unittest.TestCase):
-    def test_non_frozen_uses_cwd(self):
-        with mock.patch.object(sys, "_MEIPASS", "C:\\fake\\meipass", create=True):
-            pass  # 只是確保下面刪除時不會因為屬性本來就不存在而出錯
+    def setUp(self):
         if hasattr(sys, "_MEIPASS"):
             del sys._MEIPASS
+
+    def test_non_frozen_uses_cwd(self):
         self.assertEqual(packaging_core.get_workspace_dir(), os.path.abspath("."))
 
-    def test_frozen_uses_exe_directory(self):
+    def test_frozen_without_custom_setting_uses_default(self):
         with mock.patch.object(sys, "_MEIPASS", "C:\\fake\\meipass", create=True), \
-             mock.patch.object(sys, "executable", "C:\\Users\\Test\\InstallerBuilder.exe"):
-            self.assertEqual(packaging_core.get_workspace_dir(), "C:\\Users\\Test")
+             mock.patch.object(sys, "executable", "C:\\Program Files\\App\\InstallerBuilder.exe"), \
+             mock.patch("packaging_core.packaging_settings.load_settings", return_value={}):
+            self.assertEqual(packaging_core.get_workspace_dir(), packaging_core.default_workspace_dir())
+
+    def test_frozen_with_custom_setting_uses_persisted_override(self):
+        with mock.patch.object(sys, "_MEIPASS", "C:\\fake\\meipass", create=True), \
+             mock.patch(
+                 "packaging_core.packaging_settings.load_settings",
+                 return_value={"workspace_dir": "D:\\Builds\\Workspace"},
+             ):
+            self.assertEqual(packaging_core.get_workspace_dir(), "D:\\Builds\\Workspace")
+
+    def test_frozen_ignores_exe_directory_even_when_no_custom_setting(self):
+        """舊行為（用 exe 所在資料夾）不該再是任何情況下的結果。"""
+        with mock.patch.object(sys, "_MEIPASS", "C:\\fake\\meipass", create=True), \
+             mock.patch.object(sys, "executable", "C:\\Users\\Test\\InstallerBuilder.exe"), \
+             mock.patch("packaging_core.packaging_settings.load_settings", return_value={}):
+            self.assertNotEqual(packaging_core.get_workspace_dir(), "C:\\Users\\Test")
 
 
 class TestEnsureWorkspaceFiles(unittest.TestCase):
@@ -64,6 +96,12 @@ class TestEnsureWorkspaceFiles(unittest.TestCase):
             f.write("# NEW restart_manager content")
         with open(os.path.join(self.embedded_dir, "dependency_defs.py"), "w") as f:
             f.write("# NEW dependency_defs content")
+        with open(os.path.join(self.embedded_dir, "install_scope.py"), "w") as f:
+            f.write("# NEW install_scope content")
+        with open(os.path.join(self.embedded_dir, "self_delete.py"), "w") as f:
+            f.write("# NEW self_delete content")
+        with open(os.path.join(self.embedded_dir, "system_entries.py"), "w") as f:
+            f.write("# NEW system_entries content")
         os.makedirs(os.path.join(self.embedded_dir, "ui"))
         with open(os.path.join(self.embedded_dir, "ui", "index.html"), "w") as f:
             f.write("<!-- NEW index.html -->")
@@ -182,6 +220,32 @@ class TestEnsureWorkspaceFiles(unittest.TestCase):
         self.assertIn("寫入權限", result)
 
 
+class TestListAppDirFiles(unittest.TestCase):
+    """list_app_dir_files()：掃描 app_dir 底下所有檔案的相對路徑，供
+    GUI 的分支圖勾選跟 CLI 的 list-files 指令共用同一份掃描邏輯。"""
+
+    def setUp(self):
+        self.app_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.app_dir, ignore_errors=True)
+
+    def test_lists_files_recursively_with_forward_slash_paths(self):
+        os.makedirs(os.path.join(self.app_dir, "tools"))
+        with open(os.path.join(self.app_dir, "main.exe"), "wb") as f:
+            f.write(b"x")
+        with open(os.path.join(self.app_dir, "tools", "cli.exe"), "wb") as f:
+            f.write(b"x")
+        result = packaging_core.list_app_dir_files(self.app_dir)
+        self.assertEqual(result, ["main.exe", "tools/cli.exe"])
+
+    def test_returns_empty_list_for_missing_dir(self):
+        self.assertEqual(packaging_core.list_app_dir_files(os.path.join(self.app_dir, "nope")), [])
+
+    def test_returns_empty_list_for_empty_app_dir(self):
+        self.assertEqual(packaging_core.list_app_dir_files(""), [])
+
+
 class TestValidateAndBuildPackData(unittest.TestCase):
     def setUp(self):
         self.app_dir = tempfile.mkdtemp()
@@ -221,12 +285,19 @@ class TestValidateAndBuildPackData(unittest.TestCase):
         self.assertEqual(pack_data["app_name"], "TestApp")
         self.assertEqual(pack_data["folder_name"], "TestApp", "folder_name 留空時要 fallback 成 app_name")
         self.assertEqual(pack_data["file_associations"], [])
-        self.assertFalse(pack_data["restart_explorer_on_update"])
-
-    def test_restart_explorer_on_update_passes_through(self):
-        pack_data, error = self._validate(self._base_data(restart_explorer_on_update=True))
-        self.assertIsNone(error)
         self.assertTrue(pack_data["restart_explorer_on_update"])
+
+    def test_restart_explorer_on_update_is_always_true_regardless_of_input(self):
+        """真實抓到的問題：偵測並結束鎖定安裝檔案的程式，最終決定權還是在
+        使用者手上（互動式解除安裝一定會先跳警示問過使用者才會真的結束），
+        打包時讓開發者關掉這個偵測反而只是徒增要理解的設定項——改成不管
+        開發者傳什麼，一律內建開啟。"""
+        pack_data_true, error_true = self._validate(self._base_data(restart_explorer_on_update=True))
+        pack_data_false, error_false = self._validate(self._base_data(restart_explorer_on_update=False))
+        self.assertIsNone(error_true)
+        self.assertIsNone(error_false)
+        self.assertTrue(pack_data_true["restart_explorer_on_update"])
+        self.assertTrue(pack_data_false["restart_explorer_on_update"])
 
     def test_eula_texts_pass_through_with_trimmed_empty_entries_dropped(self):
         pack_data, error = self._validate(self._base_data(
@@ -407,6 +478,16 @@ class TestValidateAndBuildPackData(unittest.TestCase):
         self.assertIsNone(error)
         self.assertTrue(pack_data["no_admin_install"])
 
+    def test_custom_install_dir_defaults_to_empty_string(self):
+        pack_data, error = self._validate(self._base_data())
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["custom_install_dir"], "")
+
+    def test_custom_install_dir_passes_through_trimmed(self):
+        pack_data, error = self._validate(self._base_data(custom_install_dir="  %APPDATA%\\MyApp  "))
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["custom_install_dir"], "%APPDATA%\\MyApp")
+
     def test_pre_install_script_must_exist_in_app_dir(self):
         _, error = self._validate(self._base_data(pre_install_script="not_there.bat"))
         self.assertIsNotNone(error)
@@ -485,6 +566,109 @@ class TestValidateAndBuildPackData(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(pack_data["signing"]["cert_path"], cert_path)
         self.assertEqual(pack_data["signing"]["timestamp_url"], "http://timestamp.digicert.com")
+
+
+class TestValidateSigningConfig(unittest.TestCase):
+    """_validate_signing_config()：獨立測試，不用像
+    TestValidateAndBuildPackData 那樣先準備 app_dir/png_path/main_exe
+    等一整包跟 signing 完全無關的欄位。"""
+
+    def test_empty_signing_is_valid_and_none(self):
+        signing, error = packaging_core._validate_signing_config({})
+        self.assertIsNone(signing)
+        self.assertIsNone(error)
+
+    def test_missing_cert_file_is_rejected(self):
+        signing, error = packaging_core._validate_signing_config({
+            "cert_path": "C:\\does\\not\\exist.pfx", "cert_password_env": "MY_CERT_PW",
+        })
+        self.assertIsNone(signing)
+        self.assertIsNotNone(error)
+
+    def test_missing_password_env_value_is_rejected(self):
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            cert_path = os.path.join(tmp_dir, "cert.pfx")
+            with open(cert_path, "wb") as f:
+                f.write(b"fake cert bytes")
+            os.environ.pop("MY_TEST_CERT_PW_MISSING_UNIT", None)
+            signing, error = packaging_core._validate_signing_config({
+                "cert_path": cert_path, "cert_password_env": "MY_TEST_CERT_PW_MISSING_UNIT",
+            })
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        self.assertIsNone(signing)
+        self.assertIsNotNone(error)
+
+    def test_valid_config_defaults_timestamp_url(self):
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            cert_path = os.path.join(tmp_dir, "cert.pfx")
+            with open(cert_path, "wb") as f:
+                f.write(b"fake cert bytes")
+            with mock.patch.dict(os.environ, {"MY_TEST_CERT_PW_UNIT": "hunter2"}):
+                signing, error = packaging_core._validate_signing_config({
+                    "cert_path": cert_path, "cert_password_env": "MY_TEST_CERT_PW_UNIT",
+                })
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        self.assertIsNone(error)
+        self.assertEqual(signing["timestamp_url"], "http://timestamp.digicert.com")
+
+
+class TestValidateDependencyPolicy(unittest.TestCase):
+    """_validate_dependency_policy()：獨立測試 custom_dependencies/
+    bundle_dependencies 的交叉驗證規則，不需要 app_dir 等其他欄位。"""
+
+    def test_custom_dependency_missing_required_field_is_rejected(self):
+        custom, bundle, error = packaging_core._validate_dependency_policy(
+            [], [{"key": "my_dep"}], []
+        )
+        self.assertIsNone(custom)
+        self.assertIsNone(bundle)
+        self.assertIsNotNone(error)
+
+    def test_custom_dependency_key_colliding_with_builtin_is_rejected(self):
+        custom, bundle, error = packaging_core._validate_dependency_policy(
+            [], [{
+                "key": "vcredist_x64", "display_name": "X", "download_url": "https://x",
+                "registry_check": {"path": "SOFTWARE\\X"},
+            }], []
+        )
+        self.assertIsNotNone(error)
+
+    def test_duplicate_custom_dependency_keys_rejected(self):
+        entry = {
+            "key": "my_dep", "display_name": "X", "download_url": "https://x",
+            "registry_check": {"path": "SOFTWARE\\X"},
+        }
+        custom, bundle, error = packaging_core._validate_dependency_policy(
+            [], [entry, dict(entry)], []
+        )
+        self.assertIsNotNone(error)
+
+    def test_valid_custom_dependency_passes_through(self):
+        custom, bundle, error = packaging_core._validate_dependency_policy(
+            [], [{
+                "key": "my_dep", "display_name": "X", "download_url": "https://x",
+                "registry_check": {"path": "SOFTWARE\\X"},
+            }], []
+        )
+        self.assertIsNone(error)
+        self.assertEqual(custom[0]["key"], "my_dep")
+
+    def test_bundle_dependency_not_in_dependencies_list_is_rejected(self):
+        custom, bundle, error = packaging_core._validate_dependency_policy(
+            ["vcredist_x64"], [], ["dotnet_desktop"]
+        )
+        self.assertIsNotNone(error)
+
+    def test_bundle_dependency_matching_dependencies_list_passes(self):
+        custom, bundle, error = packaging_core._validate_dependency_policy(
+            ["vcredist_x64"], [], ["vcredist_x64"]
+        )
+        self.assertIsNone(error)
+        self.assertEqual(bundle, ["vcredist_x64"])
 
 
 if __name__ == "__main__":

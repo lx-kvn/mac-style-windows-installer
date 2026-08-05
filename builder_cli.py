@@ -47,8 +47,8 @@ TEMPLATE = {
     "add_to_path": False,
     "path_target_exe": "",
     "local_appdata_files": [],
-    "restart_explorer_on_update": False,
     "no_admin_install": False,
+    "custom_install_dir": "",
     "pre_install_script": "",
     "post_install_script": "",
     "custom_dependencies": [],
@@ -69,6 +69,7 @@ _SCALAR_OVERRIDE_FIELDS = [
     ("path_target_exe", "path_target_exe"),
     ("pre_install_script", "pre_install_script"),
     ("post_install_script", "post_install_script"),
+    ("custom_install_dir", "custom_install_dir"),
 ]
 
 
@@ -87,6 +88,11 @@ def build_arg_parser():
 
     init_p = sub.add_parser("init", help="產生一份帶預設值的範本 JSON 設定檔")
     init_p.add_argument("--output", default="installer_pack_config.json", help="範本輸出路徑")
+
+    list_files_p = sub.add_parser(
+        "list-files", help="列出 app_dir 底下所有檔案的相對路徑，方便寫 --local-appdata-files 或 JSON 設定檔前先查一下"
+    )
+    list_files_p.add_argument("--app-dir", dest="app_dir", required=True, help="應用程式內容資料夾")
 
     pack_p = sub.add_parser("pack", help="驗證設定並編譯出安裝檔")
     pack_p.add_argument("--config", default=None, help="JSON 設定檔路徑（選填，沒給就完全靠底下的 flag）")
@@ -110,10 +116,6 @@ def build_arg_parser():
     pack_p.add_argument(
         "--local-appdata-files", dest="local_appdata_files", default=None,
         help="逗號分隔，相對於 app_dir 的路徑，指定改裝到 %%LOCALAPPDATA%%\\Programs\\<folder_name>（不需要系統管理員權限）",
-    )
-    pack_p.add_argument(
-        "--restart-explorer-on-update", dest="restart_explorer_on_update",
-        action=argparse.BooleanOptionalAction, default=None,
     )
     # 真實抓到的 bug：argparse.BooleanOptionalAction 的 __call__ 判斷「這次是不是
     # 停用」的方式是看實際打的那個 option string 開頭是不是 "--no-"
@@ -147,6 +149,16 @@ def cmd_init(args):
     return 0
 
 
+def cmd_list_files(args):
+    files = packaging_core.list_app_dir_files(args.app_dir)
+    if not files:
+        print(f"（找不到檔案，請確認 app_dir 路徑是否正確：{args.app_dir}）")
+        return 0
+    for f in files:
+        print(f)
+    return 0
+
+
 def _load_pack_input(args):
     """組出 validate_and_build_pack_data() 需要的 data 字典 + 四個路徑參數。
     JSON（--config，選填）是底，命令列參數有帶值就覆蓋對應欄位——CLI 優先。
@@ -172,8 +184,6 @@ def _load_pack_input(args):
         data["add_to_path"] = args.add_to_path
     if args.local_appdata_files is not None:
         data["local_appdata_files"] = [f.strip() for f in args.local_appdata_files.split(",") if f.strip()]
-    if args.restart_explorer_on_update is not None:
-        data["restart_explorer_on_update"] = args.restart_explorer_on_update
     if args.no_admin_install is not None:
         data["no_admin_install"] = args.no_admin_install
     if args.bundle_dependencies is not None:
@@ -247,6 +257,7 @@ def cmd_pack(args):
             local_appdata_files=pack_data.get("local_appdata_files", []),
             restart_explorer_on_update=pack_data.get("restart_explorer_on_update", False),
             no_admin_install=pack_data.get("no_admin_install", False),
+            custom_install_dir=pack_data.get("custom_install_dir", ""),
             pre_install_script=pack_data.get("pre_install_script", ""),
             post_install_script=pack_data.get("post_install_script", ""),
             custom_dependencies=pack_data.get("custom_dependencies", []),
@@ -269,6 +280,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.command == "init":
         return cmd_init(args)
+    if args.command == "list-files":
+        return cmd_list_files(args)
     if args.command == "pack":
         return cmd_pack(args)
     parser.print_help()

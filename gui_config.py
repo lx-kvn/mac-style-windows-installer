@@ -46,6 +46,7 @@ import splash
 import builder
 import threading
 import lang_detect
+import packaging_settings
 from window_drag import WindowDragController
 from packaging_core import (
     get_resource_path,
@@ -53,6 +54,7 @@ from packaging_core import (
     check_build_environment,
     ensure_workspace_files,
     validate_and_build_pack_data,
+    list_app_dir_files as scan_app_dir_files,
 )
 
 # 打包工具本身的介面語言選項，對應 ui/config.html 內嵌的 I18N 翻譯表。
@@ -148,6 +150,32 @@ class ConfigAPI:
         if self._window:
             self._window.minimize()
 
+    def get_current_workspace_dir(self):
+        """供前端在畫面載入時呼叫，顯示目前實際會用到的編譯工作目錄
+        （使用者自訂過就是那個位置，沒自訂過就是保證可寫入的預設值，
+        見 packaging_core.get_workspace_dir()）。"""
+        return get_workspace_dir()
+
+    def select_workspace_dir(self):
+        """讓使用者自訂編譯工作目錄（例如想改放到別的磁碟），選好立刻
+        持久化記住，下次開啟這支工具會直接沿用，不用每次重選。"""
+        window = webview.active_window()
+        res = window.create_file_dialog(webview.FOLDER_DIALOG)
+        if not res:
+            return ""
+        chosen = res[0]
+        settings = packaging_settings.load_settings()
+        settings["workspace_dir"] = chosen
+        packaging_settings.save_settings(settings)
+        return chosen
+
+    def reset_workspace_dir(self):
+        """取消自訂，改回保證可寫入的預設工作目錄。"""
+        settings = packaging_settings.load_settings()
+        settings.pop("workspace_dir", None)
+        packaging_settings.save_settings(settings)
+        return get_workspace_dir()
+
     def select_app_dir(self):
         """選擇要打包的應用程式資料夾"""
         window = webview.active_window()
@@ -215,17 +243,17 @@ class ConfigAPI:
         """
         self.doc_icon_path = ""
 
+    def list_app_dir_files(self):
+        """掃描目前選定的 app_dir，回傳裡面所有檔案的相對路徑（不限副檔名），
+        供前端渲染成分支圖勾選要改裝到 %LOCALAPPDATA% 的檔案（見
+        local_appdata_files），取代原本要手動輸入逗號分隔路徑的做法。
+        掃描邏輯收在 packaging_core.list_app_dir_files()，CLI 的
+        list-files 指令共用同一份實作。"""
+        return scan_app_dir_files(self.app_dir)
+
     def list_exe_files(self):
         """掃描目前選定的 app_dir，回傳裡面所有 .exe 的相對路徑，供前端下拉選單選擇主執行檔"""
-        if not self.app_dir or not os.path.exists(self.app_dir):
-            return []
-        results = []
-        for root, dirs, files in os.walk(self.app_dir):
-            for f in files:
-                if f.lower().endswith(".exe"):
-                    rel = os.path.relpath(os.path.join(root, f), self.app_dir)
-                    results.append(rel.replace("\\", "/"))
-        return results
+        return [p for p in self.list_app_dir_files() if p.lower().endswith(".exe")]
 
     def start_pack(self, data):
         """接收前端表單資料，執行嚴格驗證並啟動背景線程打包"""
@@ -294,6 +322,7 @@ class ConfigAPI:
                 local_appdata_files=data.get("local_appdata_files", []),
                 restart_explorer_on_update=data.get("restart_explorer_on_update", False),
                 no_admin_install=data.get("no_admin_install", False),
+                custom_install_dir=data.get("custom_install_dir", ""),
                 pre_install_script=data.get("pre_install_script", ""),
                 post_install_script=data.get("post_install_script", ""),
                 custom_dependencies=data.get("custom_dependencies", []),

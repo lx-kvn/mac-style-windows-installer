@@ -6,12 +6,14 @@
 邏輯：JSON 載入、CLI flag 覆蓋規則、need_file_assoc/use_custom_doc_icon
 的推斷、環境檢查失敗/驗證失敗的 exit code 與輸出。
 """
+import io
 import os
 import sys
 import json
 import shutil
 import tempfile
 import unittest
+import contextlib
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -34,6 +36,42 @@ class TestCmdInit(unittest.TestCase):
             template = json.load(f)
         for key in ("app_name", "main_exe", "eula_texts", "path_target_exe", "add_to_path"):
             self.assertIn(key, template)
+
+
+class TestCmdListFiles(unittest.TestCase):
+    """list-files 子指令：CLI 使用者寫 --local-appdata-files 或 JSON 設定檔
+    之前，先查一下 app_dir 底下有哪些檔案可以選，不用自己土法煉鋼翻資料夾。
+    掃描邏輯共用 packaging_core.list_app_dir_files()，這裡只測 CLI 這層
+    （引數解析、輸出格式、exit code）。"""
+
+    def setUp(self):
+        self.app_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.app_dir, ignore_errors=True)
+
+    def test_lists_relative_paths_one_per_line(self):
+        os.makedirs(os.path.join(self.app_dir, "tools"))
+        with open(os.path.join(self.app_dir, "main.exe"), "wb") as f:
+            f.write(b"x")
+        with open(os.path.join(self.app_dir, "tools", "cli.exe"), "wb") as f:
+            f.write(b"x")
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            exit_code = builder_cli.main(["list-files", "--app-dir", self.app_dir])
+
+        self.assertEqual(exit_code, 0)
+        lines = buf.getvalue().splitlines()
+        self.assertIn("main.exe", lines)
+        self.assertIn("tools/cli.exe", lines)
+
+    def test_missing_app_dir_reports_message_without_crashing(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            exit_code = builder_cli.main(["list-files", "--app-dir", os.path.join(self.app_dir, "nope")])
+        self.assertEqual(exit_code, 0)
+        self.assertIn("nope", buf.getvalue())
 
 
 class TestLoadPackInput(unittest.TestCase):
@@ -111,6 +149,12 @@ class TestLoadPackInput(unittest.TestCase):
         args = self._parse(["pack"])
         data, *_ = builder_cli._load_pack_input(args)
         self.assertNotIn("no_admin_install", data)
+
+    def test_custom_install_dir_flag_overrides_json(self):
+        self._write_config({"custom_install_dir": "FromJSON"})
+        args = self._parse(["pack", "--custom-install-dir", "%APPDATA%\\MyApp", "--config", self.config_path])
+        data, *_ = builder_cli._load_pack_input(args)
+        self.assertEqual(data["custom_install_dir"], "%APPDATA%\\MyApp")
 
     def test_local_appdata_files_csv_parsed_into_list(self):
         args = self._parse(["pack", "--local-appdata-files", "cli.exe, tools/helper.exe"])

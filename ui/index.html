@@ -143,6 +143,13 @@
         .nice-btn:hover { background: #0077ED; }
         .nice-btn.secondary { background: #e5e5ea; color: #1d1d1f; }
         .nice-btn.secondary:hover { background: #d8d8dd; }
+        /* 「略過偵測，強制繼續」這類最後手段選項：視覺份量刻意比 .secondary
+           更輕，不跟主要按鈕搶注意力，避免使用者養成習慣每次都跳過偵測 */
+        .nice-btn.tertiary {
+            background: transparent; color: #86868b; padding: 8px 12px;
+            font-size: 12px; text-decoration: underline; text-underline-offset: 2px;
+        }
+        .nice-btn.tertiary:hover { color: #1d1d1f; background: transparent; }
 
         .launch-row { display: flex; align-items: center; justify-content: center; gap: 6px; margin: 4px 0 16px 0; }
         .launch-row input[type="checkbox"] { width: 14px; height: 14px; cursor: pointer; }
@@ -271,9 +278,21 @@
         <div class="nice-modal-box">
             <div class="nice-icon warn"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L14.7 3.86a2 2 0 0 0-3.4 0z"></path></svg></div>
             <div class="nice-title" data-i18n="process_running_title">偵測到程式正在執行</div>
-            <div class="nice-message" id="processRunningMessage"></div>
+            <div class="nice-message" id="processRunningMessage" style="text-align:center;"></div>
             <button class="nice-btn secondary" onclick="cancelProcessRunningModal()" data-i18n="btn_cancel">取消</button>
             <button class="nice-btn" onclick="closeRunningAppAndRetry()" data-i18n="btn_close_and_continue">關閉程式並繼續安裝</button>
+            <div><button class="nice-btn tertiary" onclick="forceContinueInstall()" data-i18n="btn_force_continue">關閉沒有用？略過偵測，強制繼續安裝</button></div>
+        </div>
+    </div>
+
+    <!-- 檔案被其他程式鎖住：讓使用者選擇直接關閉那個程式並重試，或取消 -->
+    <div class="nice-modal-overlay" id="fileLockedModal">
+        <div class="nice-modal-box">
+            <div class="nice-icon warn"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L14.7 3.86a2 2 0 0 0-3.4 0z"></path></svg></div>
+            <div class="nice-title" data-i18n="file_locked_title">檔案使用中</div>
+            <div class="nice-message" id="fileLockedMessage"></div>
+            <button class="nice-btn secondary" onclick="cancelFileLockedModal()" data-i18n="btn_cancel">取消</button>
+            <button class="nice-btn" onclick="closeLockingProcessAndRetry()" data-i18n="btn_close_locking_process">關閉此程式</button>
         </div>
     </div>
 
@@ -336,6 +355,9 @@
                 upgrade_older_msg: "已安裝的版本是 {{old}}，比這次要安裝的版本 {{new}} 還新，這次要安裝的版本比較舊。選擇「仍要繼續安裝」會用這次較舊的版本覆蓋現有安裝，選擇「取消」則結束安裝程式。",
                 process_running_title: "偵測到程式正在執行",
                 btn_close_and_continue: "關閉程式並繼續安裝",
+                btn_force_continue: "關閉沒有用？略過偵測，強制繼續安裝",
+                file_locked_title: "檔案使用中",
+                btn_close_locking_process: "關閉此程式",
             },
             "en": {
                 close_title: "Close",
@@ -372,6 +394,9 @@
                 upgrade_older_msg: "The installed version is {{old}}, which is newer than the version you're about to install ({{new}}). Choose \"Continue Anyway\" to overwrite it with this older version, or \"Cancel\" to quit.",
                 process_running_title: "Application is currently running",
                 btn_close_and_continue: "Close it and continue installing",
+                btn_force_continue: "Closing didn't help? Skip detection and continue anyway",
+                file_locked_title: "File in use",
+                btn_close_locking_process: "Close this program",
             },
         };
         let currentLang = "zh-TW";
@@ -655,7 +680,36 @@
             attemptInstall(lastCreateDesktopShortcut);
         }
 
-        async function attemptInstall(createDesktopShortcut) {
+        // 保底選項：極少數情況下偵測會卡死（例如目標程式在系統層級留下
+        // Windows 工作管理員都看不到、但行程表裡還存在的殭屍行程，
+        // taskkill 對這種情況也沒用，只有重開機才會恢復正常）——這種情境
+        // 讓使用者一直被卡在「關閉程式並繼續」也沒用的迴圈裡沒有意義，
+        // 提供一個明確跳過偵測、強制繼續的出口。
+        function forceContinueInstall() {
+            document.getElementById('processRunningModal').classList.remove('active');
+            attemptInstall(lastCreateDesktopShortcut, true);
+        }
+
+        // ---------------- 檔案使用中：互動式關閉鎖定程式並重試 ----------------
+        // 複製檔案途中遇到 sharing/lock violation，trigger_installation()
+        // 能查到是哪個程式鎖住的話會回傳 file_locked 狀態（含 processes
+        // 清單），讓這裡跳出「關閉此程式／取消」的彈窗，不用逼使用者自己
+        // 去工作管理員手動關閉。跟 process_running 是同一種互動模式。
+        let lastLockingProcesses = [];
+
+        function cancelFileLockedModal() {
+            document.getElementById('fileLockedModal').classList.remove('active');
+            resetInstallUiAfterCancelOrFailure();
+            pathPreview.innerText = pathPreview.dataset.beforeInstall || '';
+        }
+
+        async function closeLockingProcessAndRetry() {
+            document.getElementById('fileLockedModal').classList.remove('active');
+            await pywebview.api.close_locking_processes(lastLockingProcesses);
+            attemptInstall(lastCreateDesktopShortcut);
+        }
+
+        async function attemptInstall(createDesktopShortcut, skipProcessCheck) {
             lastCreateDesktopShortcut = createDesktopShortcut;
             pathPreview.dataset.beforeInstall = pathPreview.innerText;
             document.getElementById('installProgressWrap').style.display = 'block';
@@ -663,7 +717,7 @@
             document.getElementById('installProgressFill').style.width = '0%';
             pathPreview.innerText = t('installing');
 
-            const result = await pywebview.api.trigger_installation(createDesktopShortcut);
+            const result = await pywebview.api.trigger_installation(createDesktopShortcut, !!skipProcessCheck);
 
             if (result.status === 'success') {
                 installSucceeded = true;
@@ -675,6 +729,12 @@
                 pathPreview.innerText = pathPreview.dataset.beforeInstall || '';
                 document.getElementById('processRunningMessage').innerText = result.message;
                 document.getElementById('processRunningModal').classList.add('active');
+            } else if (result.status === 'file_locked') {
+                resetInstallUiAfterCancelOrFailure();
+                pathPreview.innerText = pathPreview.dataset.beforeInstall || '';
+                lastLockingProcesses = result.processes || [];
+                document.getElementById('fileLockedMessage').innerText = result.message;
+                document.getElementById('fileLockedModal').classList.add('active');
             } else {
                 installSucceeded = false;
                 showModal(t('install_failed_title'), result.message, true, false);

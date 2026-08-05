@@ -31,7 +31,7 @@ pip install pyinstaller pywebview pywin32
 
 ---
 
-## 兩個子指令
+## 三個子指令
 
 ### `init`：產生範本設定檔
 
@@ -43,6 +43,18 @@ python builder_cli.py init [--output installer_pack_config.json]
 JSON 範本，把裡面的值改成你自己的即可。JSON 沒有註解語法，範本裡的值
 本身就是提示（例如 `"app_name": "MyCustomApp"` 提示這裡要填應用程式
 名稱）。
+
+### `list-files`：列出 app_dir 底下的檔案
+
+```
+python builder_cli.py list-files --app-dir C:\path\to\your\app
+```
+
+列出 `app_dir` 底下所有檔案的相對路徑（含子資料夾，一行一個），方便
+在寫 `--local-appdata-files` 或 JSON 設定檔的 `local_appdata_files`
+欄位之前，先查一下有哪些檔案可以選，不用自己土法煉鋼翻資料夾——跟
+GUI 版「個別檔案改裝到其他位置」的分支圖勾選，共用同一份掃描邏輯。
+路徑不存在或底下沒有檔案時會印出提示訊息，exit code 仍是 0。
 
 ### `pack`：驗證並編譯
 
@@ -90,7 +102,6 @@ python builder_cli.py pack --config app.json [--其他 flag 覆蓋個別欄位..
 | `add_to_path` | `--add-to-path` / `--no-add-to-path` | 否 | 安裝後是否把路徑加入環境變數 PATH |
 | `path_target_exe` | `--path-target-exe` | 否 | `add_to_path` 開啟時，指定只把這支執行檔所在的目錄加入 PATH（不填就是整個安裝目錄，見規格文件 §8.14） |
 | `local_appdata_files` | `--local-appdata-files` | 否 | 逗號分隔，相對於 `app_dir` 的路徑，指定這些檔案改裝到 `%LOCALAPPDATA%\Programs\<folder_name>`（使用者自己的目錄，不需要系統管理員權限）而不是主安裝目錄；典型用途是跟主程式分開的 CLI 工具，讓使用者事後單純執行它不用每次都提權。如果 `path_target_exe` 也列在這裡，加進 PATH 的會自動變成這個別位目錄，見規格文件 §8.19 |
-| `restart_explorer_on_update` | `--restart-explorer-on-update` / `--no-restart-explorer-on-update` | 否 | 更新覆蓋安裝或解除安裝時是否偵測並結束鎖定安裝檔案的進程（不只是 explorer.exe，用 Windows Restart Manager API 實際偵測是哪些進程持有控制代碼）；更新覆蓋（無人值守）直接套用，手動解除安裝會先跳確認對話框列出偵測到的進程（見規格文件 §8.12） |
 | `custom_dependencies` | （只能透過 JSON） | 否 | 自訂相依元件清單，讓 `dependencies` 不再侷限於內建的 `vcredist_x64`/`dotnet_desktop`。每筆是一個物件：`key`（不可跟內建 key 撞名）、`display_name`、`download_url`（靜默安裝檔下載連結）、`silent_args`（靜默安裝命令列參數陣列）、`registry_check`（`{hive, path, value_name, expected}`，`value_name` 留空代表只檢查這個機碼是否存在）。跟 `eula_texts`/`doc_icons` 一樣是巢狀結構，沒有對應的命令列 flag。見規格文件 §8.23 |
 | `bundle_dependencies` | `--bundle-dependencies` | 否 | 逗號分隔，列在 `dependencies`（或 `custom_dependencies`）裡的相依元件 key，打包當下就把安裝檔下載下來內嵌進 Setup.exe，安裝時不需要再連網下載（安裝檔會變大）。沒列在這裡的相依元件維持原本「安裝時才連網下載」的行為。見規格文件 §8.24 |
 | `no_admin_install` | `--no-admin-install` / `--no-no-admin-install` | 否 | 開啟後整個安裝檔（含解除安裝）完全不要求系統管理員權限，不會跳出 UAC 提示：預設安裝路徑改成 `%LOCALAPPDATA%\Programs\<folder_name>`，解除安裝登錄表、PATH、捷徑都改寫到使用者層級（HKCU、`%APPDATA%`/`%USERPROFILE%\Desktop`）而不是系統層級。適合單一使用者自己安裝、不需要讓電腦上其他使用者共用的情境。見規格文件 §8.25 |

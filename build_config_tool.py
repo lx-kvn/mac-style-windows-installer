@@ -73,6 +73,8 @@ import ctypes
 import tkinter as tk
 from tkinter import filedialog, ttk
 
+import packaging_core
+
 ENTRY_SCRIPT = "gui_config.py"
 CLI_ENTRY_SCRIPT = "builder_cli.py"
 OUTPUT_NAME = "InstallerBuilder"
@@ -88,16 +90,16 @@ SUCCESS = "#34C759"
 ERROR = "#FF6B6B"
 
 # 兩顆 exe（GUI 版、CLI 版）都要內嵌的共用深模組：packaging_core.py 讀取
-# installer_core.py/uninstall.py 的 ensure_workspace_files()，跟這兩支各自
-# 匯入的 window_drag.py/disk_space.py/file_assoc.py/lang_detect.py/
-# restart_manager.py，必須實際存在於磁碟上才能在 builder.py 另外呼叫的
-# pyinstaller 子行程裡被找到。splash_helper.py 只有 GUI 版需要（CLI 沒有
-# Tkinter 載入畫面）。
-_SHARED_ADD_DATA = [
-    "installer_core.py", "uninstall.py",
-    "window_drag.py", "disk_space.py", "file_assoc.py", "lang_detect.py",
-    "restart_manager.py", "dependency_defs.py",
-]
+# installer_core.py/uninstall.py 的 ensure_workspace_files()，跟這兩支
+# entry point 實際 import 的專案內部深模組，必須實際存在於磁碟上才能在
+# builder.py 另外呼叫的 pyinstaller 子行程裡被找到。這份清單直接沿用
+# packaging_core.py 的 ENTRY_SCRIPTS/SHARED_DEEP_MODULES（唯一真實來源），
+# 不在這裡另外維護一份手動同步的複本——真實抓到的 bug：install_scope.py/
+# self_delete.py/system_entries.py 都曾經因為兩邊清單各自維護、忘記同步
+# 更新，導致打包出來的 exe 一執行就 ModuleNotFoundError（見
+# tests/test_shared_module_packaging.py）。splash_helper.py 只有 GUI 版
+# 需要（CLI 沒有 Tkinter 載入畫面）。
+_SHARED_ADD_DATA = packaging_core.ENTRY_SCRIPTS + packaging_core.SHARED_DEEP_MODULES
 _GUI_ADD_DATA = _SHARED_ADD_DATA + ["splash_helper.py", "packaging_core.py"]
 _CLI_ADD_DATA = _SHARED_ADD_DATA + ["packaging_core.py", "builder.py"]
 
@@ -109,16 +111,8 @@ _REQUIRED_FILES = [
     ("ui/config.html", os.path.join("ui", "config.html")),
     ("ui/index.html", os.path.join("ui", "index.html")),
     ("ui/uninstall.html", os.path.join("ui", "uninstall.html")),
-    ("installer_core.py", "installer_core.py"),
-    ("uninstall.py", "uninstall.py"),
     ("splash_helper.py", "splash_helper.py"),
-    ("window_drag.py", "window_drag.py"),
-    ("disk_space.py", "disk_space.py"),
-    ("file_assoc.py", "file_assoc.py"),
-    ("lang_detect.py", "lang_detect.py"),
-    ("restart_manager.py", "restart_manager.py"),
-    ("dependency_defs.py", "dependency_defs.py"),
-]
+] + [(name, name) for name in _SHARED_ADD_DATA]
 
 
 def check_prerequisites():

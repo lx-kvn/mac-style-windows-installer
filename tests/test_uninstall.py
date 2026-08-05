@@ -26,27 +26,23 @@ import uninstall as un
 
 
 class TestExplorerRestartHelpers(unittest.TestCase):
-    """_restart_explorer() / _process_image_name() / _kill_processes()：
-    更新覆蓋安裝或解除安裝時（打包時勾選 restart_explorer_on_update）用來
-    釋放被鎖住的檔案。main() 本身涉及 MessageBoxW/is_admin()/sys.argv 等
-    GUI/系統層面的東西，這個檔案原本就沒有整合測試 main()，這裡只測可以
-    獨立驗證的這幾個 best-effort 函式本身。
+    """_process_image_name() / _kill_processes()：更新覆蓋安裝或解除安裝時
+    用來釋放被鎖住的檔案。main() 本身涉及 MessageBoxW/is_admin()/sys.argv
+    等 GUI/系統層面的東西，這個檔案原本就沒有整合測試 main()，這裡只測
+    可以獨立驗證的這幾個 best-effort 函式本身。
 
     真實抓到的 bug：舊版 _kill_explorer() 寫死「一定是 explorer.exe 鎖住」，
     只涵蓋殼層擴充功能這一種情境。現在改用 restart_manager（包 Windows
     Restart Manager API）實際偵測是哪些進程鎖住了要刪除的檔案，
     _kill_processes() 逐一結束真正的鎖定者（不是無差別 taskkill /im
-    explorer.exe），只有結束掉的進程剛好是 explorer.exe 才會自動重啟。"""
+    explorer.exe）。
 
-    def test_restart_explorer_launches_explorer_exe(self):
-        with mock.patch("uninstall.subprocess.Popen") as mock_popen:
-            un._restart_explorer()
-        args, kwargs = mock_popen.call_args
-        self.assertEqual(args[0], ["explorer.exe"])
-
-    def test_restart_explorer_swallows_failure(self):
-        with mock.patch("uninstall.subprocess.Popen", side_effect=RuntimeError("模擬失敗")):
-            un._restart_explorer()  # 不應該拋例外
+    真實抓到的另一個問題：原本結束掉的進程裡如果有 explorer.exe，會另外
+    呼叫 subprocess.Popen(["explorer.exe"]) 主動重啟它。實測發現這個呼叫
+    會跳出一個瀏覽視窗——只有『目前沒有任何 explorer.exe 在跑』時，執行
+    explorer.exe 才會直接成為桌面/工作列（不開視窗）；跳出視窗代表呼叫
+    當下 shell 其實已經被復原了，這一步已經是多餘、甚至會多跳出一個
+    使用者沒有要求的視窗，所以拿掉了這個明確重啟的步驟。"""
 
     def test_process_image_name_parses_tasklist_csv_output(self):
         fake_output = '"explorer.exe","1234","Console","1","12,345 K"\r\n'
@@ -192,6 +188,38 @@ class TestUninstallerAPI(unittest.TestCase):
             self.assertTrue(api.check_main_exe_running())
         mock_running.assert_called_once_with("app.exe")
 
+    def test_close_running_main_exe_calls_taskkill_with_main_exe_basename(self):
+        """使用者在解除安裝端『偵測到程式正在執行』畫面按下「關閉應用程式
+        並繼續解除安裝」時呼叫，寫法比照 installer_core.py 既有的
+        close_running_main_exe()：taskkill /f、CREATE_NO_WINDOW、檢查
+        returncode（不是呼叫沒拋例外就一律回傳 True）。"""
+        api = self._make_api()
+        with mock.patch("uninstall.subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            result = api.close_running_main_exe()
+        self.assertTrue(result)
+        args, kwargs = mock_run.call_args
+        self.assertEqual(args[0], ["taskkill", "/f", "/im", "app.exe"])
+
+    def test_close_running_main_exe_returns_false_when_taskkill_reports_failure(self):
+        api = self._make_api()
+        with mock.patch("uninstall.subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 128
+            self.assertFalse(api.close_running_main_exe())
+
+    def test_close_running_main_exe_returns_false_without_main_exe(self):
+        ctx = {
+            "current_dir": self.tmp_dir, "manifest": {}, "app_name": "測試應用程式",
+            "main_exe": "", "no_admin_install": False,
+        }
+        api = un.UninstallerAPI(ctx)
+        self.assertFalse(api.close_running_main_exe())
+
+    def test_close_running_main_exe_swallows_failure(self):
+        api = self._make_api()
+        with mock.patch("uninstall.subprocess.run", side_effect=RuntimeError("模擬失敗")):
+            self.assertFalse(api.close_running_main_exe())
+
     def test_get_locking_process_names_caches_and_dedupes(self):
         api = self._make_api(restart_explorer_on_update=True, files=["app.exe"])
         with mock.patch("uninstall.restart_manager.find_locking_processes", return_value=[(1, "A"), (2, "A"), (3, "B")]):
@@ -235,19 +263,19 @@ class TestUninstallerAPI(unittest.TestCase):
         fake_window = mock.Mock()
         with mock.patch.object(un, "window", fake_window, create=True), \
              mock.patch("uninstall._write_uninstall_log") as mock_log, \
-             mock.patch("uninstall._schedule_self_delete") as mock_schedule, \
+             mock.patch.object(un.self_delete, "schedule_if_needed") as mock_schedule, \
              mock.patch("uninstall.os._exit") as mock_exit:
             api.finish_and_exit()
         fake_window.hide.assert_called_once()
         mock_log.assert_called_once()
-        mock_schedule.assert_called_once_with(self.tmp_dir, sys.argv[0], True)
+        mock_schedule.assert_called_once_with(sys.argv, self.tmp_dir, sys.argv[0], True)
         mock_exit.assert_called_once_with(0)
 
     def test_cancel_hard_exits_without_deleting(self):
         api = self._make_api()
         fake_window = mock.Mock()
         with mock.patch.object(un, "window", fake_window, create=True), \
-             mock.patch("uninstall._schedule_self_delete") as mock_schedule, \
+             mock.patch.object(un.self_delete, "schedule_if_needed") as mock_schedule, \
              mock.patch("uninstall.os._exit") as mock_exit:
             api.cancel()
         fake_window.hide.assert_called_once()
@@ -285,157 +313,14 @@ class TestLoadUninstallContext(unittest.TestCase):
         self.assertEqual(ctx["app_name"], "FromConfig")
 
 
-class TestUpgradeSelfDeleteGating(unittest.TestCase):
-    """真實抓到的 bug：main() 尾端的自我刪除是 fire-and-forget（背景、不等待
-    的 cmd.exe，先 ping 製造約 1 秒延遲才真正 del/rmdir）。更新覆蓋安裝時，
-    installer_core.py 用 subprocess.run() 同步呼叫舊版 uninstall.exe，行程
-    一結束就繼續複製新版本檔案——這時候背景那個延遲後才執行的 rmdir /s /q
-    根本還沒發生，如果複製時間跨過那個延遲視窗，會把整個資料夾（含新複製
-    好的檔案）一起砍掉，導致「安裝回報成功但檔案沒有複製完整」。修正：
-    --upgrade 旗標讓舊版 uninstall.exe 完全不排這段背景指令。"""
-
-    def test_is_upgrade_call_detects_flag(self):
-        self.assertTrue(un._is_upgrade_call(["uninstall.exe", "--silent", "--upgrade"]))
-
-    def test_is_upgrade_call_false_without_flag(self):
-        self.assertFalse(un._is_upgrade_call(["uninstall.exe", "--silent"]))
-
-    def test_self_delete_skipped_when_upgrade(self):
-        self.assertFalse(un._should_schedule_self_delete(is_upgrade=True))
-
-    def test_self_delete_scheduled_when_not_upgrade(self):
-        self.assertTrue(un._should_schedule_self_delete(is_upgrade=False))
+## 自我刪除（.bat 產生＋重試邏輯 + --upgrade 旗標判斷）已經拆到
+## self_delete.py，對應測試搬到 tests/test_self_delete.py，這裡不再重複。
 
 
-class TestScheduleSelfDelete(unittest.TestCase):
-    """真實抓到的 bug（第一輪）：_schedule_self_delete() 原本固定延遲約 1 秒
-    就砍一次、不管成不成功——這在純 console 程式上大致成立，但 uninstall.exe
-    現在內嵌了 WebView2 runtime，行程真正結束可能不只 1 秒，del/rmdir 失敗時
-    又被靜默吞掉、不會重試，導致解除安裝完成後常常沒有真的把自己刪掉。
-
-    真實抓到的 bug（第二輪）：`--noconsole` 編譯之後這支 exe 沒有主控台，
-    stdin/stdout/stderr 是無效控制代碼，subprocess.Popen(shell=True) 沒有
-    明確指定這三個會嘗試繼承、導致 CreateProcess 直接失敗、自我刪除完全
-    沒被排上去。修正：明確指定 stdin/stdout/stderr=DEVNULL。
-
-    真實抓到的 bug（第三輪，用「持有檔案控制代碼 5 秒後放開」實際重現才抓到）：
-    第一輪改用的 `for /l %i in (...) do (...)` 重試迴圈，實測發現 cmd.exe
-    把整個迴圈主體當一次性解析的靜態區塊，即使檔案的鎖真的在中途放開了，
-    同一個迴圈後續每一輪還是持續回報刪除失敗，20 次重試全部落空。改成寫
-    一個暫存 `.bat`，用傳統 `:retry`/`goto retry` 標籤式重試（每次 goto
-    跳回都是重新解析那一行開始的內容，不是包在同一組括號裡的靜態區塊），
-    實測鎖一放開就能立刻在下一輪重試成功。這裡直接讓 `_schedule_self_delete()`
-    真的把 .bat 寫到磁碟（tempfile.gettempdir()，只是暫存檔，測試結束後
-    清掉），檢查寫出來的內容而不是回去斷言真的執行整個 cmd 重試流程（那
-    需要模擬真實的檔案鎖定情境）。
-    """
-
-    def _run_and_capture_bat(self, current_dir, exe_path, safe_to_remove_whole_dir):
-        with mock.patch("uninstall.subprocess.Popen") as mock_popen:
-            un._schedule_self_delete(current_dir, exe_path, safe_to_remove_whole_dir)
-        mock_popen.assert_called_once()
-        cmd = mock_popen.call_args[0][0]
-        bat_path = cmd.strip('"')
-        self.assertTrue(os.path.exists(bat_path), f"預期 .bat 已寫入磁碟：{bat_path}")
-        with open(bat_path, "r", encoding="mbcs") as f:
-            content = f.read()
-        os.remove(bat_path)
-        return content, mock_popen
-
-    def test_retries_delete_and_rmdir_when_safe_to_remove_whole_dir(self):
-        content, mock_popen = self._run_and_capture_bat("C:\\App", "C:\\App\\uninstall.exe", True)
-        self.assertIn(":retry", content)
-        self.assertIn(":giveup", content)
-        self.assertIn('del /f /q "C:\\App\\uninstall.exe"', content)
-        self.assertIn('rmdir /s /q "C:\\App"', content)
-        self.assertIn('del /f /q "%~f0"', content)
-        self.assertTrue(mock_popen.call_args.kwargs.get("shell"))
-
-    def test_retries_delete_without_rmdir_when_not_safe(self):
-        content, _ = self._run_and_capture_bat("C:\\App", "C:\\App\\uninstall.exe", False)
-        self.assertIn('del /f /q "C:\\App\\uninstall.exe"', content)
-        self.assertNotIn("rmdir", content)
-
-    def test_redirects_stdio_to_devnull_to_avoid_noconsole_invalid_handle(self):
-        _, mock_popen = self._run_and_capture_bat("C:\\App", "C:\\App\\uninstall.exe", True)
-        kwargs = mock_popen.call_args.kwargs
-        self.assertEqual(kwargs.get("stdin"), un.subprocess.DEVNULL)
-        self.assertEqual(kwargs.get("stdout"), un.subprocess.DEVNULL)
-        self.assertEqual(kwargs.get("stderr"), un.subprocess.DEVNULL)
-
-    def test_popen_failure_is_swallowed(self):
-        try:
-            with mock.patch("uninstall.subprocess.Popen", side_effect=OSError("boom")):
-                un._schedule_self_delete("C:\\App", "C:\\App\\uninstall.exe", True)  # 不應該拋出
-        finally:
-            bat_path = os.path.join(
-                tempfile.gettempdir(), f"_mswi_uninstall_cleanup_{os.getpid()}.bat"
-            )
-            if os.path.exists(bat_path):
-                os.remove(bat_path)
-
-
-class TestRemoveFromPath(unittest.TestCase):
-    def setUp(self):
-        self.fake_reg = FakeWinReg()
-        # uninstall.py 在檔案最上面就 import winreg（不像 installer_core.py 是
-        # 每個函式各自 local import），module 命名空間裡的 uninstall.winreg 早就
-        # 綁定了真正的 winreg，事後 patch sys.modules 不會回溯生效，要直接換掉
-        # uninstall 模組自己的屬性。
-        self.patcher = mock.patch.object(un, "winreg", self.fake_reg)
-        self.patcher.start()
-
-    def tearDown(self):
-        self.patcher.stop()
-
-    def _path_key(self):
-        return r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
-
-    def test_removes_only_matching_entry(self):
-        self.fake_reg.set_hklm(self._path_key(), {"Path": "C:\\Windows;C:\\Apps\\MyApp;C:\\Other"})
-        with mock.patch("uninstall.ctypes.windll.user32.SendMessageTimeoutW"):
-            un.remove_from_path("C:\\Apps\\MyApp")
-        self.assertEqual(self.fake_reg.hklm(self._path_key())["Path"], "C:\\Windows;C:\\Other")
-
-
-class TestNoAdminInstallUninstall(unittest.TestCase):
-    """no_admin_install：解除安裝端的登錄表/PATH 讀寫要對應改到使用者層級
-    （HKCU），不是系統層級（HKLM），跟安裝端保持一致。"""
-
-    def setUp(self):
-        self.fake_reg = FakeWinReg()
-        self.patcher = mock.patch.object(un, "winreg", self.fake_reg)
-        self.patcher.start()
-
-    def tearDown(self):
-        self.patcher.stop()
-
-    def test_remove_registry_entry_uses_hkcu_when_no_admin(self):
-        reg_path = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\MyApp"
-        self.fake_reg.set_hkcu(reg_path, {})
-        self.assertTrue(un.remove_registry_entry("MyApp", no_admin_install=True))
-        self.assertIsNone(self.fake_reg.hkcu(reg_path))
-
-    def test_remove_registry_entry_uses_hklm_by_default(self):
-        reg_path = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\MyApp"
-        self.fake_reg.set_hklm(reg_path, {})
-        self.assertTrue(un.remove_registry_entry("MyApp"))
-        self.assertIsNone(self.fake_reg.hklm(reg_path))
-
-    def test_remove_from_path_uses_hkcu_environment_when_no_admin(self):
-        self.fake_reg.set_hkcu("Environment", {"Path": "C:\\Windows;C:\\Apps\\MyApp"})
-        with mock.patch("uninstall.ctypes.windll.user32.SendMessageTimeoutW"):
-            un.remove_from_path("C:\\Apps\\MyApp", no_admin_install=True)
-        self.assertEqual(self.fake_reg.hkcu("Environment")["Path"], "C:\\Windows")
-
-    def test_remove_shortcut_uses_user_desktop_when_no_admin(self):
-        with mock.patch("uninstall.os.path.expanduser", return_value="C:\\Users\\Tester"), \
-             mock.patch("uninstall.os.path.exists", return_value=True) as mock_exists, \
-             mock.patch("uninstall.os.remove") as mock_remove:
-            un.remove_shortcut("MyApp", desktop=True, no_admin_install=True)
-        expected_path = os.path.join("C:\\Users\\Tester", "Desktop", "MyApp.lnk")
-        mock_exists.assert_called_once_with(expected_path)
-        mock_remove.assert_called_once_with(expected_path)
+## 登錄表項目/捷徑/PATH 的實際移除邏輯（含 no_admin_install 的 HKCU/HKLM
+## 判斷）已經拆到 system_entries.py，對應測試搬到
+## tests/test_system_entries.py。這裡的 remove_registry_entry()/
+## remove_shortcut()/remove_from_path() 只是薄薄一層委派，不再重複測試。
 
 
 class TestCliLogPath(unittest.TestCase):

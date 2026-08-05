@@ -138,6 +138,41 @@ class TestConfigAssembly(BuildAllTestBase):
         self._call_build_all(run_side_effect=fake_run, folder_name="")
         self.assertEqual(captured["folder_name"], "測試應用程式")
 
+    def test_custom_install_dir_written_to_config_verbatim(self):
+        """custom_install_dir 是原始字串（可能含 %APPDATA% 這類環境變數
+        寫法），打包當下不展開——展開要留到安裝端在使用者的電腦上執行時
+        才有意義，見 installer_core.py 的 _compute_default_path()。"""
+        captured = {}
+
+        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+            if "uninstall.py" in cmd:
+                os.makedirs(self.dist_dir, exist_ok=True)
+                with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
+                    f.write(b"FAKE")
+            else:
+                with open(os.path.join(self.workspace_dir, "installer_config.json"), encoding="utf-8") as f:
+                    captured.update(json.load(f))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        self._call_build_all(run_side_effect=fake_run, custom_install_dir="%APPDATA%\\MyApp")
+        self.assertEqual(captured["custom_install_dir"], "%APPDATA%\\MyApp")
+
+    def test_custom_install_dir_defaults_to_empty_string(self):
+        captured = {}
+
+        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+            if "uninstall.py" in cmd:
+                os.makedirs(self.dist_dir, exist_ok=True)
+                with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
+                    f.write(b"FAKE")
+            else:
+                with open(os.path.join(self.workspace_dir, "installer_config.json"), encoding="utf-8") as f:
+                    captured.update(json.load(f))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        self._call_build_all(run_side_effect=fake_run)
+        self.assertEqual(captured["custom_install_dir"], "")
+
     def test_doc_icon_path_produces_named_config_entry(self):
         doc_icon_src = os.path.join(self.app_dir, "custom_doc.ico")
         with open(doc_icon_src, "wb") as f:

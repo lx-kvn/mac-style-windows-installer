@@ -568,15 +568,28 @@ class TestCloseWindowRestoresPendingBackup(unittest.TestCase):
 class TestCloseRunningMainExe(unittest.TestCase):
     """close_running_main_exe()：使用者在「偵測到主程式執行中」的彈窗按下
     「關閉程式並繼續安裝」時呼叫，寫法比照 uninstall.py 既有的慣例
-    （taskkill /f、吞例外回傳布林值）。"""
+    （taskkill /f、吞例外回傳布林值）。
+
+    真實抓到的問題：原本只要 subprocess.run() 本身沒拋例外就一律回傳
+    True，不管 taskkill 有沒有真的成功結束程序（找不到目標程序時
+    taskkill 會用非 0 的 returncode 表示失敗，但 stderr 被導到 DEVNULL、
+    呼叫端從來沒檢查過）。改成檢查 returncode，回傳值才真的反映有沒有
+    成功。"""
 
     def test_calls_taskkill_with_main_exe_basename(self):
         api = make_installer_api(main_exe="sub\\app.exe")
         with mock.patch("installer_core.subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
             result = api.close_running_main_exe()
         self.assertTrue(result)
         args, kwargs = mock_run.call_args
         self.assertEqual(args[0], ["taskkill", "/f", "/im", "app.exe"])
+
+    def test_returns_false_when_taskkill_reports_failure(self):
+        api = make_installer_api(main_exe="app.exe")
+        with mock.patch("installer_core.subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 128  # 例如找不到目標程序
+            self.assertFalse(api.close_running_main_exe())
 
     def test_returns_false_without_main_exe(self):
         api = make_installer_api(main_exe="")
@@ -619,6 +632,21 @@ class TestProcessRunningDetection(unittest.TestCase):
         self.assertEqual(result["status"], "process_running")
         self.assertIn("app.exe", result["message"])
         self.assertFalse(os.path.exists(self.install_dir), "偵測到執行中不該建立安裝目錄、開始複製檔案")
+
+    def test_skip_process_check_bypasses_the_detection(self):
+        """保底選項：偵測卡死關不掉時（見 CONTEXT.md 的說明），讓使用者
+        可以略過偵測強制繼續，不會被卡死在 process_running 狀態。"""
+        api = make_installer_api(
+            app_name="MyApp", main_exe="app.exe", selected_path=self.install_dir,
+            file_associations=[], add_to_path=False,
+        )
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch("installer_core._is_process_running", return_value=True):
+            result = api.trigger_installation(create_desktop_shortcut=False, skip_process_check=True)
+
+        self.assertNotEqual(result["status"], "process_running")
 
 
 class TestTriggerInstallationUpgradeFlow(unittest.TestCase):
@@ -728,6 +756,105 @@ class TestRollback(unittest.TestCase):
         self.assertFalse(os.path.exists(self.tmp_dir), "回滾後資料夾裡如果真的空了，應該連資料夾一起刪掉")
 
 
+class TestRollbackCoversSystemEntries(unittest.TestCase):
+    """真實抓到的缺口：_rollback() 原本只清『這次安裝已經複製出去的檔案』，
+    但安裝流程後段還會依序寫入解除安裝登錄表項目/捷徑/檔案關聯/PATH——
+    這幾步任何一步後面的步驟失敗，前面已經成功寫入的部分完全不會被回滾，
+    使用者會卡在『安裝回報失敗，但系統裡已經留下登錄表項目/捷徑』的
+    半殘狀態。_rollback() 現在多接受這四類狀態，依「後寫的先復原」順序
+    呼叫 system_entries.py / file_assoc.py 既有的移除函式清乾淨。"""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_does_nothing_extra_when_nothing_was_written(self):
+        api = make_installer_api(selected_path=self.tmp_dir, app_name="MyApp")
+        with mock.patch("installer_core.system_entries.remove_from_path") as mock_path, \
+             mock.patch("installer_core.file_assoc.unregister") as mock_unregister, \
+             mock.patch("installer_core.system_entries.remove_shortcut") as mock_shortcut, \
+             mock.patch("installer_core.system_entries.remove_registry_entry") as mock_registry:
+            api._rollback([], log=None)
+        mock_path.assert_not_called()
+        mock_unregister.assert_not_called()
+        mock_shortcut.assert_not_called()
+        mock_registry.assert_not_called()
+
+    def test_undoes_path_file_assoc_shortcuts_and_registry_when_all_written(self):
+        api = make_installer_api(
+            selected_path=self.tmp_dir, app_name="MyApp", no_admin_install=True,
+            file_associations=[".foo"],
+        )
+        with mock.patch("installer_core.system_entries.remove_from_path") as mock_path, \
+             mock.patch("installer_core.file_assoc.unregister") as mock_unregister, \
+             mock.patch("installer_core.system_entries.remove_shortcut") as mock_shortcut, \
+             mock.patch("installer_core.system_entries.remove_registry_entry") as mock_registry:
+            api._rollback(
+                [], log=None,
+                registry_entry_created=True,
+                shortcuts_created=[False, True],
+                file_associations_registered=True,
+                path_directory="C:\\Apps\\MyApp",
+            )
+        mock_path.assert_called_once_with("C:\\Apps\\MyApp", True)
+        mock_unregister.assert_called_once_with([".foo"])
+        self.assertEqual(
+            mock_shortcut.call_args_list,
+            [
+                mock.call("MyApp", desktop=False, no_admin_install=True),
+                mock.call("MyApp", desktop=True, no_admin_install=True),
+            ],
+        )
+        mock_registry.assert_called_once_with("MyApp", True)
+
+
+class TestTriggerInstallationRollsBackSystemEntriesOnLateFailure(unittest.TestCase):
+    """比 TestRollbackCoversSystemEntries 高一層的整合測試：模擬登錄表/捷徑/
+    檔案關聯/PATH 都已經成功寫入之後，安裝流程才在寫入 manifest 這一步失敗，
+    驗證 trigger_installation() 整體回傳失敗時，這四類系統項目確實有被
+    清乾淨，不是只有複製的檔案被回滾。"""
+
+    def setUp(self):
+        self.resource_dir = tempfile.mkdtemp()
+        self.app_contents_dir = os.path.join(self.resource_dir, "app_contents")
+        os.makedirs(self.app_contents_dir)
+        with open(os.path.join(self.app_contents_dir, "app.exe"), "wb") as f:
+            f.write(b"fake-app")
+        self.install_dir = tempfile.mkdtemp()
+        shutil.rmtree(self.install_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.resource_dir, ignore_errors=True)
+        shutil.rmtree(self.install_dir, ignore_errors=True)
+
+    def test_system_entries_removed_when_manifest_write_fails(self):
+        api = make_installer_api(
+            app_name="MyApp", main_exe="app.exe", selected_path=self.install_dir,
+            file_associations=[".foo"], add_to_path=True, no_admin_install=False,
+        )
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_register_uninstall_entry"), \
+             mock.patch.object(api, "_create_shortcut", return_value=True), \
+             mock.patch("installer_core.file_assoc.register"), \
+             mock.patch.object(api, "_add_to_path_env", return_value="C:\\Apps\\MyApp"), \
+             mock.patch("installer_core.json.dump", side_effect=RuntimeError("模擬寫入 manifest 失敗")), \
+             mock.patch("installer_core.system_entries.remove_from_path") as mock_path, \
+             mock.patch("installer_core.file_assoc.unregister") as mock_unregister, \
+             mock.patch("installer_core.system_entries.remove_shortcut") as mock_shortcut, \
+             mock.patch("installer_core.system_entries.remove_registry_entry") as mock_registry:
+            result = api.trigger_installation(create_desktop_shortcut=True)
+
+        self.assertEqual(result["status"], "error")
+        mock_path.assert_called_once_with("C:\\Apps\\MyApp", False)
+        mock_unregister.assert_called_once_with([".foo"])
+        self.assertEqual(mock_shortcut.call_count, 2, "開始功能表 + 桌面捷徑都建立成功過，都該被回滾")
+        mock_registry.assert_called_once_with("MyApp", False)
+
+
 class TestGetUiLanguage(unittest.TestCase):
     def test_returns_whatever_load_config_computed(self):
         api = make_installer_api(ui_language="en")
@@ -790,7 +917,6 @@ class TestDescribeInstallOsError(unittest.TestCase):
             message = api._describe_install_os_error(error, r"C:\app\locked.dll")
         self.assertIn("locked.dll", message)
         self.assertIn("某個殼層擴充功能", message)
-        self.assertIn("系統管理員身分執行", message)
         self.assertNotIn("以管理員身分重試", message)
 
     def test_lock_violation_without_detected_process_still_explains_cause(self):
@@ -799,7 +925,6 @@ class TestDescribeInstallOsError(unittest.TestCase):
         with mock.patch("installer_core.restart_manager.find_locking_processes", return_value=[]):
             message = api._describe_install_os_error(error, r"C:\app\locked.dll")
         self.assertIn("正被其他程式使用中", message)
-        self.assertIn("系統管理員身分", message)
 
     def test_access_denied_does_not_suggest_running_as_admin(self):
         api = make_installer_api()
@@ -825,6 +950,116 @@ class TestDescribeInstallOsError(unittest.TestCase):
         error = OSError("磁碟走完了之類的其他錯誤")
         message = api._describe_install_os_error(error, None)
         self.assertIn("磁碟走完了之類的其他錯誤", message)
+
+
+class TestIsLockViolation(unittest.TestCase):
+    def test_sharing_violation_is_lock_violation(self):
+        api = make_installer_api()
+        self.assertTrue(api._is_lock_violation(_FakeWinError(32)))
+
+    def test_lock_violation_is_lock_violation(self):
+        api = make_installer_api()
+        self.assertTrue(api._is_lock_violation(_FakeWinError(33)))
+
+    def test_other_winerror_is_not_lock_violation(self):
+        api = make_installer_api()
+        self.assertFalse(api._is_lock_violation(_FakeWinError(5)))
+
+    def test_no_winerror_is_not_lock_violation(self):
+        api = make_installer_api()
+        self.assertFalse(api._is_lock_violation(OSError("沒有 winerror")))
+
+
+class TestCloseLockingProcesses(unittest.TestCase):
+    """close_locking_processes()：使用者在安裝失敗跳出的『檔案使用中』畫面
+    按下「關閉此程式」時呼叫，寫法比照既有的 close_running_main_exe()
+    （taskkill /f、CREATE_NO_WINDOW、吞例外）。
+
+    真實抓到的問題：原本如果關閉的程式裡有 explorer.exe，會額外呼叫
+    subprocess.Popen(["explorer.exe"]) 主動重啟它——實測發現這個呼叫會
+    跳出一個瀏覽視窗，代表呼叫當下 shell 其實已經被復原了，這一步是多餘
+    的，還會多跳出一個使用者沒有要求的視窗，所以拿掉了，不管關閉的程式
+    裡有沒有 explorer.exe 都不會呼叫 Popen。"""
+
+    def test_taskkills_each_pid(self):
+        api = make_installer_api()
+        with mock.patch("installer_core.subprocess.run") as mock_run, \
+             mock.patch("installer_core.subprocess.Popen") as mock_popen:
+            api.close_locking_processes([{"pid": 111, "name": "notepad.exe"}, {"pid": 222, "name": "word.exe"}])
+        calls = [c.args[0] for c in mock_run.call_args_list]
+        self.assertIn(["taskkill", "/f", "/pid", "111"], calls)
+        self.assertIn(["taskkill", "/f", "/pid", "222"], calls)
+        mock_popen.assert_not_called()
+
+    def test_does_not_restart_explorer_even_when_it_was_among_the_closed_processes(self):
+        api = make_installer_api()
+        with mock.patch("installer_core.subprocess.run"), \
+             mock.patch("installer_core.subprocess.Popen") as mock_popen:
+            api.close_locking_processes([{"pid": 111, "name": "explorer.exe"}])
+        mock_popen.assert_not_called()
+
+    def test_swallows_per_process_failure_and_continues(self):
+        api = make_installer_api()
+        with mock.patch("installer_core.subprocess.run", side_effect=RuntimeError("模擬失敗")), \
+             mock.patch("installer_core.subprocess.Popen") as mock_popen:
+            api.close_locking_processes([{"pid": 111, "name": "notepad.exe"}])  # 不應該拋例外
+        mock_popen.assert_not_called()
+
+
+class TestTriggerInstallationFileLocked(unittest.TestCase):
+    """安裝過程中複製檔案遇到 sharing/lock violation 時：能查到是誰鎖住的
+    話，回傳結構化的 file_locked 狀態（含 processes 清單），讓前端可以
+    跳出『關閉此程式』的互動選擇，而不是只給一段純文字說明、逼使用者自己
+    手動去關；查不到是誰鎖住的話（沒東西可以讓使用者按），維持原本的
+    error 狀態。比照 TestTriggerInstallationRollsBackSystemEntriesOnLateFailure
+    的整合測試手法。"""
+
+    def setUp(self):
+        self.resource_dir = tempfile.mkdtemp()
+        self.app_contents_dir = os.path.join(self.resource_dir, "app_contents")
+        os.makedirs(self.app_contents_dir)
+        with open(os.path.join(self.app_contents_dir, "app.exe"), "wb") as f:
+            f.write(b"fake-app")
+        self.install_dir = tempfile.mkdtemp()
+        shutil.rmtree(self.install_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.resource_dir, ignore_errors=True)
+        shutil.rmtree(self.install_dir, ignore_errors=True)
+
+    def _make_api(self):
+        return make_installer_api(
+            app_name="MyApp", main_exe="app.exe", selected_path=self.install_dir,
+            file_associations=[], add_to_path=False,
+        )
+
+    def test_returns_file_locked_status_with_processes_when_detected(self):
+        api = self._make_api()
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch("installer_core.shutil.copy2", side_effect=_FakeWinError(32, "sharing violation")), \
+             mock.patch(
+                 "installer_core.restart_manager.find_locking_processes",
+                 return_value=[(111, "explorer.exe")],
+             ):
+            result = api.trigger_installation(create_desktop_shortcut=False)
+
+        self.assertEqual(result["status"], "file_locked")
+        self.assertEqual(result["processes"], [{"pid": 111, "name": "explorer.exe"}])
+        self.assertIn("message", result)
+
+    def test_falls_back_to_generic_error_when_no_process_detected(self):
+        api = self._make_api()
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch("installer_core.shutil.copy2", side_effect=_FakeWinError(32, "sharing violation")), \
+             mock.patch("installer_core.restart_manager.find_locking_processes", return_value=[]):
+            result = api.trigger_installation(create_desktop_shortcut=False)
+
+        self.assertEqual(result["status"], "error")
+        self.assertNotIn("processes", result)
 
 
 class TestGetDependencyWarnings(unittest.TestCase):
@@ -1096,6 +1331,44 @@ class TestBundleDependencies(unittest.TestCase):
             result = api.install_dependency("fake_dep")
         mock_urlopen.assert_called_once()
         self.assertEqual(result["status"], "success")
+
+
+class TestComputeDefaultPath(unittest.TestCase):
+    """_compute_default_path()：custom_install_dir 有值時優先套用（展開
+    %APPDATA% 這類環境變數，讓自訂路徑照使用者電腦當下的環境變數解析，
+    不是打包當下開發者電腦的值），沒有自訂就照 no_admin_install 決定
+    Program Files 還是 %LOCALAPPDATA%\\Programs\\<folder>——跟既有的
+    _scope property 一樣，故意寫成方法而不是只在 __init__ 算一次，因為
+    make_installer_api(**overrides) 這個測試 helper 是在建構完成後才用
+    setattr 覆蓋屬性。"""
+
+    def test_custom_install_dir_expands_env_vars(self):
+        api = make_installer_api(
+            custom_install_dir="%TESTVAR%\\MyApp", app_name="MyApp", no_admin_install=False,
+        )
+        with mock.patch.dict(os.environ, {"TESTVAR": "C:\\CustomRoot"}):
+            self.assertEqual(api._compute_default_path(), "C:\\CustomRoot\\MyApp")
+
+    def test_custom_install_dir_overrides_no_admin_install_choice(self):
+        api = make_installer_api(
+            custom_install_dir="C:\\FixedPath", app_name="MyApp", no_admin_install=True,
+        )
+        self.assertEqual(api._compute_default_path(), "C:\\FixedPath")
+
+    def test_empty_custom_install_dir_falls_back_to_program_files(self):
+        api = make_installer_api(custom_install_dir="", app_name="MyApp", no_admin_install=False)
+        with mock.patch.dict(os.environ, {"ProgramFiles": "C:\\Program Files"}):
+            self.assertEqual(api._compute_default_path(), "C:\\Program Files\\MyApp")
+
+    def test_empty_custom_install_dir_falls_back_to_local_appdata_when_no_admin(self):
+        api = make_installer_api(
+            custom_install_dir="", app_name="MyApp", folder_name="MyApp", no_admin_install=True,
+        )
+        with mock.patch.dict(os.environ, {"LOCALAPPDATA": "C:\\Users\\Tester\\AppData\\Local"}):
+            self.assertEqual(
+                api._compute_default_path(),
+                os.path.join("C:\\Users\\Tester\\AppData\\Local", "Programs", "MyApp"),
+            )
 
 
 class TestNoAdminInstall(unittest.TestCase):
