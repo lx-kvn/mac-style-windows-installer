@@ -66,14 +66,17 @@ import os
 import sys
 import shutil
 import subprocess
+import tempfile
 import threading
 import queue
 import time
 import ctypes
+from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, ttk
 
 import packaging_core
+import version_info
 
 ENTRY_SCRIPT = "gui_config.py"
 CLI_ENTRY_SCRIPT = "builder_cli.py"
@@ -147,10 +150,17 @@ def read_version(explicit_version=None):
 
 
 def build_one_exe(entry_script, output_name, icon_path=None, noconsole=True,
-                   extra_add_data=None, on_log=None, on_progress=None):
+                   extra_add_data=None, on_log=None, on_progress=None,
+                   version=None, publisher="", file_description=None):
     """建置單一顆 exe：清理 dist/build、組 PyInstaller 指令、跑子行程、
     串流輸出、檢查產出檔案。互動模式的 BuilderGUI 跟 --cli 非互動模式都
     呼叫這個函式，核心邏輯只有一份。
+
+    version/publisher/file_description：有給 version 才會生成
+    --version-file 讓輸出的 exe 帶上 Win32 VERSIONINFO 資源（見
+    version_info.py）；沒給 version 就完全跳過（互動模式的 BuilderGUI
+    目前還沒收集這幾個欄位，維持原本「不帶 --version-file」的行為，
+    不強迫使用者一定要填）。
 
     on_log(line: str)：每一行 PyInstaller 輸出都會呼叫一次。
     on_progress(percent: float, status: str)：進度里程碑會呼叫。
@@ -235,50 +245,72 @@ def build_one_exe(entry_script, output_name, icon_path=None, noconsole=True,
     ]
     if icon_path:
         cmd.append(f"--icon={icon_path}")
+
+    # 有給 version 才生成 --version-file，讓輸出的 exe 帶上 Win32
+    # VERSIONINFO 資源（見 version_info.py）。互動模式的 BuilderGUI 目前
+    # 沒收集 version/publisher，維持原本不帶這個旗標的行為。
+    version_file_dir = None
+    if version:
+        version_file_dir = tempfile.mkdtemp()
+        version_file_path = os.path.join(version_file_dir, "version_info.txt")
+        version_info.write_version_file(
+            version_file_path,
+            product_name=PROJECT_NAME,
+            file_version=version,
+            file_description=file_description or output_name,
+            company_name=publisher,
+            legal_copyright=f"Copyright © {datetime.now().year} {publisher}",
+        )
+        cmd.append(f"--version-file={version_file_path}")
+
     cmd.append(entry_script)
 
     track("$ " + " ".join(cmd))
     progress(25, "正在執行 PyInstaller（此步驟需要數十秒）...")
 
     try:
-        process = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1, universal_newlines=True,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-    except FileNotFoundError:
-        return False, "找不到 pyinstaller，請先執行 pip install pyinstaller。", None
+        try:
+            process = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1, universal_newlines=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except FileNotFoundError:
+            return False, "找不到 pyinstaller，請先執行 pip install pyinstaller。", None
 
-    # 這裡送出的只是「目前已知的真實進度目標」，不是畫面上要顯示的數字。
-    # PyInstaller 常常有一大段時間完全不輸出任何一行（尤其 Building EXE 那段），
-    # 如果進度只綁在「每收到一行 +多少」，遇到長時間沒輸出就會整個卡住不動。
-    # 呼叫端（BuilderGUI._poll_log_queue()）用計時器統一處理「追趕、追上後
-    # 緩慢自行往前爬、封頂 99%」的動畫，不受有沒有新輸出行影響；CLI 模式
-    # 則直接印這裡送出的里程碑，不做動畫。
-    progress_target = 30.0
-    for line in process.stdout:
-        line = line.rstrip("\n")
-        if line:
-            track(line)
-        progress_target = min(progress_target + 0.3, 85.0)
-        progress(progress_target, "正在編譯...")
+        # 這裡送出的只是「目前已知的真實進度目標」，不是畫面上要顯示的數字。
+        # PyInstaller 常常有一大段時間完全不輸出任何一行（尤其 Building EXE 那段），
+        # 如果進度只綁在「每收到一行 +多少」，遇到長時間沒輸出就會整個卡住不動。
+        # 呼叫端（BuilderGUI._poll_log_queue()）用計時器統一處理「追趕、追上後
+        # 緩慢自行往前爬、封頂 99%」的動畫，不受有沒有新輸出行影響；CLI 模式
+        # 則直接印這裡送出的里程碑，不做動畫。
+        progress_target = 30.0
+        for line in process.stdout:
+            line = line.rstrip("\n")
+            if line:
+                track(line)
+            progress_target = min(progress_target + 0.3, 85.0)
+            progress(progress_target, "正在編譯...")
 
-    returncode = process.wait()
+        returncode = process.wait()
 
-    if returncode != 0:
-        joined = "".join(recent_lines)
-        if "PermissionError" in joined or "WinError 5" in joined:
-            return False, (
-                f"打包失敗：存取被拒。{exe_name} 可能還在執行中，"
-                f"或被防毒軟體/檔案總管鎖住，請關閉後再試一次。"
-            ), None
-        return False, "打包失敗，請檢查上方輸出紀錄。", None
+        if returncode != 0:
+            joined = "".join(recent_lines)
+            if "PermissionError" in joined or "WinError 5" in joined:
+                return False, (
+                    f"打包失敗：存取被拒。{exe_name} 可能還在執行中，"
+                    f"或被防毒軟體/檔案總管鎖住，請關閉後再試一次。"
+                ), None
+            return False, "打包失敗，請檢查上方輸出紀錄。", None
 
-    exe_path = os.path.join("dist", exe_name)
-    if not os.path.exists(exe_path):
-        return False, "PyInstaller 回報成功，但找不到產出的 exe，請檢查上方輸出紀錄。", None
+        exe_path = os.path.join("dist", exe_name)
+        if not os.path.exists(exe_path):
+            return False, "PyInstaller 回報成功，但找不到產出的 exe，請檢查上方輸出紀錄。", None
 
-    return True, f"打包完成！輸出位置: {os.path.abspath(exe_path)}", os.path.abspath(exe_path)
+        return True, f"打包完成！輸出位置: {os.path.abspath(exe_path)}", os.path.abspath(exe_path)
+    finally:
+        if version_file_dir:
+            shutil.rmtree(version_file_dir, ignore_errors=True)
 
 
 class BuilderGUI:
@@ -502,7 +534,7 @@ class BuilderGUI:
             self.status_label.config(text=message, fg=ERROR)
 
 
-def run_cli(version=None, icon_path=None):
+def run_cli(version=None, icon_path=None, publisher=""):
     """非互動模式：依序編譯 GUI 版跟 CLI 版兩顆 exe，檔名嵌入版本號。
     給 /released skill 或其他自動化流程呼叫，不開任何視窗。回傳 process
     exit code（0 = 兩顆都成功，1 = 任一顆失敗）。
@@ -516,11 +548,13 @@ def run_cli(version=None, icon_path=None):
 
     resolved_version = read_version(version)
     targets = [
-        (ENTRY_SCRIPT, f"{PROJECT_NAME}_GUI_v{resolved_version}", True, _GUI_ADD_DATA),
-        (CLI_ENTRY_SCRIPT, f"{PROJECT_NAME}_CLI_v{resolved_version}", False, _CLI_ADD_DATA),
+        (ENTRY_SCRIPT, f"{PROJECT_NAME}_GUI_v{resolved_version}", True, _GUI_ADD_DATA,
+         f"{PROJECT_NAME} GUI"),
+        (CLI_ENTRY_SCRIPT, f"{PROJECT_NAME}_CLI_v{resolved_version}", False, _CLI_ADD_DATA,
+         f"{PROJECT_NAME} CLI"),
     ]
 
-    for entry_script, output_name, noconsole, extra_add_data in targets:
+    for entry_script, output_name, noconsole, extra_add_data, file_description in targets:
         print(f"=== 正在編譯 {output_name}.exe（進入點：{entry_script}）===")
         success, message, exe_path = build_one_exe(
             entry_script=entry_script,
@@ -530,6 +564,9 @@ def run_cli(version=None, icon_path=None):
             extra_add_data=extra_add_data,
             on_log=print,
             on_progress=lambda value, status: print(f"[{value:.0f}%] {status}"),
+            version=resolved_version,
+            publisher=publisher,
+            file_description=file_description,
         )
         print(message)
         if not success:
@@ -543,10 +580,11 @@ def main():
     parser.add_argument("--cli", action="store_true", help="非互動模式：依序編譯 GUI/CLI 兩顆 exe，不開視窗")
     parser.add_argument("--version", default=None, help="嵌進輸出檔名的版本號，沒帶就讀取 VERSION 檔案")
     parser.add_argument("--icon", default=None, help="輸出 exe 的圖示（.ico，選填）")
+    parser.add_argument("--publisher", default="", help="嵌進輸出 exe 的 VERSIONINFO 資源的發行者/公司名稱（選填）")
     args = parser.parse_args()
 
     if args.cli:
-        sys.exit(run_cli(version=args.version, icon_path=args.icon))
+        sys.exit(run_cli(version=args.version, icon_path=args.icon, publisher=args.publisher))
 
     # 讓 Windows 在非 100% 縮放比例（例如 125%）下不要把整個視窗畫面當點陣圖拉伸，
     # 這步一定要在建立任何 Tk 視窗之前呼叫才有效。

@@ -189,3 +189,22 @@ taskkill 整個殼層行程」的做法。分兩層：
 這種情況只能提示使用者去檢查防毒/安全軟體設定（`_describe_install_os_error()`
 的訊息已補上這句提示）。整條流程的除錯紀錄落地在
 `%TEMP%\mswi_explorer_lock_debug.log`，供事後排查用。
+
+## version_info（打包出來的 exe 帶上 Win32 VERSIONINFO 資源）
+
+`version_info.py` 是個純函式深模組：`render_version_file(...)` 組出
+PyInstaller `--version-file` 要求的文字格式（回傳字串，不寫檔），
+`write_version_file(path, **fields)` 把結果寫進暫存檔。根本問題：
+PyInstaller 只有拿到 `--version-file` 才會把 FileDescription/ProductName/
+FileVersion/CompanyName/LegalCopyright 這些欄位嵌進 exe 資源，這個專案
+原本從沒生成過這個檔案，即使 GUI 表單早就收了「版本號」「發行者」欄位，
+也從未真正流進被打包 exe 的資源區塊，導致檔案總管「內容 → 詳細資料」
+頁籤全部空白。
+
+兩個呼叫端各自在呼叫 PyInstaller 前生成一份暫存 version-file：
+`build_config_tool.py`（打包這個工具自己的 GUI/CLI exe，`ProductName`
+固定是專案名稱，新增 `--publisher` CLI 參數）跟 `builder.py`（打包使用者
+的 app 成 Setup.exe/uninstall.exe，`ProductName` 沿用既有的 `app_name`
+欄位，`LegalCopyright` 由「建置當下年份 + 發行者」自動組成，不新增 GUI
+欄位）。這個模組只在開發機的建置流程用到，不會被打包進最終 exe，所以
+不列進 `packaging_core.py` 的 `SHARED_DEEP_MODULES`。

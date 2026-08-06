@@ -334,6 +334,37 @@ class TestUninstallCompileFlags(BuildAllTestBase):
         self.assertIn("--add-data=ui;ui", uninstall_cmd)
         self.assertIn("--exclude-module=PyQt5", uninstall_cmd)
 
+    def test_both_pyinstaller_calls_include_version_file_with_distinct_description(self):
+        captured_cmds = []
+        captured_contents = {}
+
+        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+            captured_cmds.append(cmd)
+            version_file_flag = next(arg for arg in cmd if arg.startswith("--version-file="))
+            version_file_path = version_file_flag.split("=", 1)[1]
+            with open(version_file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            if "uninstall.py" in cmd:
+                captured_contents["uninstall"] = content
+                os.makedirs(self.dist_dir, exist_ok=True)
+                with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
+                    f.write(b"FAKE_UNINSTALL_EXE")
+            else:
+                captured_contents["main"] = content
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        self._call_build_all(run_side_effect=fake_run, app_name="測試應用程式", version="2.3.1", publisher="Acme")
+
+        self.assertIn("StringStruct('ProductName', '測試應用程式')", captured_contents["main"])
+        self.assertIn("StringStruct('CompanyName', 'Acme')", captured_contents["main"])
+        self.assertIn("filevers=(2, 3, 1, 0)", captured_contents["main"])
+        self.assertIn("StringStruct('FileDescription', '測試應用程式')", captured_contents["main"])
+        self.assertIn("StringStruct('FileDescription', 'Uninstall 測試應用程式')", captured_contents["uninstall"])
+
+    def test_invalid_version_string_raises_before_compiling(self):
+        with self.assertRaises(Exception):
+            self._call_build_all(version="not-a-version")
+
     def test_uninstall_cmd_omits_uac_admin_when_no_admin_install(self):
         captured_cmds = []
 

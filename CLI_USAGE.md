@@ -143,7 +143,7 @@ python builder_cli.py pack \
 CLI 版 `builder_cli.py`）成獨立的 exe，用的是另一支腳本：
 
 ```
-python build_config_tool.py --cli [--version X.Y.Z] [--icon icon.ico]
+python build_config_tool.py --cli [--version X.Y.Z] [--icon icon.ico] [--publisher 名稱]
 ```
 
 不開任何視窗，依序編譯出：
@@ -151,10 +151,14 @@ python build_config_tool.py --cli [--version X.Y.Z] [--icon icon.ico]
 - `mac-style-windows-installer_GUI_vX.Y.Z.exe`（進入點 `gui_config.py`）
 - `mac-style-windows-installer_CLI_vX.Y.Z.exe`（進入點 `builder_cli.py`）
 
-`--version` 沒帶就讀取 repo 根目錄的 `VERSION` 檔案。這支指令主要是給
+`--version` 沒帶就讀取 repo 根目錄的 `VERSION` 檔案。`--publisher` 選填，
+會被寫進這兩顆 exe 的 Win32 VERSIONINFO 資源（`CompanyName`/
+`LegalCopyright`，見 `version_info.py`），讓檔案總管「內容 → 詳細資料」
+頁籤顯示正確內容而不是空白；沒帶就等於發行者留空。這支指令主要是給
 `/released` 這類自動化發布流程呼叫，一般開發者手動編譯打包工具，用不帶
 參數的互動模式（`python build_config_tool.py`，跳出 Tkinter 視窗）通常
-更方便。
+更方便（互動模式目前沒有收集版本/發行者欄位，編出來的 exe 不會帶
+VERSIONINFO 資源）。
 
 ---
 

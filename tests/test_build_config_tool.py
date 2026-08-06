@@ -149,6 +149,54 @@ class TestBuildOneExe(unittest.TestCase):
         self.assertIn("hello", logs)
         self.assertTrue(any(v == 15 for v, s in progresses))
 
+    def test_version_file_flag_included_with_correct_fields(self):
+        captured_cmd = {}
+        captured_version_file_content = {}
+
+        def fake_popen(cmd, **kwargs):
+            captured_cmd["cmd"] = cmd
+            version_file_flag = next(arg for arg in cmd if arg.startswith("--version-file="))
+            version_file_path = version_file_flag.split("=", 1)[1]
+            with open(version_file_path, "r", encoding="utf-8") as f:
+                captured_version_file_content["content"] = f.read()
+            os.makedirs("dist", exist_ok=True)
+            with open(os.path.join("dist", "MyTool.exe"), "wb") as f:
+                f.write(b"fake exe")
+            return FakeCompletedProcess([], returncode=0)
+
+        with mock.patch("build_config_tool.subprocess.check_output", return_value=""), \
+             mock.patch("build_config_tool.subprocess.Popen", side_effect=fake_popen):
+            success, message, exe_path = bct.build_one_exe(
+                "entry.py", "MyTool", version="1.2.3", publisher="lx.k",
+                file_description="mac-style-windows-installer GUI",
+            )
+
+        self.assertTrue(success)
+        content = captured_version_file_content["content"]
+        self.assertIn("StringStruct('CompanyName', 'lx.k')", content)
+        self.assertIn("StringStruct('FileDescription', 'mac-style-windows-installer GUI')", content)
+        self.assertIn("filevers=(1, 2, 3, 0)", content)
+
+    def test_version_file_cleaned_up_after_build(self):
+        captured_path = {}
+
+        def fake_popen(cmd, **kwargs):
+            version_file_flag = next(arg for arg in cmd if arg.startswith("--version-file="))
+            captured_path["path"] = version_file_flag.split("=", 1)[1]
+            os.makedirs("dist", exist_ok=True)
+            with open(os.path.join("dist", "MyTool.exe"), "wb") as f:
+                f.write(b"fake exe")
+            return FakeCompletedProcess([], returncode=0)
+
+        with mock.patch("build_config_tool.subprocess.check_output", return_value=""), \
+             mock.patch("build_config_tool.subprocess.Popen", side_effect=fake_popen):
+            bct.build_one_exe(
+                "entry.py", "MyTool", version="1.2.3", publisher="lx.k",
+                file_description="MyTool",
+            )
+
+        self.assertFalse(os.path.exists(captured_path["path"]))
+
     def test_stale_cleanup_only_touches_own_target_not_other_builds_output(self):
         def make_fake_popen(output_name):
             def fake_popen(cmd, **kwargs):
@@ -206,6 +254,20 @@ class TestRunCli(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
         mock_build.assert_called_once()
+
+    def test_publisher_passed_to_build_one_exe_for_both_targets(self):
+        calls = []
+
+        def fake_build_one_exe(entry_script, output_name, **kwargs):
+            calls.append(kwargs.get("publisher"))
+            return True, "ok", f"dist/{output_name}.exe"
+
+        with mock.patch("build_config_tool.check_prerequisites", return_value=[]), \
+             mock.patch("build_config_tool.build_one_exe", side_effect=fake_build_one_exe):
+            exit_code = bct.run_cli(version="1.2.3", publisher="lx.k")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(calls, ["lx.k", "lx.k"])
 
 
 if __name__ == "__main__":

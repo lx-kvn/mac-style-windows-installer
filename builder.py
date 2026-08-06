@@ -44,8 +44,10 @@ import subprocess
 import json
 import shutil
 import urllib.request
+from datetime import datetime
 
 import dependency_defs
+import version_info
 
 CONFIG_FILE_NAME = "installer_config.json"
 
@@ -217,6 +219,26 @@ def build_all(
     temp_icon = os.path.join(ui_dir, "app_icon.png")
     shutil.copy(png_path, temp_icon)
 
+    # 讓兩顆輸出的 exe（安裝檔本體、uninstall.exe）都帶上 Win32 VERSIONINFO
+    # 資源（見 version_info.py）。ProductName 沿用 app_name（沒有另外的
+    # 「產品名稱」欄位），LegalCopyright 用建置當下年份自動組成——版本字串
+    # 格式不合法時 write_version_file() 會在這裡直接拋例外，中止整個流程，
+    # 不要編到一半才發現版本號寫錯。
+    legal_copyright = f"Copyright © {datetime.now().year} {publisher}"
+    uninstall_version_file = os.path.join(workspace_dir, "uninstall_version_info.txt")
+    version_info.write_version_file(
+        uninstall_version_file,
+        product_name=app_name, file_version=version,
+        file_description=f"Uninstall {app_name}",
+        company_name=publisher, legal_copyright=legal_copyright,
+    )
+    main_version_file = os.path.join(workspace_dir, "main_version_info.txt")
+    version_info.write_version_file(
+        main_version_file,
+        product_name=app_name, file_version=version, file_description=app_name,
+        company_name=publisher, legal_copyright=legal_copyright,
+    )
+
     # 步驟 2：編譯反安裝程式
     # 解除安裝助手區段：這裡開始到編譯完成，動畫最高只會自己爬到 35%，
     # 剩下的空間留給後面編譯安裝檔那個實際耗時久很多的階段。
@@ -243,7 +265,7 @@ def build_all(
         # 兩支 exe 的提權設定要一致，不然單獨對 uninstall.exe 提權會很突兀
         # （使用者剛裝完全程不用管理員權限，解除安裝卻突然跳 UAC）。
         uninstall_cmd.append("--uac-admin")
-    uninstall_cmd += ["--name=uninstall", "uninstall.py"]
+    uninstall_cmd += [f"--version-file={uninstall_version_file}", "--name=uninstall", "uninstall.py"]
     # CREATE_NO_WINDOW：呼叫端（gui_config.py）是 --noconsole 的 GUI 程式，
     # 沒有這個旗標的話，Windows 會在編譯的當下短暫跳出一個命令提示字元視窗。
     # 同時改成 capture_output，把 PyInstaller 實際輸出的內容留著，
@@ -278,6 +300,7 @@ def build_all(
         f"--add-data={config_path};.",
         f"--add-data={built_uninstall};.",
         f"--icon={ico_path}",
+        f"--version-file={main_version_file}",
         # installer_core.py import webview，同樣會被 PyInstaller 靜態分析保守地
         # 整包塞進 pywebview 支援但 Windows 用不到的替代 GUI 後端，排除掉可以
         # 省下相當可觀的體積——而且這個影響的是每一個實際下載安裝檔的終端使用者，
@@ -370,6 +393,9 @@ def build_all(
         if os.path.exists(temp_path):
             os.remove(temp_path)
     for temp_path in temp_dependency_files:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+    for temp_path in (uninstall_version_file, main_version_file):
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
