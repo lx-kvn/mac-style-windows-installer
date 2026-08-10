@@ -4,6 +4,9 @@ Baseline: `v0.11.0` (2026-08-03) → `v0.12.0`.
 
 **Language: [English](#english) | [繁體中文](#繁體中文)**
 
+> **Code signing**: This project has applied to the [SignPath Foundation](https://signpath.io/solutions/open-source-community) open-source code signing program to provide trusted, signed installers. Signing is not yet active on this release — this note will be updated once the integration is live.
+> **簽章聲明**：本專案已申請加入 [SignPath Foundation](https://signpath.io/solutions/open-source-community) 開源簽章方案，用以提供受信任的已簽章安裝檔。這個版本尚未套用簽章，整合完成後會更新這則說明。
+
 ---
 
 ## English
