@@ -116,6 +116,91 @@ Subject（也就是簽章顯示的發行者）固定是 `SignPath Foundation`，
 （例如給想上架 Microsoft Store、或企業內側載部署的使用者），不是取代
 現有的 `Setup_XXX.exe` 拖拽流程。
 
+**修正（路線 A 的產物其實是路線 B 建置流程的免費副產品，不用另外規劃）**：
+路線 B 的建置流程裡，「已簽章的 `.msix`」本來就是編 bootstrapper exe
+之前的一個中間產物（見下方 CI 建置順序的 `sign-msix` job）。與其把它
+用完即丟，建置流程最後多一步「把這份已簽章的 `.msix` 也一併發布」，
+幾乎是零成本——不需要為路線 A 另外規劃一條獨立的建置邏輯。也就是說
+「路線 A vs. 路線 B」不是二選一，而是**做了路線 B 之後，同一次建置
+自然產生兩種輸出**：`Setup_XXX.exe`（拖拽安裝體驗）跟 `XXX.msix`
+（直接給 winget/企業側載/App Installer 雙擊安裝用）。這個工具最終給
+下游專案的產物清單會變成：GUI exe、CLI exe（工具本身固定會有，跟
+MSIX 功能無關）、`Setup_XXX.exe`、`XXX.msix`。
+
+## 下游專案的 CI 建置順序（路線 B 確定後才適用）
+
+**下游專案不需要 vendor 這個工具的原始碼**——這個工具本來就會編出一顆
+獨立的 CLI exe 發布在 GitHub Releases（`mac-style-windows-installer_CLI_vX.Y.Z.exe`），
+下游專案的 CI 只要下載這顆現成的 exe 當一般命令列工具呼叫即可（跟 CI 裡
+`choco install` 或下載其他工具的 release asset 是同一種模式），不用把
+整個 repo checkout 進自己的建置環境。
+
+**簽章一定要在「合併進 bootstrapper exe」這一步之前完成，不能事後補**：
+混合式 bootstrapper 的機制是把 MSIX 檔案本身塞進 exe 的資源區塊
+（`--add-data`），一旦已經塞進去，要換成簽過章的版本等於要整個重新編
+一次 exe。所以 CI 步驟順序是有嚴格相依性的，不能顛倒：
+
+```
+1. 建置 app 內容 → makeappx 打包成未簽章的 .msix
+2. 呼叫 SignPath（或其他簽章服務）簽這份 .msix
+   —— 這一步必須完全跑完，下一步才能開始 ——
+3. 用「已簽章」的 .msix 當輸入，編出 bootstrapper exe（--add-data 塞入）
+4.（選擇性）bootstrapper exe 本身也另外簽一次 Authenticode
+5. 發布產物
+```
+
+第 2 步到第 3 步之間**不需要寫輪詢/非同步等待邏輯**——SignPath 的簽章
+API/CLI 是同步呼叫、簽完才回應，在 GitHub Actions 裡就是讓簽章那個
+step 先跑完，下一個 step（編 bootstrapper exe）自然接在後面執行，屬於
+一般 CI job 的步驟相依順序，不是這個工具需要特別處理的技術難題。
+
+**簽章這件事本身，每個下游專案各自處理，不會因為都用同一個打包工具而
+共用**：SignPath 的審核是綁定特定 repo 的，下游專案想要簽章過的 MSIX
+要自己另外申請一次，這個工具（`builder.py`）也不會把任何特定簽章服務
+寫死進打包邏輯——延續現有 `signing` 參數（本機 `.pfx`）的設計哲學，
+「打包」跟「簽章」保持解耦，簽章永遠是打包完成之後，呼叫端自己的 CI
+再接一段處理的事。
+
+### 下游專案 build.yml 概念範例（FileLocker 這類專案自己的 CI，不是這個 repo 的）
+
+概念性描述 job 拆分跟相依順序，**不是可以直接貼上去跑的 YAML**，實際
+語法要等真的動工、確認 SignPath 的 GitHub Actions 整合怎麼呼叫之後
+再補：
+
+```
+job: build-msix
+  - checkout FileLocker 自己的原始碼
+  - 下載 mac-style-windows-installer 的 CLI exe（GitHub Releases release asset）
+  - 用這顆 CLI 呼叫打包（假設的 --output-format msix 選項），
+    產出未簽章的 .msix，當成這個 job 的 artifact 上傳
+
+job: sign-msix
+  needs: build-msix
+  - 下載上一個 job 的 .msix artifact
+  - 呼叫 SignPath 的簽章 action/CLI（FileLocker 自己申請到的帳戶），
+    產出已簽章的 .msix
+  - 這份已簽章的 .msix 同時做兩件事：(a) 直接當成 release asset 發布
+    （給 winget/企業側載/App Installer 雙擊安裝用，路線 A 的產物）、
+    (b) 當成 artifact 傳給下一個 job 當輸入
+
+job: build-bootstrapper
+  needs: sign-msix
+  - 下載已簽章的 .msix artifact
+  - 用這個工具的打包邏輯，把已簽章的 .msix 塞進 bootstrapper exe
+  - （選填）呼叫 SignPath 再簽一次這顆 bootstrapper exe 本身
+  - 上傳最終的 Setup_XXX.exe 當 release asset
+```
+
+最終 release 頁面上，同一次建置會同時掛著 `Setup_XXX.exe`（路線 B）跟
+`XXX.msix`（路線 A）兩個檔案，讓下游專案的使用者自己選要用哪一種
+安裝方式，不用這個工具/下游專案額外決定「只能提供一種」。
+
+用三個獨立 job（而不是同一個 job 裡三個 step）是刻意的：GitHub Actions
+的 `needs:` 關鍵字本來就是設計來表達「這個 job 必須等前一個 job 完全
+成功才能開始」，比在單一 job 裡疊 step 更清楚表達出「簽章完成是編
+bootstrapper exe 的硬性前置條件」這個順序要求，也方便之後個別重跑
+（例如簽章失敗要重試，不用連 build-msix 那個 job 也重跑一次）。
+
 ## 如果真的要動工，需要先解決的問題
 
 這些是「之後要開工前」必須先有答案的，這次不解，只列出來避免遺漏：
