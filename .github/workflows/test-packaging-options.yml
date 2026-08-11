@@ -47,13 +47,19 @@ jobs:
           # 系統層級動作有沒有發生」，不需要這個 exe 本身真的能正常運作。
           Copy-Item "$env:WINDIR\System32\notepad.exe" test_app\app.exe
 
+          # 真實抓到的坑：installer_core._run_install_script() 用
+          # get_resource_path() 解析腳本路徑，指向 PyInstaller 解壓出來的
+          # 暫存資源目錄，不是安裝目錄——腳本裡如果用 %~dp0（自己所在的
+          # 目錄）當標記檔案的落地位置，寫的其實是那個隨行程結束就被
+          # PyInstaller 清掉的暫存目錄，事後根本查不到。改寫到 %TEMP%
+          # 這種不受腳本實際執行位置影響的穩定路徑。
           Set-Content -Path test_app\pre_install.bat -Encoding ASCII -Value @(
             "@echo off",
-            'echo done > "%~dp0pre_marker.txt"'
+            'echo done > "%TEMP%\mswi_ci_pre_marker.txt"'
           )
           Set-Content -Path test_app\post_install.bat -Encoding ASCII -Value @(
             "@echo off",
-            'echo done > "%~dp0post_marker.txt"'
+            'echo done > "%TEMP%\mswi_ci_post_marker.txt"'
           )
 
       - name: 產生涵蓋主要打包欄位的設定檔
@@ -123,8 +129,8 @@ jobs:
           Check "排程工作已註冊" ([bool](Get-ScheduledTask -TaskName "MswiCiTestTask" -ErrorAction SilentlyContinue))
           Check "PATH（HKCU\Environment）包含安裝目錄" `
             ((Get-ItemProperty "HKCU:\Environment" -Name Path -ErrorAction SilentlyContinue).Path -like "*$installDir*")
-          Check "安裝前置腳本有執行（pre_marker.txt）" (Test-Path (Join-Path $installDir "pre_marker.txt"))
-          Check "安裝後置腳本有執行（post_marker.txt）" (Test-Path (Join-Path $installDir "post_marker.txt"))
+          Check "安裝前置腳本有執行" (Test-Path (Join-Path $env:TEMP "mswi_ci_pre_marker.txt"))
+          Check "安裝後置腳本有執行" (Test-Path (Join-Path $env:TEMP "mswi_ci_post_marker.txt"))
 
           # 已知限制：file_assoc.py 目前不分 no_admin_install，一律寫
           # HKEY_LOCAL_MACHINE\Software\Classes——這個安裝檔本身沒有要求
