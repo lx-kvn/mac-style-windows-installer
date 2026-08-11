@@ -176,10 +176,17 @@ class TestReleaseLockingProcesses(unittest.TestCase):
         self.assertEqual(self.fake_reg.hkcu(elr._WINLOGON_KEY)["AutoRestartShell"], "1")
 
     def test_explorer_still_locking_after_window_close_forces_shell_restart(self):
+        """關窗之後仍鎖著，Restart Manager 優雅關閉這層也幫不上忙（session
+        開不起來，模擬 Restart Manager 不可用/沒有可關閉的應用程式）時，
+        才落到既有的強制關殼層那條路。"""
         processes = [{"pid": 222, "name": "Windows 檔案總管"}]
+        unavailable_session = mock.Mock()
+        unavailable_session.is_open = False
         with mock.patch("explorer_lock_release.close_windows_browsing_path", return_value=0), \
              mock.patch("explorer_lock_release.subprocess.check_output",
                          return_value=_tasklist_output("explorer.exe", 222)), \
+             mock.patch("explorer_lock_release.restart_manager.RestartManagerSession",
+                         return_value=unavailable_session), \
              _patch_successful_termination() as mock_kernel:
             state = elr.release_locking_processes(
                 processes, path="C:\\Apps\\MyApp", registry=self.fake_reg,
@@ -190,6 +197,96 @@ class TestReleaseLockingProcesses(unittest.TestCase):
         mock_kernel["OpenProcess"].assert_called_once_with(elr._PROCESS_TERMINATE, False, 222)
         mock_kernel["TerminateProcess"].assert_called_once_with(4321, 1)
         self.assertEqual(state, {"previous_auto_restart_shell": "1"})
+
+
+class TestReleaseLockingProcessesRestartManagerLayer(unittest.TestCase):
+    """三層釋放策略的第二層：關窗之後仍鎖著時，先試著用 Restart Manager
+    請支援它的應用程式優雅關閉（不是砍行程），成功解開鎖就不用再進到
+    「強制關殼層」那條路；沒解開才落到既有的強制關殼層邏輯。"""
+
+    def setUp(self):
+        self.fake_reg = FakeWinReg()
+        self.fake_reg.set_hkcu(elr._WINLOGON_KEY, {"AutoRestartShell": "1"})
+
+    def _make_session(self, is_open=True, shutdown_result=True):
+        session = mock.Mock()
+        session.is_open = is_open
+        session.shutdown.return_value = shutdown_result
+        return session
+
+    def test_rm_shutdown_resolves_lock_skips_forced_shell_restart(self):
+        processes = [{"pid": 222, "name": "Windows 檔案總管"}]
+        session = self._make_session()
+        find_calls = []
+
+        def fake_find(paths):
+            find_calls.append(list(paths))
+            # 第一次（關窗後）還鎖著；RM shutdown 之後第二次查已經解開。
+            return [(222, "Windows 檔案總管")] if len(find_calls) == 1 else []
+
+        with mock.patch("explorer_lock_release.close_windows_browsing_path", return_value=0), \
+             mock.patch("explorer_lock_release.restart_manager.RestartManagerSession", return_value=session), \
+             _patch_successful_termination() as mock_kernel:
+            state = elr.release_locking_processes(
+                processes, path="C:\\Apps\\MyApp", registry=self.fake_reg,
+                find_locking_processes=fake_find,
+            )
+
+        session.shutdown.assert_called_once()
+        session.restart.assert_called_once()
+        session.close.assert_called_once()
+        mock_kernel["OpenProcess"].assert_not_called()
+        self.assertIsNone(state)
+        self.assertEqual(self.fake_reg.hkcu(elr._WINLOGON_KEY)["AutoRestartShell"], "1")
+
+    def test_rm_shutdown_does_not_resolve_lock_falls_back_to_force_kill(self):
+        processes = [{"pid": 222, "name": "Windows 檔案總管"}]
+        session = self._make_session()
+
+        with mock.patch("explorer_lock_release.close_windows_browsing_path", return_value=0), \
+             mock.patch("explorer_lock_release.restart_manager.RestartManagerSession", return_value=session), \
+             mock.patch("explorer_lock_release.subprocess.check_output",
+                         return_value=_tasklist_output("explorer.exe", 222)), \
+             _patch_successful_termination() as mock_kernel:
+            state = elr.release_locking_processes(
+                processes, path="C:\\Apps\\MyApp", registry=self.fake_reg,
+                find_locking_processes=lambda paths: [(222, "Windows 檔案總管")],
+            )
+
+        session.shutdown.assert_called_once()
+        # RM 這層沒解開鎖，剩下的行程還是要交給既有的強制關殼層邏輯處理。
+        mock_kernel["TerminateProcess"].assert_called_once_with(4321, 1)
+        session.close.assert_called_once()
+        self.assertEqual(state, {"previous_auto_restart_shell": "1"})
+
+    def test_rm_shutdown_call_failure_falls_back_to_force_kill(self):
+        processes = [{"pid": 222, "name": "Windows 檔案總管"}]
+        session = self._make_session(shutdown_result=False)
+
+        with mock.patch("explorer_lock_release.close_windows_browsing_path", return_value=0), \
+             mock.patch("explorer_lock_release.restart_manager.RestartManagerSession", return_value=session), \
+             mock.patch("explorer_lock_release.subprocess.check_output",
+                         return_value=_tasklist_output("explorer.exe", 222)), \
+             _patch_successful_termination() as mock_kernel:
+            state = elr.release_locking_processes(
+                processes, path="C:\\Apps\\MyApp", registry=self.fake_reg,
+                find_locking_processes=lambda paths: [(222, "Windows 檔案總管")],
+            )
+
+        mock_kernel["TerminateProcess"].assert_called_once_with(4321, 1)
+        self.assertEqual(state, {"previous_auto_restart_shell": "1"})
+
+    def test_no_path_skips_restart_manager_layer_entirely(self):
+        """沒有 path 就不知道要對哪個路徑開 Restart Manager session，這層
+        直接略過，維持原本「沒有 path 就直接分類終止」的行為。"""
+        processes = [{"pid": 222, "name": "Windows 檔案總管"}]
+        with mock.patch("explorer_lock_release.restart_manager.RestartManagerSession") as mock_session_cls, \
+             mock.patch("explorer_lock_release.subprocess.check_output",
+                         return_value=_tasklist_output("explorer.exe", 222)), \
+             _patch_successful_termination():
+            elr.release_locking_processes(processes, registry=self.fake_reg)
+
+        mock_session_cls.assert_not_called()
 
     def test_explorer_locking_without_path_forces_shell_restart(self):
         processes = [{"pid": 222, "name": "Windows 檔案總管"}]

@@ -41,6 +41,10 @@ import restart_manager
 import dependency_defs
 import system_entries
 import explorer_lock_release
+import windows_service
+import scheduled_task
+import restore_point
+import bits_download
 from install_scope import InstallScope, local_appdata_root
 
 # 目前介面 chrome（ui/index.html 裡固定的標籤、按鈕、提示文字）支援的語言，
@@ -117,15 +121,61 @@ def _generic_registry_check(hive, path, value_name=None, expected=None):
         return False
 
 
-def _check_vcredist_x64():
-    return _generic_registry_check(
-        "HKLM", r"SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64", "Installed", 1,
-    )
+def _read_registry_version(hive, path, value_name=None, enum_subkeys=False):
+    """讀出這個機碼底下的「已安裝版本」字串；讀不到／機碼不存在回傳 None。
+
+    enum_subkeys=False：讀 value_name 這個值當版本字串（vcredist 的
+    Version 值就是這種佈局）。
+    enum_subkeys=True：EnumKey 列出子機碼名稱，取版本最高的當已安裝版本
+    （.NET Desktop Runtime 的 InstalledVersions\\...\\sharedfx\\... 底下，
+    子機碼名稱本身就是版本號，例如 "8.0.10"，沒有明確的版本值可查）。
+    """
+    import winreg
+    try:
+        key = winreg.OpenKey(_registry_hive(hive), path)
+        if enum_subkeys:
+            versions = []
+            i = 0
+            while True:
+                try:
+                    versions.append(winreg.EnumKey(key, i))
+                except OSError:
+                    break
+                i += 1
+            return max(versions, key=_parse_version) if versions else None
+        val, _ = winreg.QueryValueEx(key, value_name)
+        return str(val)
+    except Exception:
+        return None
 
 
-def _check_dotnet_desktop():
-    return _generic_registry_check(
+def _generic_registry_version_check(hive, path, value_name=None, enum_subkeys=False, min_version=None):
+    """存在性 + 選填版本門檻的登錄表偵測。min_version 是 None 時等同純粹的
+    存在性判斷（讀得到版本字串／至少有一個子機碼就算已安裝，不管版本）；
+    有給 min_version 則額外要求讀到的版本 >= min_version（用既有的
+    _compare_versions()）。
+    """
+    installed_version = _read_registry_version(hive, path, value_name=value_name, enum_subkeys=enum_subkeys)
+    if installed_version is None:
+        return False
+    if min_version is None:
+        return True
+    return _compare_versions(installed_version, min_version) >= 0
+
+
+def _check_vcredist_x64(min_version=None):
+    path = r"SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"
+    if not _generic_registry_check("HKLM", path, "Installed", 1):
+        return False
+    if min_version is None:
+        return True
+    return _generic_registry_version_check("HKLM", path, value_name="Version", min_version=min_version)
+
+
+def _check_dotnet_desktop(min_version=None):
+    return _generic_registry_version_check(
         "HKLM", r"SOFTWARE\WOW6432Node\dotnet\Setup\InstalledVersions\x64\sharedfx\Microsoft.WindowsDesktop.App",
+        enum_subkeys=True, min_version=min_version,
     )
 
 
@@ -135,8 +185,21 @@ def _make_custom_dependency_checker(reg_check):
     統一放進同一個 dict 使用。用 default 參數把當下這筆設定值綁進閉包，避免
     for 迴圈裡常見的「閉包晚繫結」陷阱（迴圈跑完後所有 checker 都指到最後
     一筆設定）。
+
+    有給 min_version 時改用 _generic_registry_version_check()（版本門檻，
+    忽略 expected）；沒給時維持原本 _generic_registry_check()（exact-match
+    語意），完全向後相容既有的 custom_dependencies 設定。
     """
     def _check(reg_check=reg_check):
+        min_version = reg_check.get("min_version")
+        if min_version is not None:
+            return _generic_registry_version_check(
+                reg_check.get("hive", "HKLM"),
+                reg_check.get("path", ""),
+                value_name=reg_check.get("value_name"),
+                enum_subkeys=bool(reg_check.get("enum_subkeys", False)),
+                min_version=min_version,
+            )
         return _generic_registry_check(
             reg_check.get("hive", "HKLM"),
             reg_check.get("path", ""),
@@ -230,6 +293,7 @@ class InstallerAPI:
         self.eula_texts = {}
         self.eula_default_lang = ""
         self.dependencies = []
+        self.dependencies_min_version = {}
         self.custom_dependencies = []
         self.bundle_dependencies = []
         self.file_associations = []
@@ -243,6 +307,9 @@ class InstallerAPI:
         self.custom_install_dir = ""
         self.pre_install_script = ""
         self.post_install_script = ""
+        self.windows_service = {}
+        self.scheduled_task = {}
+        self.create_restore_point_before_install = False
         self.ui_language = lang_detect.detect_system_language(SUPPORTED_UI_LANGUAGES, DEFAULT_UI_LANGUAGE)
 
         program_files = os.environ.get("ProgramFiles", "C:\\Program Files")
@@ -319,6 +386,7 @@ class InstallerAPI:
                     self.eula_texts = config.get("eula_texts", {})
                     self.eula_default_lang = config.get("eula_default_lang", "")
                     self.dependencies = config.get("dependencies", [])
+                    self.dependencies_min_version = config.get("dependencies_min_version", {}) or {}
                     self.custom_dependencies = config.get("custom_dependencies", [])
                     self.bundle_dependencies = config.get("bundle_dependencies", [])
                     self.file_associations = config.get("file_associations", [])
@@ -332,6 +400,9 @@ class InstallerAPI:
                     self.custom_install_dir = config.get("custom_install_dir", "")
                     self.pre_install_script = config.get("pre_install_script", "")
                     self.post_install_script = config.get("post_install_script", "")
+                    self.windows_service = config.get("windows_service", {}) or {}
+                    self.scheduled_task = config.get("scheduled_task", {}) or {}
+                    self.create_restore_point_before_install = bool(config.get("create_restore_point_before_install", False))
         except Exception as e:
             print(f"[提示] 使用預設開發模式: {e}")
 
@@ -347,7 +418,16 @@ class InstallerAPI:
         已經擋掉撞名，這裡再處理一次是最後一道防線，不視為錯誤，沿用
         「儘量讓安裝繼續」的原則）。
         """
-        checkers = dict(DEPENDENCY_CHECKERS)
+        checkers = {}
+        for key, (check_fn, display_name, url, silent_args) in DEPENDENCY_CHECKERS.items():
+            min_version = self.dependencies_min_version.get(key)
+            if min_version is not None:
+                # 只有實際設定了 min_version 才改用需要吃 min_version 關鍵字
+                # 參數的呼叫方式——沒設定時完全比照舊行為呼叫 check_fn()，
+                # 不會因為測試把 DEPENDENCY_CHECKERS 的內容 patch 成零參數
+                # 的 lambda 就爆炸（真實抓到的相容性考量）。
+                check_fn = (lambda fn=check_fn, mv=min_version: fn(min_version=mv))
+            checkers[key] = (check_fn, display_name, url, silent_args)
         for entry in self.custom_dependencies:
             key = str(entry.get("key", "")).strip()
             if not key:
@@ -450,24 +530,34 @@ class InstallerAPI:
             self._report_dependency_progress(55, f"正在安裝 {display_name}...")
         else:
             tmp_path = os.path.join(tempfile.gettempdir(), f"dep_installer_{key}.exe")
-            try:
-                self._report_dependency_progress(5, f"正在下載 {display_name}...")
-                with urllib.request.urlopen(url, timeout=30) as resp:
-                    total = resp.getheader("Content-Length")
-                    total = int(total) if total else None
-                    downloaded = 0
-                    with open(tmp_path, "wb") as f:
-                        while True:
-                            chunk = resp.read(1024 * 256)
-                            if not chunk:
-                                break
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            if total:
-                                percent = 5 + int(downloaded / total * 50)  # 下載階段佔 5%-55%
-                                self._report_dependency_progress(percent, f"正在下載 {display_name}...")
-            except Exception as e:
-                return {"status": "error", "message": f"下載 {display_name} 失敗：{e}"}
+            self._report_dependency_progress(5, f"正在下載 {display_name}...")
+            # 優先走 BITS（斷點續傳、背景低優先權下載），沒裝 pywin32 或
+            # BITS 呼叫本身失敗都會 best-effort 回傳 False，退回原本的
+            # urllib 下載邏輯，維持行為對等（只是沒有 BITS 特有的好處）。
+            downloaded_via_bits = bits_download.download_via_bits(
+                url, tmp_path,
+                on_progress=lambda p: self._report_dependency_progress(
+                    5 + int(p * 0.5), f"正在下載 {display_name}...",  # 下載階段佔 5%-55%
+                ),
+            )
+            if not downloaded_via_bits:
+                try:
+                    with urllib.request.urlopen(url, timeout=30) as resp:
+                        total = resp.getheader("Content-Length")
+                        total = int(total) if total else None
+                        downloaded = 0
+                        with open(tmp_path, "wb") as f:
+                            while True:
+                                chunk = resp.read(1024 * 256)
+                                if not chunk:
+                                    break
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                if total:
+                                    percent = 5 + int(downloaded / total * 50)  # 下載階段佔 5%-55%
+                                    self._report_dependency_progress(percent, f"正在下載 {display_name}...")
+                except Exception as e:
+                    return {"status": "error", "message": f"下載 {display_name} 失敗：{e}"}
             run_path = tmp_path
 
         try:
@@ -1103,6 +1193,12 @@ class InstallerAPI:
                 }
             log(f"磁碟空間檢查通過（需要約 {required // (1024 * 1024)} MB）")
 
+            if self.create_restore_point_before_install:
+                if restore_point.create_restore_point(f"安裝 {self.app_name} {self.version}"):
+                    log("已建立系統還原點")
+                else:
+                    log("[警告] 建立系統還原點失敗（不影響安裝結果）")
+
             # 主程式執行中偵測：回傳獨立於一般 "error" 的狀態值，讓前端可以
             # 跳出「關閉程式並繼續安裝／取消」的互動選擇，而不是直接判定
             # 安裝失敗、逼使用者自己手動關閉程式再重新來一次。
@@ -1244,6 +1340,33 @@ class InstallerAPI:
                 except Exception as e:
                     raise RuntimeError(f"檔案關聯註冊失敗：{e}") from e
                 log(f"已註冊檔案關聯: {self.file_associations}")
+            windows_service_name = ""
+            if self.windows_service.get("service_name") and self.windows_service.get("exe_relative_path"):
+                service_exe_path = self._resolve_installed_path(self.windows_service["exe_relative_path"])
+                created = windows_service.create_service(
+                    self.windows_service["service_name"], service_exe_path,
+                    display_name=self.windows_service.get("display_name"),
+                    start_type=self.windows_service.get("start_type", "auto"),
+                )
+                if created:
+                    windows_service_name = self.windows_service["service_name"]
+                    log(f"已建立 Windows 服務: {windows_service_name}")
+                else:
+                    log(f"[警告] 建立 Windows 服務 {self.windows_service['service_name']} 失敗（不影響安裝結果）")
+
+            scheduled_task_name = ""
+            if self.scheduled_task.get("task_name") and self.scheduled_task.get("exe_relative_path"):
+                task_exe_path = self._resolve_installed_path(self.scheduled_task["exe_relative_path"])
+                created = scheduled_task.create_scheduled_task(
+                    self.scheduled_task["task_name"], task_exe_path,
+                    trigger=self.scheduled_task.get("trigger", "onlogon"),
+                )
+                if created:
+                    scheduled_task_name = self.scheduled_task["task_name"]
+                    log(f"已建立排程工作: {scheduled_task_name}")
+                else:
+                    log(f"[警告] 建立排程工作 {self.scheduled_task['task_name']} 失敗（不影響安裝結果）")
+
             path_directory = ""
             if self.add_to_path:
                 try:
@@ -1281,6 +1404,8 @@ class InstallerAPI:
                 "local_appdata_dir": self._local_appdata_root() if self.local_appdata_files else "",
                 "restart_explorer_on_update": self.restart_explorer_on_update,
                 "no_admin_install": self.no_admin_install,
+                "windows_service_name": windows_service_name,
+                "scheduled_task_name": scheduled_task_name,
                 "installed_at": datetime.now().isoformat(),
             }
             with open(os.path.join(self.selected_path, "install_manifest.json"), "w", encoding="utf-8") as f:

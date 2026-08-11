@@ -104,6 +104,14 @@ class TestEnsureWorkspaceFiles(unittest.TestCase):
             f.write("# NEW system_entries content")
         with open(os.path.join(self.embedded_dir, "explorer_lock_release.py"), "w") as f:
             f.write("# NEW explorer_lock_release content")
+        with open(os.path.join(self.embedded_dir, "windows_service.py"), "w") as f:
+            f.write("# NEW windows_service content")
+        with open(os.path.join(self.embedded_dir, "scheduled_task.py"), "w") as f:
+            f.write("# NEW scheduled_task content")
+        with open(os.path.join(self.embedded_dir, "restore_point.py"), "w") as f:
+            f.write("# NEW restore_point content")
+        with open(os.path.join(self.embedded_dir, "bits_download.py"), "w") as f:
+            f.write("# NEW bits_download content")
         os.makedirs(os.path.join(self.embedded_dir, "ui"))
         with open(os.path.join(self.embedded_dir, "ui", "index.html"), "w") as f:
             f.write("<!-- NEW index.html -->")

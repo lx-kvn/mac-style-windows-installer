@@ -29,6 +29,8 @@ import os
 import subprocess
 import winreg as _real_winreg
 
+import restart_manager
+
 _WINLOGON_KEY = r"Software\Microsoft\Windows NT\CurrentVersion\Winlogon"
 _DEFAULT_AUTO_RESTART_SHELL = "1"
 
@@ -301,6 +303,32 @@ def release_locking_processes(processes, path=None, registry=_real_winreg,
             remaining = find_locking_processes([path])
             log(f"[explorer_lock_release] 關窗 {closed} 個之後重新偵測，剩餘鎖定: {remaining}")
             processes = [{"pid": pid, "name": name} for pid, name in remaining]
+
+    # 第二層：關窗解決不了時，先試著用 Restart Manager 請支援它的應用程式
+    # 自己存檔、優雅關閉（不是砍行程），比直接強制終止更客氣，也是
+    # Windows Installer 本身處理這類情境的做法。這層解不開鎖，才落到
+    # 下面既有的「強制關殼層」邏輯。
+    if path and processes:
+        session = restart_manager.RestartManagerSession([path])
+        if session.is_open:
+            log(f"[explorer_lock_release] 嘗試 Restart Manager 優雅關閉，path={path}")
+            if session.shutdown():
+                if find_locking_processes is not None:
+                    remaining = find_locking_processes([path])
+                else:
+                    remaining = session.list_locking_processes()
+                log(f"[explorer_lock_release] Restart Manager 優雅關閉後重新偵測，剩餘鎖定: {remaining}")
+                session.restart()
+                if not remaining:
+                    session.close()
+                    log("[explorer_lock_release] Restart Manager 優雅關閉已解開鎖，不需要強制關殼層")
+                    return None
+                processes = [{"pid": pid, "name": name} for pid, name in remaining]
+            else:
+                log("[explorer_lock_release] Restart Manager 優雅關閉呼叫失敗或沒有可關閉的應用程式")
+        else:
+            log("[explorer_lock_release] Restart Manager session 開不起來，略過優雅關閉這層")
+        session.close()
 
     explorer_procs = []
     other_procs = []

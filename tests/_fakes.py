@@ -63,6 +63,21 @@ class FakeWinReg:
     def CloseKey(self, key_ctx):
         pass
 
+    def EnumKey(self, key_ctx, index):
+        """列出 key_ctx 底下直接子機碼的名稱（依 index 逐一取出），模擬真正
+        winreg.EnumKey()：index 超出範圍時拋 OSError（.NET Desktop Runtime
+        的版本偵測要靠 EnumKey 列出 InstalledVersions\\...\\sharedfx\\...
+        底下那些以版本號命名的子機碼）。"""
+        prefix = key_ctx.subkey + "\\"
+        children = sorted({
+            subkey[len(prefix):].split("\\")[0]
+            for (hive, subkey) in self.store
+            if hive == key_ctx.hive and subkey.startswith(prefix) and subkey != key_ctx.subkey
+        })
+        if index >= len(children):
+            raise OSError("no more data")
+        return children[index]
+
     def hklm(self, subkey):
         """測試用的便捷存取子：讀/寫 HKEY_LOCAL_MACHINE 底下某個機碼目前的值。"""
         return self.store.get((self.HKEY_LOCAL_MACHINE, subkey))

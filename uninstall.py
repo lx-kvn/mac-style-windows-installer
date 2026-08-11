@@ -101,6 +101,8 @@ import lang_detect
 import self_delete
 import system_entries
 import explorer_lock_release
+import windows_service
+import scheduled_task
 from window_drag import WindowDragController
 
 # 跟 installer_core.py 的介面語言支援範圍一致：解除安裝助手的畫面 chrome
@@ -388,6 +390,22 @@ def _perform_uninstall_steps(ctx, locking_processes, kill_locking_processes, log
         progress(50, "正在從環境變數 PATH 移除安裝路徑...")
         remove_from_path(_path_removal_target(manifest, current_dir), no_admin_install)
         log("已從 PATH 移除安裝路徑")
+
+    windows_service_name = manifest.get("windows_service_name")
+    if windows_service_name:
+        progress(55, "正在移除 Windows 服務...")
+        if windows_service.remove_service(windows_service_name):
+            log(f"已移除 Windows 服務: {windows_service_name}")
+        else:
+            log(f"[警告] 移除 Windows 服務 {windows_service_name} 失敗")
+
+    scheduled_task_name = manifest.get("scheduled_task_name")
+    if scheduled_task_name:
+        progress(58, "正在移除排程工作...")
+        if scheduled_task.remove_scheduled_task(scheduled_task_name):
+            log(f"已移除排程工作: {scheduled_task_name}")
+        else:
+            log(f"[警告] 移除排程工作 {scheduled_task_name} 失敗")
 
     progress(65, "正在刪除安裝目錄下的檔案...")
     files_to_remove = manifest.get("files")

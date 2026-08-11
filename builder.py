@@ -113,7 +113,8 @@ def build_all(
     doc_icons=None, add_to_path=False, path_target_exe="", local_appdata_files=None,
     restart_explorer_on_update=False, no_admin_install=False, pre_install_script="", post_install_script="",
     custom_dependencies=None, bundle_dependencies=None, signing=None, custom_install_dir="",
-    workspace_dir=".", progress_callback=None,
+    windows_service=None, scheduled_task=None, dependencies_min_version=None,
+    create_restore_point_before_install=False, workspace_dir=".", progress_callback=None,
 ):
     """流水線：產生配置 -> 編譯反安裝檔 -> 編譯主安裝檔
 
@@ -150,6 +151,9 @@ def build_all(
     local_appdata_files = local_appdata_files or []
     custom_dependencies = custom_dependencies or []
     bundle_dependencies = bundle_dependencies or []
+    windows_service = windows_service or {}
+    scheduled_task = scheduled_task or {}
+    dependencies_min_version = dependencies_min_version or {}
     folder_name = folder_name or app_name
 
     workspace_dir = os.path.abspath(workspace_dir)
@@ -209,6 +213,10 @@ def build_all(
         "restart_explorer_on_update": bool(restart_explorer_on_update),
         "no_admin_install": bool(no_admin_install),
         "custom_install_dir": custom_install_dir,
+        "windows_service": windows_service,
+        "scheduled_task": scheduled_task,
+        "dependencies_min_version": dependencies_min_version,
+        "create_restore_point_before_install": bool(create_restore_point_before_install),
         "pre_install_script": pre_install_embedded,
         "post_install_script": post_install_embedded,
     }

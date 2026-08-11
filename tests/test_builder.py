@@ -122,6 +122,137 @@ class TestConfigAssembly(BuildAllTestBase):
         self.assertTrue(captured["restart_explorer_on_update"])
         self.assertEqual(captured["doc_icon"], "", "沒傳 doc_icon_path 時，設定檔裡的 doc_icon 欄位應該是空字串")
 
+    def test_windows_service_field_written_to_config_verbatim(self):
+        captured = {}
+
+        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+            if "uninstall.py" in cmd:
+                os.makedirs(self.dist_dir, exist_ok=True)
+                with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
+                    f.write(b"FAKE")
+            else:
+                with open(os.path.join(self.workspace_dir, "installer_config.json"), encoding="utf-8") as f:
+                    captured.update(json.load(f))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        service_config = {"service_name": "MySvc", "exe_relative_path": "app.exe", "start_type": "auto"}
+        self._call_build_all(run_side_effect=fake_run, windows_service=service_config)
+        self.assertEqual(captured["windows_service"], service_config)
+
+    def test_windows_service_defaults_to_empty_dict(self):
+        captured = {}
+
+        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+            if "uninstall.py" in cmd:
+                os.makedirs(self.dist_dir, exist_ok=True)
+                with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
+                    f.write(b"FAKE")
+            else:
+                with open(os.path.join(self.workspace_dir, "installer_config.json"), encoding="utf-8") as f:
+                    captured.update(json.load(f))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        self._call_build_all(run_side_effect=fake_run)
+        self.assertEqual(captured["windows_service"], {})
+
+    def test_scheduled_task_field_written_to_config_verbatim(self):
+        captured = {}
+
+        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+            if "uninstall.py" in cmd:
+                os.makedirs(self.dist_dir, exist_ok=True)
+                with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
+                    f.write(b"FAKE")
+            else:
+                with open(os.path.join(self.workspace_dir, "installer_config.json"), encoding="utf-8") as f:
+                    captured.update(json.load(f))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        task_config = {"task_name": "MyTask", "exe_relative_path": "app.exe", "trigger": "onlogon"}
+        self._call_build_all(run_side_effect=fake_run, scheduled_task=task_config)
+        self.assertEqual(captured["scheduled_task"], task_config)
+
+    def test_scheduled_task_defaults_to_empty_dict(self):
+        captured = {}
+
+        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+            if "uninstall.py" in cmd:
+                os.makedirs(self.dist_dir, exist_ok=True)
+                with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
+                    f.write(b"FAKE")
+            else:
+                with open(os.path.join(self.workspace_dir, "installer_config.json"), encoding="utf-8") as f:
+                    captured.update(json.load(f))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        self._call_build_all(run_side_effect=fake_run)
+        self.assertEqual(captured["scheduled_task"], {})
+
+    def test_dependencies_min_version_written_to_config_verbatim(self):
+        captured = {}
+
+        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+            if "uninstall.py" in cmd:
+                os.makedirs(self.dist_dir, exist_ok=True)
+                with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
+                    f.write(b"FAKE")
+            else:
+                with open(os.path.join(self.workspace_dir, "installer_config.json"), encoding="utf-8") as f:
+                    captured.update(json.load(f))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        min_versions = {"vcredist_x64": "14.30", "dotnet_desktop": "8.0.0"}
+        self._call_build_all(run_side_effect=fake_run, dependencies_min_version=min_versions)
+        self.assertEqual(captured["dependencies_min_version"], min_versions)
+
+    def test_dependencies_min_version_defaults_to_empty_dict(self):
+        captured = {}
+
+        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+            if "uninstall.py" in cmd:
+                os.makedirs(self.dist_dir, exist_ok=True)
+                with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
+                    f.write(b"FAKE")
+            else:
+                with open(os.path.join(self.workspace_dir, "installer_config.json"), encoding="utf-8") as f:
+                    captured.update(json.load(f))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        self._call_build_all(run_side_effect=fake_run)
+        self.assertEqual(captured["dependencies_min_version"], {})
+
+    def test_create_restore_point_before_install_written_to_config(self):
+        captured = {}
+
+        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+            if "uninstall.py" in cmd:
+                os.makedirs(self.dist_dir, exist_ok=True)
+                with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
+                    f.write(b"FAKE")
+            else:
+                with open(os.path.join(self.workspace_dir, "installer_config.json"), encoding="utf-8") as f:
+                    captured.update(json.load(f))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        self._call_build_all(run_side_effect=fake_run, create_restore_point_before_install=True)
+        self.assertTrue(captured["create_restore_point_before_install"])
+
+    def test_create_restore_point_before_install_defaults_to_false(self):
+        captured = {}
+
+        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+            if "uninstall.py" in cmd:
+                os.makedirs(self.dist_dir, exist_ok=True)
+                with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
+                    f.write(b"FAKE")
+            else:
+                with open(os.path.join(self.workspace_dir, "installer_config.json"), encoding="utf-8") as f:
+                    captured.update(json.load(f))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        self._call_build_all(run_side_effect=fake_run)
+        self.assertFalse(captured["create_restore_point_before_install"])
+
     def test_folder_name_falls_back_to_app_name_when_blank(self):
         captured = {}
 

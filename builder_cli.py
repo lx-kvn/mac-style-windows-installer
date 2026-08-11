@@ -199,6 +199,10 @@ def _load_pack_input(args):
     data.setdefault("eula_default_lang", data.get("eula_default_lang", ""))
     data.setdefault("custom_dependencies", data.get("custom_dependencies", []))
     data.setdefault("signing", data.get("signing", {}))
+    data.setdefault("windows_service", data.get("windows_service", {}))
+    data.setdefault("scheduled_task", data.get("scheduled_task", {}))
+    data.setdefault("dependencies_min_version", data.get("dependencies_min_version", {}))
+    data.setdefault("create_restore_point_before_install", bool(data.get("create_restore_point_before_install", False)))
 
     return data, app_dir, png_path, ico_path, doc_icon_path_selected
 
@@ -263,6 +267,10 @@ def cmd_pack(args):
             custom_dependencies=pack_data.get("custom_dependencies", []),
             bundle_dependencies=pack_data.get("bundle_dependencies", []),
             signing=pack_data.get("signing"),
+            windows_service=pack_data.get("windows_service", {}),
+            scheduled_task=pack_data.get("scheduled_task", {}),
+            dependencies_min_version=pack_data.get("dependencies_min_version", {}),
+            create_restore_point_before_install=pack_data.get("create_restore_point_before_install", False),
             workspace_dir=workspace_dir,
             progress_callback=progress_handler,
         )

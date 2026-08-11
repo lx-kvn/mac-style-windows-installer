@@ -30,6 +30,7 @@ ERROR_MORE_DATA = 234
 _CCH_RM_SESSION_KEY = 32
 _RM_MAX_APP_NAME = 255
 _RM_MAX_SVC_NAME = 63
+_RM_FORCE_SHUTDOWN = 0x1
 
 
 class _FILETIME(ctypes.Structure):
@@ -140,3 +141,131 @@ def find_locking_processes(file_paths, rm_dll=None):
             rstrtmgr.RmEndSession(session_handle)
         except Exception:
             pass
+
+
+class RestartManagerSession:
+    """跨步驟持有一個 Restart Manager session，取代
+    find_locking_processes()「開 session 用完即關」的單函式生命週期。
+
+    典型用法（見 explorer_lock_release.py）：開一個 session 註冊要檢查的
+    路徑 → list_locking_processes() 查誰鎖著 → shutdown() 請支援 Restart
+    Manager 的應用程式自己存檔優雅關閉 → 呼叫端做完檔案操作 → restart()
+    把剛剛關掉的應用程式啟動回來 → close()（或直接用 with 語法，
+    __exit__ 會自動呼叫 close()）。
+
+    rm_dll 只給測試注入假的 DLL 物件用，跟 find_locking_processes() 的
+    rm_dll 參數同一種 seam 風格。
+    """
+
+    def __init__(self, file_paths, rm_dll=None):
+        self._rstrtmgr = None
+        self._session_handle = wintypes.DWORD()
+        self._started = False
+
+        file_paths = [p for p in file_paths if p]
+        try:
+            self._rstrtmgr = rm_dll if rm_dll is not None else _load_rstrtmgr()
+        except Exception:
+            return
+
+        try:
+            session_key = ctypes.create_unicode_buffer(_CCH_RM_SESSION_KEY + 1)
+            result = self._rstrtmgr.RmStartSession(ctypes.byref(self._session_handle), 0, session_key)
+            if result != ERROR_SUCCESS:
+                return
+            self._started = True
+
+            if file_paths:
+                arr_type = ctypes.c_wchar_p * len(file_paths)
+                filenames = arr_type(*file_paths)
+                self._rstrtmgr.RmRegisterResources(
+                    self._session_handle, len(file_paths), filenames, 0, None, 0, None,
+                )
+        except Exception:
+            self._started = False
+
+    @property
+    def is_open(self):
+        return self._started
+
+    def list_locking_processes(self):
+        """回傳 [(pid, app_name), ...]，邏輯同 find_locking_processes()
+        的兩階段 RmGetList，沿用這個 session 已經開好的 handle，不用
+        重新開一次 session。"""
+        if not self._started:
+            return []
+        try:
+            proc_info_needed = wintypes.UINT(0)
+            proc_info_count = wintypes.UINT(0)
+            reboot_reasons = wintypes.DWORD(0)
+            result = self._rstrtmgr.RmGetList(
+                self._session_handle, ctypes.byref(proc_info_needed), ctypes.byref(proc_info_count),
+                None, ctypes.byref(reboot_reasons),
+            )
+            if result not in (ERROR_SUCCESS, ERROR_MORE_DATA):
+                return []
+            if proc_info_needed.value == 0:
+                return []
+
+            proc_info_count = wintypes.UINT(proc_info_needed.value)
+            proc_info_array = (_RM_PROCESS_INFO * proc_info_needed.value)()
+            result = self._rstrtmgr.RmGetList(
+                self._session_handle, ctypes.byref(proc_info_needed), ctypes.byref(proc_info_count),
+                proc_info_array, ctypes.byref(reboot_reasons),
+            )
+            if result != ERROR_SUCCESS:
+                return []
+
+            seen_pids = set()
+            processes = []
+            for i in range(proc_info_count.value):
+                info = proc_info_array[i]
+                pid = info.Process.dwProcessId
+                if pid in seen_pids:
+                    continue
+                seen_pids.add(pid)
+                processes.append((pid, info.strAppName))
+            return processes
+        except Exception:
+            return []
+
+    def shutdown(self, force=False):
+        """呼叫 RmShutdown，讓這個 session 註冊路徑相關、且支援 Restart
+        Manager 的應用程式收到通知去存檔、優雅關閉。force=True 會額外帶
+        RmForceShutdown 旗標。回傳是否成功。"""
+        if not self._started:
+            return False
+        try:
+            flags = _RM_FORCE_SHUTDOWN if force else 0
+            result = self._rstrtmgr.RmShutdown(self._session_handle, flags, None)
+            return result == ERROR_SUCCESS
+        except Exception:
+            return False
+
+    def restart(self):
+        """呼叫 RmRestart，把 shutdown() 關閉的應用程式重新啟動回來。
+        回傳是否成功。"""
+        if not self._started:
+            return False
+        try:
+            result = self._rstrtmgr.RmRestart(self._session_handle, 0, None)
+            return result == ERROR_SUCCESS
+        except Exception:
+            return False
+
+    def close(self):
+        """結束 session（RmEndSession）。可以重複呼叫，第二次之後是 no-op。"""
+        if not self._started:
+            return
+        try:
+            self._rstrtmgr.RmEndSession(self._session_handle)
+        except Exception:
+            pass
+        self._started = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False

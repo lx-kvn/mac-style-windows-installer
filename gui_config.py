@@ -328,6 +328,10 @@ class ConfigAPI:
                 custom_dependencies=data.get("custom_dependencies", []),
                 bundle_dependencies=data.get("bundle_dependencies", []),
                 signing=data.get("signing"),
+                windows_service=data.get("windows_service", {}),
+                scheduled_task=data.get("scheduled_task", {}),
+                dependencies_min_version=data.get("dependencies_min_version", {}),
+                create_restore_point_before_install=data.get("create_restore_point_before_install", False),
                 workspace_dir=workspace_dir,
                 progress_callback=progress_handler,
             )

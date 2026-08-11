@@ -6,6 +6,7 @@
 """
 import os
 import sys
+import json
 import shutil
 import tempfile
 import unittest
@@ -1329,6 +1330,228 @@ class TestTriggerInstallationRestoresExplorerLock(unittest.TestCase):
         mock_restore.assert_called_once_with(None)
 
 
+class TestTriggerInstallationCreatesWindowsService(unittest.TestCase):
+    """windows_service packaging 欄位有設定時，trigger_installation() 應該
+    呼叫 windows_service.create_service() 建立服務、並把服務名稱記進
+    install_manifest.json；沒設定時完全不呼叫；建立失敗不應該讓整個安裝
+    回報失敗（比照 post_install_script 失敗只記錄警告的既有慣例）。"""
+
+    def setUp(self):
+        self.resource_dir = tempfile.mkdtemp()
+        self.app_contents_dir = os.path.join(self.resource_dir, "app_contents")
+        os.makedirs(self.app_contents_dir)
+        with open(os.path.join(self.app_contents_dir, "app.exe"), "wb") as f:
+            f.write(b"fake-app")
+        self.install_dir = tempfile.mkdtemp()
+        shutil.rmtree(self.install_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.resource_dir, ignore_errors=True)
+        shutil.rmtree(self.install_dir, ignore_errors=True)
+
+    def _make_api(self, **overrides):
+        return make_installer_api(
+            app_name="MyApp", main_exe="app.exe", selected_path=self.install_dir,
+            file_associations=[], add_to_path=False, **overrides,
+        )
+
+    def test_creates_service_when_configured(self):
+        api = self._make_api(windows_service={
+            "service_name": "MySvc", "exe_relative_path": "app.exe",
+            "display_name": "My Service", "start_type": "auto",
+        })
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_register_uninstall_entry"), \
+             mock.patch("installer_core.windows_service.create_service", return_value=True) as mock_create:
+            result = api.trigger_installation(create_desktop_shortcut=False)
+
+        self.assertEqual(result["status"], "success")
+        mock_create.assert_called_once_with(
+            "MySvc", os.path.join(self.install_dir, "app.exe"),
+            display_name="My Service", start_type="auto",
+        )
+
+    def test_no_service_configured_skips_creation(self):
+        api = self._make_api()
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_register_uninstall_entry"), \
+             mock.patch("installer_core.windows_service.create_service") as mock_create:
+            api.trigger_installation(create_desktop_shortcut=False)
+
+        mock_create.assert_not_called()
+
+    def test_manifest_records_service_name_when_created(self):
+        api = self._make_api(windows_service={"service_name": "MySvc", "exe_relative_path": "app.exe"})
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_register_uninstall_entry"), \
+             mock.patch("installer_core.windows_service.create_service", return_value=True):
+            api.trigger_installation(create_desktop_shortcut=False)
+
+        with open(os.path.join(self.install_dir, "install_manifest.json"), encoding="utf-8") as f:
+            manifest = json.load(f)
+        self.assertEqual(manifest["windows_service_name"], "MySvc")
+
+    def test_manifest_omits_service_name_when_creation_fails(self):
+        api = self._make_api(windows_service={"service_name": "MySvc", "exe_relative_path": "app.exe"})
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_register_uninstall_entry"), \
+             mock.patch("installer_core.windows_service.create_service", return_value=False):
+            result = api.trigger_installation(create_desktop_shortcut=False)
+
+        self.assertEqual(result["status"], "success")
+        with open(os.path.join(self.install_dir, "install_manifest.json"), encoding="utf-8") as f:
+            manifest = json.load(f)
+        self.assertEqual(manifest["windows_service_name"], "")
+
+
+class TestTriggerInstallationCreatesScheduledTask(unittest.TestCase):
+    """scheduled_task packaging 欄位有設定時，trigger_installation() 應該
+    呼叫 scheduled_task.create_scheduled_task() 建立排程工作、並把工作
+    名稱記進 install_manifest.json；沒設定時完全不呼叫；建立失敗不應該
+    讓整個安裝回報失敗。"""
+
+    def setUp(self):
+        self.resource_dir = tempfile.mkdtemp()
+        self.app_contents_dir = os.path.join(self.resource_dir, "app_contents")
+        os.makedirs(self.app_contents_dir)
+        with open(os.path.join(self.app_contents_dir, "app.exe"), "wb") as f:
+            f.write(b"fake-app")
+        self.install_dir = tempfile.mkdtemp()
+        shutil.rmtree(self.install_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.resource_dir, ignore_errors=True)
+        shutil.rmtree(self.install_dir, ignore_errors=True)
+
+    def _make_api(self, **overrides):
+        return make_installer_api(
+            app_name="MyApp", main_exe="app.exe", selected_path=self.install_dir,
+            file_associations=[], add_to_path=False, **overrides,
+        )
+
+    def test_creates_task_when_configured(self):
+        api = self._make_api(scheduled_task={
+            "task_name": "MyTask", "exe_relative_path": "app.exe", "trigger": "daily",
+        })
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_register_uninstall_entry"), \
+             mock.patch("installer_core.scheduled_task.create_scheduled_task", return_value=True) as mock_create:
+            result = api.trigger_installation(create_desktop_shortcut=False)
+
+        self.assertEqual(result["status"], "success")
+        mock_create.assert_called_once_with(
+            "MyTask", os.path.join(self.install_dir, "app.exe"), trigger="daily",
+        )
+
+    def test_no_task_configured_skips_creation(self):
+        api = self._make_api()
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_register_uninstall_entry"), \
+             mock.patch("installer_core.scheduled_task.create_scheduled_task") as mock_create:
+            api.trigger_installation(create_desktop_shortcut=False)
+
+        mock_create.assert_not_called()
+
+    def test_manifest_records_task_name_when_created(self):
+        api = self._make_api(scheduled_task={"task_name": "MyTask", "exe_relative_path": "app.exe"})
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_register_uninstall_entry"), \
+             mock.patch("installer_core.scheduled_task.create_scheduled_task", return_value=True):
+            api.trigger_installation(create_desktop_shortcut=False)
+
+        with open(os.path.join(self.install_dir, "install_manifest.json"), encoding="utf-8") as f:
+            manifest = json.load(f)
+        self.assertEqual(manifest["scheduled_task_name"], "MyTask")
+
+    def test_manifest_records_empty_task_name_when_creation_fails(self):
+        api = self._make_api(scheduled_task={"task_name": "MyTask", "exe_relative_path": "app.exe"})
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_register_uninstall_entry"), \
+             mock.patch("installer_core.scheduled_task.create_scheduled_task", return_value=False):
+            result = api.trigger_installation(create_desktop_shortcut=False)
+
+        self.assertEqual(result["status"], "success")
+        with open(os.path.join(self.install_dir, "install_manifest.json"), encoding="utf-8") as f:
+            manifest = json.load(f)
+        self.assertEqual(manifest["scheduled_task_name"], "")
+
+
+class TestTriggerInstallationCreatesRestorePoint(unittest.TestCase):
+    """create_restore_point_before_install 開啟時，trigger_installation()
+    要呼叫 restore_point.create_restore_point()；關閉（預設）時完全不呼叫；
+    建立失敗不應該讓整個安裝回報失敗，也不需要記進 install_manifest.json
+    （還原點是系統層級的，不需要解除安裝時清除）。"""
+
+    def setUp(self):
+        self.resource_dir = tempfile.mkdtemp()
+        self.app_contents_dir = os.path.join(self.resource_dir, "app_contents")
+        os.makedirs(self.app_contents_dir)
+        with open(os.path.join(self.app_contents_dir, "app.exe"), "wb") as f:
+            f.write(b"fake-app")
+        self.install_dir = tempfile.mkdtemp()
+        shutil.rmtree(self.install_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.resource_dir, ignore_errors=True)
+        shutil.rmtree(self.install_dir, ignore_errors=True)
+
+    def _make_api(self, **overrides):
+        return make_installer_api(
+            app_name="MyApp", version="1.2.3", main_exe="app.exe", selected_path=self.install_dir,
+            file_associations=[], add_to_path=False, **overrides,
+        )
+
+    def test_creates_restore_point_when_enabled(self):
+        api = self._make_api(create_restore_point_before_install=True)
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_register_uninstall_entry"), \
+             mock.patch("installer_core.restore_point.create_restore_point", return_value=True) as mock_create:
+            result = api.trigger_installation(create_desktop_shortcut=False)
+
+        self.assertEqual(result["status"], "success")
+        mock_create.assert_called_once_with("安裝 MyApp 1.2.3")
+
+    def test_disabled_by_default_skips_creation(self):
+        api = self._make_api()
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_register_uninstall_entry"), \
+             mock.patch("installer_core.restore_point.create_restore_point") as mock_create:
+            api.trigger_installation(create_desktop_shortcut=False)
+
+        mock_create.assert_not_called()
+
+    def test_creation_failure_does_not_fail_install(self):
+        api = self._make_api(create_restore_point_before_install=True)
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_register_uninstall_entry"), \
+             mock.patch("installer_core.restore_point.create_restore_point", return_value=False):
+            result = api.trigger_installation(create_desktop_shortcut=False)
+
+        self.assertEqual(result["status"], "success")
+
+
 class TestGetDependencyWarnings(unittest.TestCase):
     """get_dependency_warnings()：現在額外回傳 key（前端要用它呼叫
     install_dependency(key) 觸發自動安裝），跟 DEPENDENCY_CHECKERS 從
@@ -1397,6 +1620,7 @@ class TestInstallDependency(unittest.TestCase):
     def test_success_when_recheck_confirms_installed(self):
         api = make_installer_api()
         with self._register_fake_checker(lambda: True), \
+             mock.patch("installer_core.bits_download.download_via_bits", return_value=False), \
              mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response()), \
              mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=0)):
             result = api.install_dependency(self.fake_key)
@@ -1407,6 +1631,7 @@ class TestInstallDependency(unittest.TestCase):
         非 0 結束碼，但這其實不是失敗——不能只看結束碼判斷。"""
         api = make_installer_api()
         with self._register_fake_checker(lambda: True), \
+             mock.patch("installer_core.bits_download.download_via_bits", return_value=False), \
              mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response()), \
              mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=1638)):
             result = api.install_dependency(self.fake_key)
@@ -1415,6 +1640,7 @@ class TestInstallDependency(unittest.TestCase):
     def test_download_failure_returns_error_without_running_installer(self):
         api = make_installer_api()
         with self._register_fake_checker(lambda: False), \
+             mock.patch("installer_core.bits_download.download_via_bits", return_value=False), \
              mock.patch("installer_core.urllib.request.urlopen", side_effect=OSError("模擬連線失敗")), \
              mock.patch("installer_core.subprocess.run") as mock_run:
             result = api.install_dependency(self.fake_key)
@@ -1425,6 +1651,7 @@ class TestInstallDependency(unittest.TestCase):
     def test_installer_process_failure_returns_error(self):
         api = make_installer_api()
         with self._register_fake_checker(lambda: False), \
+             mock.patch("installer_core.bits_download.download_via_bits", return_value=False), \
              mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response()), \
              mock.patch("installer_core.subprocess.run", side_effect=OSError("模擬子程序啟動失敗")):
             result = api.install_dependency(self.fake_key)
@@ -1434,6 +1661,7 @@ class TestInstallDependency(unittest.TestCase):
     def test_recheck_still_missing_after_install_returns_error(self):
         api = make_installer_api()
         with self._register_fake_checker(lambda: False), \
+             mock.patch("installer_core.bits_download.download_via_bits", return_value=False), \
              mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response()), \
              mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=0)):
             result = api.install_dependency(self.fake_key)
@@ -1444,6 +1672,7 @@ class TestInstallDependency(unittest.TestCase):
         api = make_installer_api()
         expected_tmp_path = os.path.join(tempfile.gettempdir(), f"dep_installer_{self.fake_key}.exe")
         with self._register_fake_checker(lambda: True), \
+             mock.patch("installer_core.bits_download.download_via_bits", return_value=False), \
              mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response()), \
              mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=0)):
             api.install_dependency(self.fake_key)
@@ -1453,10 +1682,35 @@ class TestInstallDependency(unittest.TestCase):
         expected_tmp_path = os.path.join(tempfile.gettempdir(), f"dep_installer_{self.fake_key}.exe")
         api = make_installer_api()
         with self._register_fake_checker(lambda: False), \
+             mock.patch("installer_core.bits_download.download_via_bits", return_value=False), \
              mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response()), \
              mock.patch("installer_core.subprocess.run", side_effect=OSError("模擬子程序啟動失敗")):
             api.install_dependency(self.fake_key)
         self.assertFalse(os.path.exists(expected_tmp_path))
+
+    def test_bits_success_skips_urllib_entirely(self):
+        api = make_installer_api()
+        with self._register_fake_checker(lambda: True), \
+             mock.patch("installer_core.bits_download.download_via_bits", return_value=True) as mock_bits, \
+             mock.patch("installer_core.urllib.request.urlopen") as mock_urlopen, \
+             mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=0)), \
+             mock.patch("os.path.exists", return_value=True), \
+             mock.patch("os.remove"):
+            result = api.install_dependency(self.fake_key)
+        self.assertEqual(result["status"], "success")
+        mock_bits.assert_called_once()
+        mock_urlopen.assert_not_called()
+
+    def test_bits_failure_falls_back_to_urllib(self):
+        api = make_installer_api()
+        with self._register_fake_checker(lambda: True), \
+             mock.patch("installer_core.bits_download.download_via_bits", return_value=False) as mock_bits, \
+             mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response()) as mock_urlopen, \
+             mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=0)):
+            result = api.install_dependency(self.fake_key)
+        self.assertEqual(result["status"], "success")
+        mock_bits.assert_called_once()
+        mock_urlopen.assert_called_once()
 
 
 class TestGenericRegistryCheck(unittest.TestCase):
@@ -1490,6 +1744,150 @@ class TestGenericRegistryCheck(unittest.TestCase):
         self.fake_reg.set_hkcu("Software\\SomeApp", {"Installed": 1})
         self.assertTrue(ic._generic_registry_check("HKCU", "Software\\SomeApp", "Installed", 1))
         self.assertFalse(ic._generic_registry_check("HKLM", "Software\\SomeApp", "Installed", 1))
+
+
+class TestGenericRegistryVersionCheck(unittest.TestCase):
+    """_generic_registry_version_check()：相依元件版本檢查可以指定最低
+    需求版本，min_version 是 None 時退化成純粹的存在性判斷。
+
+    enum_subkeys=True 對應 .NET Desktop Runtime 那種「子機碼名稱本身就是
+    版本號」的登錄表佈局（InstalledVersions\\...\\sharedfx\\...\\8.0.10）；
+    enum_subkeys=False 對應 vcredist 那種「某個值本身存的就是版本字串」
+    的佈局。"""
+
+    def setUp(self):
+        self.fake_reg = FakeWinReg()
+        self.patcher = mock.patch.dict(sys.modules, {"winreg": self.fake_reg})
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    def test_key_missing_returns_false_regardless_of_min_version(self):
+        self.assertFalse(ic._generic_registry_version_check("HKLM", "Software\\NotThere", min_version="1.0"))
+
+    def test_no_min_version_is_pure_existence_check(self):
+        self.fake_reg.set_hklm("Software\\SomeApp", {"Version": "1.0.0"})
+        self.assertTrue(ic._generic_registry_version_check("HKLM", "Software\\SomeApp", value_name="Version"))
+
+    def test_value_name_mode_meets_min_version(self):
+        self.fake_reg.set_hklm("Software\\SomeApp", {"Version": "14.38.33135"})
+        self.assertTrue(ic._generic_registry_version_check(
+            "HKLM", "Software\\SomeApp", value_name="Version", min_version="14.30",
+        ))
+
+    def test_value_name_mode_below_min_version(self):
+        self.fake_reg.set_hklm("Software\\SomeApp", {"Version": "14.20.0"})
+        self.assertFalse(ic._generic_registry_version_check(
+            "HKLM", "Software\\SomeApp", value_name="Version", min_version="14.30",
+        ))
+
+    def test_enum_subkeys_mode_uses_highest_subkey_version(self):
+        self.fake_reg.set_hklm("Software\\SomeApp", {})
+        self.fake_reg.set_hklm("Software\\SomeApp\\8.0.1", {})
+        self.fake_reg.set_hklm("Software\\SomeApp\\8.0.10", {})
+        self.assertTrue(ic._generic_registry_version_check(
+            "HKLM", "Software\\SomeApp", enum_subkeys=True, min_version="8.0.5",
+        ))
+
+    def test_enum_subkeys_mode_below_min_version(self):
+        self.fake_reg.set_hklm("Software\\SomeApp", {})
+        self.fake_reg.set_hklm("Software\\SomeApp\\7.0.0", {})
+        self.assertFalse(ic._generic_registry_version_check(
+            "HKLM", "Software\\SomeApp", enum_subkeys=True, min_version="8.0.0",
+        ))
+
+    def test_enum_subkeys_mode_no_subkeys_returns_false(self):
+        self.fake_reg.set_hklm("Software\\SomeApp", {})
+        self.assertFalse(ic._generic_registry_version_check(
+            "HKLM", "Software\\SomeApp", enum_subkeys=True, min_version="1.0",
+        ))
+
+
+class TestCheckVcredistX64VersionAware(unittest.TestCase):
+    def setUp(self):
+        self.fake_reg = FakeWinReg()
+        self.patcher = mock.patch.dict(sys.modules, {"winreg": self.fake_reg})
+        self.patcher.start()
+        self.path = "SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\x64"
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    def test_installed_flag_missing_is_false_even_without_min_version(self):
+        self.assertFalse(ic._check_vcredist_x64())
+
+    def test_no_min_version_only_checks_installed_flag(self):
+        self.fake_reg.set_hklm(self.path, {"Installed": 1})
+        self.assertTrue(ic._check_vcredist_x64())
+
+    def test_min_version_met(self):
+        self.fake_reg.set_hklm(self.path, {"Installed": 1, "Version": "14.38.33135"})
+        self.assertTrue(ic._check_vcredist_x64(min_version="14.30"))
+
+    def test_min_version_not_met(self):
+        self.fake_reg.set_hklm(self.path, {"Installed": 1, "Version": "14.20.0"})
+        self.assertFalse(ic._check_vcredist_x64(min_version="14.30"))
+
+
+class TestCheckDotnetDesktopVersionAware(unittest.TestCase):
+    def setUp(self):
+        self.fake_reg = FakeWinReg()
+        self.patcher = mock.patch.dict(sys.modules, {"winreg": self.fake_reg})
+        self.patcher.start()
+        self.path = "SOFTWARE\\WOW6432Node\\dotnet\\Setup\\InstalledVersions\\x64\\sharedfx\\Microsoft.WindowsDesktop.App"
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    def test_no_min_version_true_when_any_version_subkey_present(self):
+        self.fake_reg.set_hklm(self.path, {})
+        self.fake_reg.set_hklm(self.path + "\\8.0.10", {})
+        self.assertTrue(ic._check_dotnet_desktop())
+
+    def test_min_version_met(self):
+        self.fake_reg.set_hklm(self.path, {})
+        self.fake_reg.set_hklm(self.path + "\\8.0.10", {})
+        self.assertTrue(ic._check_dotnet_desktop(min_version="8.0.0"))
+
+    def test_min_version_not_met(self):
+        self.fake_reg.set_hklm(self.path, {})
+        self.fake_reg.set_hklm(self.path + "\\6.0.0", {})
+        self.assertFalse(ic._check_dotnet_desktop(min_version="8.0.0"))
+
+
+class TestBuildDependencyCheckersMinVersion(unittest.TestCase):
+    """dependencies_min_version packaging 欄位有設定時，_build_dependency_checkers()
+    要把對應的最低版本綁進內建 checker；沒設定的 key 維持原本零參數呼叫，
+    不會因為改動而讓既有（可能被測試 patch 成零參數 lambda 的）checker 爆炸。"""
+
+    def setUp(self):
+        self.fake_reg = FakeWinReg()
+        self.patcher = mock.patch.dict(sys.modules, {"winreg": self.fake_reg})
+        self.patcher.start()
+        self.path = "SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\x64"
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    def test_no_min_version_configured_calls_checker_with_no_args(self):
+        api = make_installer_api(dependencies=["vcredist_x64"])
+        with mock.patch.dict(
+            ic.DEPENDENCY_CHECKERS,
+            {"vcredist_x64": (lambda: True, "VC++", "https://example.test/vc.exe", ["/quiet"])},
+        ):
+            checkers = api._build_dependency_checkers()
+            self.assertTrue(checkers["vcredist_x64"][0]())
+
+    def test_min_version_configured_is_bound_into_builtin_checker(self):
+        self.fake_reg.set_hklm(self.path, {"Installed": 1, "Version": "14.20.0"})
+        api = make_installer_api(dependencies=["vcredist_x64"], dependencies_min_version={"vcredist_x64": "14.30"})
+        checkers = api._build_dependency_checkers()
+        self.assertFalse(checkers["vcredist_x64"][0]())
+
+        self.fake_reg.set_hklm(self.path, {"Installed": 1, "Version": "14.38.0"})
+        checkers = api._build_dependency_checkers()
+        self.assertTrue(checkers["vcredist_x64"][0]())
 
 
 class TestCustomDependencies(unittest.TestCase):
@@ -1551,6 +1949,39 @@ class TestCustomDependencies(unittest.TestCase):
             warnings = api.get_dependency_warnings()
         self.assertEqual(warnings, [{
             "key": "vcredist_x64", "name": "Visual C++ Redistributable (x64)", "url": "https://example.test/vc.exe",
+        }])
+
+    def test_custom_dependency_min_version_met(self):
+        self.fake_reg.set_hklm("Software\\MyRuntime", {"Version": "2.5.0"})
+        api = make_installer_api(
+            dependencies=["my_runtime"],
+            custom_dependencies=[{
+                "key": "my_runtime", "display_name": "My Runtime",
+                "download_url": "https://example.test/my_runtime.exe", "silent_args": [],
+                "registry_check": {
+                    "hive": "HKLM", "path": "Software\\MyRuntime",
+                    "value_name": "Version", "min_version": "2.0.0",
+                },
+            }],
+        )
+        self.assertEqual(api.get_dependency_warnings(), [])
+
+    def test_custom_dependency_min_version_not_met(self):
+        self.fake_reg.set_hklm("Software\\MyRuntime", {"Version": "1.0.0"})
+        api = make_installer_api(
+            dependencies=["my_runtime"],
+            custom_dependencies=[{
+                "key": "my_runtime", "display_name": "My Runtime",
+                "download_url": "https://example.test/my_runtime.exe", "silent_args": [],
+                "registry_check": {
+                    "hive": "HKLM", "path": "Software\\MyRuntime",
+                    "value_name": "Version", "min_version": "2.0.0",
+                },
+            }],
+        )
+        warnings = api.get_dependency_warnings()
+        self.assertEqual(warnings, [{
+            "key": "my_runtime", "name": "My Runtime", "url": "https://example.test/my_runtime.exe",
         }])
 
 

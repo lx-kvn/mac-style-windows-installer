@@ -107,6 +107,99 @@ class TestPerformUninstallStepsLockRelease(unittest.TestCase):
         mock_restore.assert_called_once_with(fake_state)
 
 
+class TestPerformUninstallStepsWindowsService(unittest.TestCase):
+    """manifest 裡有 windows_service_name 才呼叫 windows_service.remove_service()
+    移除對應的 Windows 服務，沒有這個欄位（或空字串）完全不呼叫。"""
+
+    def _make_ctx(self, current_dir, manifest=None):
+        return {
+            "app_name": "MyApp",
+            "manifest": manifest or {},
+            "current_dir": current_dir,
+            "no_admin_install": False,
+        }
+
+    def setUp(self):
+        self.current_dir = tempfile.mkdtemp()
+        self.self_name = "uninstall.exe"
+        with open(os.path.join(self.current_dir, self.self_name), "w") as f:
+            f.write("fake")
+        self.argv_patcher = mock.patch.object(un.sys, "argv", [os.path.join(self.current_dir, self.self_name)])
+        self.argv_patcher.start()
+
+    def tearDown(self):
+        self.argv_patcher.stop()
+        shutil.rmtree(self.current_dir, ignore_errors=True)
+
+    def test_removes_service_when_manifest_has_service_name(self):
+        ctx = self._make_ctx(self.current_dir, manifest={"files": [], "windows_service_name": "MySvc"})
+        with mock.patch("uninstall.windows_service.remove_service", return_value=True) as mock_remove:
+            un._perform_uninstall_steps(ctx, [], False, log=lambda m: None)
+
+        mock_remove.assert_called_once_with("MySvc")
+
+    def test_does_not_call_remove_service_when_manifest_has_no_service(self):
+        ctx = self._make_ctx(self.current_dir, manifest={"files": []})
+        with mock.patch("uninstall.windows_service.remove_service") as mock_remove:
+            un._perform_uninstall_steps(ctx, [], False, log=lambda m: None)
+
+        mock_remove.assert_not_called()
+
+    def test_does_not_call_remove_service_when_service_name_is_empty_string(self):
+        ctx = self._make_ctx(self.current_dir, manifest={"files": [], "windows_service_name": ""})
+        with mock.patch("uninstall.windows_service.remove_service") as mock_remove:
+            un._perform_uninstall_steps(ctx, [], False, log=lambda m: None)
+
+        mock_remove.assert_not_called()
+
+
+class TestPerformUninstallStepsScheduledTask(unittest.TestCase):
+    """manifest 裡有 scheduled_task_name 才呼叫
+    scheduled_task.remove_scheduled_task() 移除對應的排程工作，沒有這個
+    欄位（或空字串）完全不呼叫。"""
+
+    def _make_ctx(self, current_dir, manifest=None):
+        return {
+            "app_name": "MyApp",
+            "manifest": manifest or {},
+            "current_dir": current_dir,
+            "no_admin_install": False,
+        }
+
+    def setUp(self):
+        self.current_dir = tempfile.mkdtemp()
+        self.self_name = "uninstall.exe"
+        with open(os.path.join(self.current_dir, self.self_name), "w") as f:
+            f.write("fake")
+        self.argv_patcher = mock.patch.object(un.sys, "argv", [os.path.join(self.current_dir, self.self_name)])
+        self.argv_patcher.start()
+
+    def tearDown(self):
+        self.argv_patcher.stop()
+        shutil.rmtree(self.current_dir, ignore_errors=True)
+
+    def test_removes_task_when_manifest_has_task_name(self):
+        ctx = self._make_ctx(self.current_dir, manifest={"files": [], "scheduled_task_name": "MyTask"})
+        with mock.patch("uninstall.scheduled_task.remove_scheduled_task", return_value=True) as mock_remove:
+            un._perform_uninstall_steps(ctx, [], False, log=lambda m: None)
+
+        mock_remove.assert_called_once_with("MyTask")
+
+    def test_does_not_call_remove_task_when_manifest_has_no_task(self):
+        ctx = self._make_ctx(self.current_dir, manifest={"files": []})
+        with mock.patch("uninstall.scheduled_task.remove_scheduled_task") as mock_remove:
+            un._perform_uninstall_steps(ctx, [], False, log=lambda m: None)
+
+        mock_remove.assert_not_called()
+
+    def test_does_not_call_remove_task_when_task_name_is_empty_string(self):
+        ctx = self._make_ctx(self.current_dir, manifest={"files": [], "scheduled_task_name": ""})
+        with mock.patch("uninstall.scheduled_task.remove_scheduled_task") as mock_remove:
+            un._perform_uninstall_steps(ctx, [], False, log=lambda m: None)
+
+        mock_remove.assert_not_called()
+
+
 class TestWantsLockRelease(unittest.TestCase):
     """_wants_lock_release()：真實抓到的 bug——更新覆蓋安裝呼叫的是舊版本
     的 uninstall.exe，它是否要偵測鎖定進程原本只看自己那份（可能過期的）

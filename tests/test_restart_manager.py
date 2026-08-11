@@ -22,13 +22,18 @@ class _FakeRstrtmgr:
     """模擬 Rstrtmgr.dll 四個函式的行為，讓 find_locking_processes() 的流程
     邏輯可以在沒有真實鎖定檔案的情況下被驗證。"""
 
-    def __init__(self, processes=None, start_result=0, register_result=0, get_list_result=0):
+    def __init__(self, processes=None, start_result=0, register_result=0, get_list_result=0,
+                 shutdown_result=0, restart_result=0):
         self._processes = processes or []
         self._start_result = start_result
         self._register_result = register_result
         self._get_list_result = get_list_result
+        self._shutdown_result = shutdown_result
+        self._restart_result = restart_result
         self.registered_filenames = None
         self.ended = False
+        self.shutdown_calls = []
+        self.restart_calls = 0
 
     def RmStartSession(self, session_handle_ref, flags, session_key):
         if self._start_result == 0:
@@ -54,6 +59,14 @@ class _FakeRstrtmgr:
     def RmEndSession(self, session_handle):
         self.ended = True
         return 0
+
+    def RmShutdown(self, session_handle, flags, fn_status):
+        self.shutdown_calls.append(flags)
+        return self._shutdown_result
+
+    def RmRestart(self, session_handle, flags, fn_status):
+        self.restart_calls += 1
+        return self._restart_result
 
 
 class TestFindLockingProcesses(unittest.TestCase):
@@ -107,6 +120,102 @@ class TestFindLockingProcesses(unittest.TestCase):
 
         result = rm.find_locking_processes([r"C:\app\locked.dll"], rm_dll=_BrokenDll())
         self.assertEqual(result, [])
+
+
+class TestRestartManagerSession(unittest.TestCase):
+    """RestartManagerSession：跨步驟持有 session（跟 find_locking_processes()
+    「開 session 用完即關」的單函式生命週期不同），讓呼叫端可以先查鎖定
+    清單、再對支援 Restart Manager 的應用程式呼叫 shutdown() 請它優雅
+    關閉，檔案操作完成後 restart() 把它啟動回來，最後 close()。"""
+
+    def test_open_session_registers_resources_and_is_open(self):
+        fake = _FakeRstrtmgr(processes=[(111, "App")])
+        session = rm.RestartManagerSession([r"C:\app\locked.dll"], rm_dll=fake)
+        self.assertTrue(session.is_open)
+        self.assertEqual(fake.registered_filenames, [r"C:\app\locked.dll"])
+        session.close()
+
+    def test_start_session_failure_leaves_session_closed(self):
+        fake = _FakeRstrtmgr(start_result=5)
+        session = rm.RestartManagerSession([r"C:\app\locked.dll"], rm_dll=fake)
+        self.assertFalse(session.is_open)
+
+    def test_list_locking_processes_reuses_open_session(self):
+        fake = _FakeRstrtmgr(processes=[(111, "Windows 檔案總管")])
+        session = rm.RestartManagerSession([r"C:\app\locked.dll"], rm_dll=fake)
+        result = session.list_locking_processes()
+        self.assertEqual(result, [(111, "Windows 檔案總管")])
+        session.close()
+
+    def test_list_locking_processes_on_closed_session_returns_empty(self):
+        fake = _FakeRstrtmgr(start_result=5)
+        session = rm.RestartManagerSession([r"C:\app\locked.dll"], rm_dll=fake)
+        self.assertEqual(session.list_locking_processes(), [])
+
+    def test_shutdown_calls_rm_shutdown_and_reports_success(self):
+        fake = _FakeRstrtmgr()
+        session = rm.RestartManagerSession([r"C:\app\locked.dll"], rm_dll=fake)
+        self.assertTrue(session.shutdown())
+        self.assertEqual(fake.shutdown_calls, [0])
+        session.close()
+
+    def test_shutdown_force_passes_force_shutdown_flag(self):
+        fake = _FakeRstrtmgr()
+        session = rm.RestartManagerSession([r"C:\app\locked.dll"], rm_dll=fake)
+        session.shutdown(force=True)
+        self.assertEqual(fake.shutdown_calls, [rm._RM_FORCE_SHUTDOWN])
+        session.close()
+
+    def test_shutdown_failure_reports_false(self):
+        fake = _FakeRstrtmgr(shutdown_result=5)
+        session = rm.RestartManagerSession([r"C:\app\locked.dll"], rm_dll=fake)
+        self.assertFalse(session.shutdown())
+
+    def test_shutdown_on_closed_session_returns_false_without_calling_dll(self):
+        fake = _FakeRstrtmgr(start_result=5)
+        session = rm.RestartManagerSession([r"C:\app\locked.dll"], rm_dll=fake)
+        self.assertFalse(session.shutdown())
+        self.assertEqual(fake.shutdown_calls, [])
+
+    def test_restart_calls_rm_restart_and_reports_success(self):
+        fake = _FakeRstrtmgr()
+        session = rm.RestartManagerSession([r"C:\app\locked.dll"], rm_dll=fake)
+        self.assertTrue(session.restart())
+        self.assertEqual(fake.restart_calls, 1)
+        session.close()
+
+    def test_restart_failure_reports_false(self):
+        fake = _FakeRstrtmgr(restart_result=5)
+        session = rm.RestartManagerSession([r"C:\app\locked.dll"], rm_dll=fake)
+        self.assertFalse(session.restart())
+
+    def test_close_ends_session_and_is_idempotent(self):
+        fake = _FakeRstrtmgr()
+        session = rm.RestartManagerSession([r"C:\app\locked.dll"], rm_dll=fake)
+        session.close()
+        self.assertTrue(fake.ended)
+        self.assertFalse(session.is_open)
+        fake.ended = False
+        session.close()  # 再呼叫一次不該再去呼叫 RmEndSession
+        self.assertFalse(fake.ended)
+
+    def test_context_manager_closes_session_on_exit(self):
+        fake = _FakeRstrtmgr()
+        with rm.RestartManagerSession([r"C:\app\locked.dll"], rm_dll=fake) as session:
+            self.assertTrue(session.is_open)
+        self.assertTrue(fake.ended)
+
+    def test_context_manager_closes_session_even_when_body_raises(self):
+        fake = _FakeRstrtmgr()
+        with self.assertRaises(RuntimeError):
+            with rm.RestartManagerSession([r"C:\app\locked.dll"], rm_dll=fake):
+                raise RuntimeError("模擬呼叫端例外")
+        self.assertTrue(fake.ended)
+
+    def test_dll_load_failure_leaves_session_closed_without_raising(self):
+        with mock.patch("restart_manager._load_rstrtmgr", side_effect=OSError("找不到 DLL")):
+            session = rm.RestartManagerSession([r"C:\app\locked.dll"])
+        self.assertFalse(session.is_open)
 
 
 if __name__ == "__main__":
