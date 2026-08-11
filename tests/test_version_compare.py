@@ -26,6 +26,17 @@ class TestParseVersion(unittest.TestCase):
     def test_empty_segment_defaults_to_zero(self):
         self.assertEqual(ic._parse_version("1..2"), (1, 0, 2))
 
+    def test_rc_suffix_digit_is_not_absorbed_into_the_preceding_segment(self):
+        """真實抓到的 bug：原本的實作把整段裡「所有」數字字元濾出來串接，
+        "1.0.0-rc2" 最後一段是 "0-rc2"，濾出的數字是 '0' 跟 '2'，串起來變成
+        02 -> 2，導致解析成 (1, 0, 2)——跟 "1.0.2" 完全一樣，"-rc2" 這個
+        後綴反而讓版本號變大。應該只取每一段「開頭連續的數字」，遇到第一個
+        非數字字元就停止，後面的後綴整段忽略。"""
+        self.assertEqual(ic._parse_version("1.0.0-rc2"), (1, 0, 0))
+
+    def test_non_numeric_prefix_letter_also_stops_digit_run(self):
+        self.assertEqual(ic._parse_version("1.0b3"), (1, 0))
+
 
 class TestCompareVersions(unittest.TestCase):
     def test_numeric_comparison_not_lexicographic(self):
@@ -42,6 +53,16 @@ class TestCompareVersions(unittest.TestCase):
 
     def test_older_version(self):
         self.assertEqual(ic._compare_versions("1.0.0", "2.0.0"), -1)
+
+    def test_prerelease_version_is_older_than_the_release_it_precedes(self):
+        """真實抓到的 bug：數字部分解析錯誤（見上面 TestParseVersion）導致
+        "1.0.0-rc2" 被判斷成比 "1.0.0" 新，方向完全反了——使用者從 1.0.0
+        「降級」回一個候選版時，會被系統告知這是「升級」。數字部分相等時，
+        帶有版次後綴（"-"）的版本應該被視為比沒有後綴的正式版舊。"""
+        self.assertEqual(ic._compare_versions("1.0.0-rc2", "1.0.0"), -1)
+
+    def test_release_is_newer_than_its_own_prerelease(self):
+        self.assertEqual(ic._compare_versions("1.0.0", "1.0.0-rc2"), 1)
 
 
 if __name__ == "__main__":

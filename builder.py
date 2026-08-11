@@ -321,91 +321,97 @@ def build_all(
     ]
     if not no_admin_install:
         cmd.append("--uac-admin")
-    if doc_icon_path:
-        # --add-data 不會重新命名檔案，會保留使用者選的原始檔名，
-        # 所以跟現有的 PNG 圖示（temp_icon）一樣，先複製一份固定檔名
-        # doc_icon.ico 到工作目錄，installer_config.json 的 "doc_icon" 欄位
-        # 才能一律查這個固定名字，不用管使用者原本選的檔案叫什麼。
-        temp_doc_icon = os.path.join(workspace_dir, "doc_icon.ico")
-        shutil.copy(doc_icon_path, temp_doc_icon)
-        cmd.append(f"--add-data={temp_doc_icon};.")
+    # 真實抓到的問題（F19）：這裡建立的暫存產物（doc_icon.ico、內嵌的
+    # 前後置腳本、下載下來要內嵌的相依元件安裝檔）原本只有順利跑到最後
+    # 的「清理暫存中間檔案」那段才會被刪除——中途任何一步拋例外（doc
+    # icon 檔案不存在、相依元件下載失敗）都會讓已經建立的暫存檔留在
+    # workspace_dir 裡。改成用 try/finally：不管這個區塊是正常結束還是
+    # 中途拋例外，已經記錄在下面幾個清單裡的暫存檔都會被清掉。
+    temp_doc_icon = os.path.join(workspace_dir, "doc_icon.ico") if doc_icon_path else None
     temp_doc_icons = []
-    for ext, src_path in doc_icons.items():
-        # 同上，每個副檔名各自複製一份固定命名的圖示，避免不同副檔名剛好
-        # 選了同名但內容不同的原始檔案時互相覆蓋。
-        temp_path = os.path.join(workspace_dir, doc_icons_embedded[ext])
-        shutil.copy(src_path, temp_path)
-        temp_doc_icons.append(temp_path)
-        cmd.append(f"--add-data={temp_path};.")
-
     temp_scripts = []
-    for script_src, embedded_name in (
-        (pre_install_script, pre_install_embedded),
-        (post_install_script, post_install_embedded),
-    ):
-        if not script_src:
-            continue
-        temp_path = os.path.join(workspace_dir, embedded_name)
-        shutil.copy(os.path.join(app_dir, script_src), temp_path)
-        temp_scripts.append(temp_path)
-        cmd.append(f"--add-data={temp_path};.")
-
-    # bundle_dependencies：打包當下把指定的相依元件安裝檔下載下來，內嵌進
-    # Setup.exe 的 dependencies/ 子目錄（掛載路徑要跟 installer_core.py 的
-    # install_dependency() 查找路徑 dependencies/<key>.exe 一致）。下載失敗
-    # 直接中止整個 pack 流程並回報，不要悄悄產出一份「號稱有內嵌、其實沒裝
-    # 進去」的安裝檔。
-    dependency_url_map = {
-        key: meta["download_url"] for key, meta in dependency_defs.BUILT_IN_DEPENDENCIES.items()
-    }
-    for entry in custom_dependencies:
-        dependency_url_map[entry["key"]] = entry["download_url"]
-
     temp_dependency_files = []
-    for key in bundle_dependencies:
-        url = dependency_url_map.get(key)
-        if not url:
-            raise Exception(f"無法內嵌相依元件「{key}」：找不到對應的下載連結。")
-        report(38, f"正在下載相依元件 {key} 供內嵌打包...", cap=39, time_constant=5)
-        # 檔名必須剛好是「{key}.exe」：--add-data 不會重新命名檔案，只會把
-        # 來源檔案原封不動放進目的地資料夾，installer_core.py 的
-        # install_dependency() 查找的固定路徑是 dependencies/<key>.exe。
-        temp_path = os.path.join(workspace_dir, f"{key}.exe")
-        try:
-            _download_file(url, temp_path)
-        except Exception as e:
-            raise Exception(f"下載相依元件「{key}」失敗，無法內嵌：{e}")
-        temp_dependency_files.append(temp_path)
-        cmd.append(f"--add-data={temp_path};dependencies")
+    try:
+        if doc_icon_path:
+            # --add-data 不會重新命名檔案，會保留使用者選的原始檔名，
+            # 所以跟現有的 PNG 圖示（temp_icon）一樣，先複製一份固定檔名
+            # doc_icon.ico 到工作目錄，installer_config.json 的 "doc_icon"
+            # 欄位才能一律查這個固定名字，不用管使用者原本選的檔案叫什麼。
+            shutil.copy(doc_icon_path, temp_doc_icon)
+            cmd.append(f"--add-data={temp_doc_icon};.")
+        for ext, src_path in doc_icons.items():
+            # 同上，每個副檔名各自複製一份固定命名的圖示，避免不同副檔名
+            # 剛好選了同名但內容不同的原始檔案時互相覆蓋。
+            temp_path = os.path.join(workspace_dir, doc_icons_embedded[ext])
+            shutil.copy(src_path, temp_path)
+            temp_doc_icons.append(temp_path)
+            cmd.append(f"--add-data={temp_path};.")
 
-    cmd.append("installer_core.py")
+        for script_src, embedded_name in (
+            (pre_install_script, pre_install_embedded),
+            (post_install_script, post_install_embedded),
+        ):
+            if not script_src:
+                continue
+            temp_path = os.path.join(workspace_dir, embedded_name)
+            shutil.copy(os.path.join(app_dir, script_src), temp_path)
+            temp_scripts.append(temp_path)
+            cmd.append(f"--add-data={temp_path};.")
 
-    res_installer = subprocess.run(
-        cmd, cwd=workspace_dir, creationflags=creationflags,
-        capture_output=True, text=True,
-    )
+        # bundle_dependencies：打包當下把指定的相依元件安裝檔下載下來，
+        # 內嵌進 Setup.exe 的 dependencies/ 子目錄（掛載路徑要跟
+        # installer_core.py 的 install_dependency() 查找路徑
+        # dependencies/<key>.exe 一致）。下載失敗直接中止整個 pack 流程
+        # 並回報，不要悄悄產出一份「號稱有內嵌、其實沒裝進去」的安裝檔。
+        dependency_url_map = {
+            key: meta["download_url"] for key, meta in dependency_defs.BUILT_IN_DEPENDENCIES.items()
+        }
+        for entry in custom_dependencies:
+            dependency_url_map[entry["key"]] = entry["download_url"]
 
-    # 步驟 4：清理暫存中間檔案
-    report(97, "正在執行臨時快取與殘留檔案清理...", cap=99, time_constant=3)
-    if os.path.exists(config_path):
-        os.remove(config_path)
-    if os.path.exists(temp_icon):
-        os.remove(temp_icon)
-    temp_doc_icon = os.path.join(workspace_dir, "doc_icon.ico")
-    if os.path.exists(temp_doc_icon):
-        os.remove(temp_doc_icon)
-    for temp_path in temp_doc_icons:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-    for temp_path in temp_scripts:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-    for temp_path in temp_dependency_files:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-    for temp_path in (uninstall_version_file, main_version_file):
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        for key in bundle_dependencies:
+            url = dependency_url_map.get(key)
+            if not url:
+                raise Exception(f"無法內嵌相依元件「{key}」：找不到對應的下載連結。")
+            report(38, f"正在下載相依元件 {key} 供內嵌打包...", cap=39, time_constant=5)
+            # 檔名必須剛好是「{key}.exe」：--add-data 不會重新命名檔案，
+            # 只會把來源檔案原封不動放進目的地資料夾，installer_core.py 的
+            # install_dependency() 查找的固定路徑是 dependencies/<key>.exe。
+            temp_path = os.path.join(workspace_dir, f"{key}.exe")
+            try:
+                _download_file(url, temp_path)
+            except Exception as e:
+                raise Exception(f"下載相依元件「{key}」失敗，無法內嵌：{e}")
+            temp_dependency_files.append(temp_path)
+            cmd.append(f"--add-data={temp_path};dependencies")
+
+        cmd.append("installer_core.py")
+
+        res_installer = subprocess.run(
+            cmd, cwd=workspace_dir, creationflags=creationflags,
+            capture_output=True, text=True,
+        )
+    finally:
+        # 步驟 4：清理暫存中間檔案（不管上面是正常結束還是中途拋例外）
+        report(97, "正在執行臨時快取與殘留檔案清理...", cap=99, time_constant=3)
+        if os.path.exists(config_path):
+            os.remove(config_path)
+        if os.path.exists(temp_icon):
+            os.remove(temp_icon)
+        if temp_doc_icon and os.path.exists(temp_doc_icon):
+            os.remove(temp_doc_icon)
+        for temp_path in temp_doc_icons:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        for temp_path in temp_scripts:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        for temp_path in temp_dependency_files:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        for temp_path in (uninstall_version_file, main_version_file):
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
 
     if res_installer.returncode != 0:
         tail = ((res_installer.stdout or "") + "\n" + (res_installer.stderr or ""))[-1500:]

@@ -43,6 +43,18 @@ class TestRemoveRegistryEntry(unittest.TestCase):
     def test_returns_false_when_missing(self):
         self.assertFalse(se.remove_registry_entry("NoSuchApp", registry=self.fake_reg))
 
+    def test_falls_back_to_other_hive_when_entry_is_there_instead(self):
+        """真實抓到的 bug：no_admin_install 從 manifest 讀出來的值可能跟
+        舊版本實際安裝時用的模式對不上（例如手動編輯過 manifest、或
+        manifest 遺失這個欄位時 uninstall.py 預設回退成 False）——這裡
+        如果只查衍生出來的單一 hive，真正的登錄表項目在另一個 hive 時
+        完全找不到，留下永久殘留在「已安裝的應用程式」清單裡。跟
+        check_existing_install() 的雙 hive 探測是同一個道理，這裡也該
+        兩邊都試。"""
+        self.fake_reg.set_hkcu(self._reg_path(), {})
+        self.assertTrue(se.remove_registry_entry("MyApp", no_admin_install=False, registry=self.fake_reg))
+        self.assertIsNone(self.fake_reg.hkcu(self._reg_path()))
+
 
 class TestRemoveShortcut(unittest.TestCase):
     def test_removes_user_desktop_shortcut_when_no_admin(self):

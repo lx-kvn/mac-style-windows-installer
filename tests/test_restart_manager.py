@@ -218,5 +218,27 @@ class TestRestartManagerSession(unittest.TestCase):
         self.assertFalse(session.is_open)
 
 
+class TestLoadRstrtmgrDeclaresTypes(unittest.TestCase):
+    """真實抓到的缺口：這是這個專案裡少數幾支直接呼叫 Windows API 的
+    ctypes 模組中，唯一沒有明確宣告 restype/argtypes 的一支——CONTEXT.md
+    記錄過同一類問題真實發生過一次（explorer_lock_release.py 的 64-bit
+    handle 截斷 bug），restore_point.py 的文件字串也特別提到「沿用這個
+    既有慣例」，這支卻沒有套用。沒有明確宣告 argtypes 時，ctypes 會用
+    Python 物件的預設轉換規則猜測每個參數的型別，在 64-bit Windows 上
+    傳遞指標（例如 RmStartSession 的 phSession 輸出參數）可能被錯誤
+    解讀，導致呼叫看似成功、資料卻是壞的，且不會拋出任何 Python 例外。
+    """
+
+    def test_all_used_functions_have_argtypes_declared(self):
+        try:
+            dll = rm._load_rstrtmgr()
+        except OSError:
+            self.skipTest("這台機器載入不了 rstrtmgr.dll（非 Windows 環境）")
+        for name in ("RmStartSession", "RmRegisterResources", "RmGetList",
+                     "RmEndSession", "RmShutdown", "RmRestart"):
+            func = getattr(dll, name)
+            self.assertIsNotNone(func.argtypes, f"{name} 沒有明確宣告 argtypes")
+
+
 if __name__ == "__main__":
     unittest.main()

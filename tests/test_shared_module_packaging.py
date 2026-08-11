@@ -22,6 +22,7 @@ build_config_tool.py 目前登記的清單有沒有漏掉——這樣以後不�
 import ast
 import os
 import sys
+import tempfile
 import unittest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -31,11 +32,11 @@ import packaging_core
 import build_config_tool
 
 
-def _local_module_imports(py_file_path):
-    """解析 py_file_path 檔案最上層的 import 陳述式，回傳其中『對應到專案
-    根目錄某個 .py 檔案』的模組名稱（不含 .py），排除標準庫/第三方套件
-    （webview/ctypes/subprocess 之類的，repo 根目錄下沒有同名 .py 檔案）。
-    """
+def _local_module_imports(py_file_path, search_root=REPO_ROOT):
+    """解析 py_file_path 檔案最上層的 import 陳述式，回傳其中『對應到
+    search_root 底下某個 .py 檔案』的模組名稱（不含 .py），排除標準庫/
+    第三方套件（webview/ctypes/subprocess 之類的，search_root 底下沒有
+    同名 .py 檔案）。"""
     with open(py_file_path, "r", encoding="utf-8") as f:
         tree = ast.parse(f.read(), filename=py_file_path)
 
@@ -48,7 +49,54 @@ def _local_module_imports(py_file_path):
             if node.module and node.level == 0:
                 names.add(node.module.split(".")[0])
 
-    return {name for name in names if os.path.exists(os.path.join(REPO_ROOT, f"{name}.py"))}
+    return {name for name in names if os.path.exists(os.path.join(search_root, f"{name}.py"))}
+
+
+def _transitive_local_module_imports(py_file_path, search_root=REPO_ROOT, _visited=None):
+    """跟 _local_module_imports 一樣，但遞迴追蹤『被匯入的模組自己又匯入了
+    哪些本地模組』，不只看 entry point 檔案最上層那一層。
+
+    真實會漏掉的情境：installer_core.py 沒有直接 import 某個深模組 D，
+    是透過它已經 import 的 file_assoc.py 間接 import D——只檢查 entry
+    point 最上層 import 的舊寫法完全看不到 D，D 沒被登記進
+    SHARED_DEEP_MODULES／_SHARED_ADD_DATA 也不會讓測試紅燈，直到真的打包
+    成 frozen exe 執行到那一行才會 ModuleNotFoundError。
+    """
+    if _visited is None:
+        _visited = set()
+    direct = _local_module_imports(py_file_path, search_root=search_root)
+    result = set(direct)
+    for name in direct:
+        if name in _visited:
+            continue
+        _visited.add(name)
+        sub_path = os.path.join(search_root, f"{name}.py")
+        result |= _transitive_local_module_imports(sub_path, search_root=search_root, _visited=_visited)
+    return result
+
+
+class TestTransitiveLocalModuleImports(unittest.TestCase):
+    """F16：舊版 _local_module_imports 只看 entry point 檔案最上層的 import，
+    看不到『entry point import 的模組，自己又 import 了哪些本地模組』這一層
+    ——例如 entry.py import a，a.py 又 import b，舊版只會回報 {"a"}，
+    b 就這樣從清單裡漏掉，跟真實踩到的 system_entries.py 缺漏是同一種
+    問題（見檔案開頭的說明）。這裡用一組刻意有兩層轉手 import 的暫存檔案
+    驗證 _transitive_local_module_imports 真的會往下追。"""
+
+    def test_follows_imports_through_an_intermediate_module(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with open(os.path.join(tmp_dir, "entry.py"), "w", encoding="utf-8") as f:
+                f.write("import a\n")
+            with open(os.path.join(tmp_dir, "a.py"), "w", encoding="utf-8") as f:
+                f.write("from b import helper\n")
+            with open(os.path.join(tmp_dir, "b.py"), "w", encoding="utf-8") as f:
+                f.write("import os\n")
+
+            direct_only = _local_module_imports(os.path.join(tmp_dir, "entry.py"), search_root=tmp_dir)
+            self.assertEqual(direct_only, {"a"})
+
+            transitive = _transitive_local_module_imports(os.path.join(tmp_dir, "entry.py"), search_root=tmp_dir)
+            self.assertEqual(transitive, {"a", "b"})
 
 
 class TestPackagingCoreCoversEveryLocalImport(unittest.TestCase):
@@ -58,7 +106,7 @@ class TestPackagingCoreCoversEveryLocalImport(unittest.TestCase):
     會找不到模組。"""
 
     def test_installer_core_local_imports_are_all_packaged(self):
-        needed = _local_module_imports(os.path.join(REPO_ROOT, "installer_core.py"))
+        needed = _transitive_local_module_imports(os.path.join(REPO_ROOT, "installer_core.py"))
         packaged = {name[:-3] for name in packaging_core.SHARED_DEEP_MODULES}
         missing = needed - packaged
         self.assertEqual(
@@ -67,7 +115,7 @@ class TestPackagingCoreCoversEveryLocalImport(unittest.TestCase):
         )
 
     def test_uninstall_local_imports_are_all_packaged(self):
-        needed = _local_module_imports(os.path.join(REPO_ROOT, "uninstall.py"))
+        needed = _transitive_local_module_imports(os.path.join(REPO_ROOT, "uninstall.py"))
         packaged = {name[:-3] for name in packaging_core.SHARED_DEEP_MODULES}
         missing = needed - packaged
         self.assertEqual(
@@ -83,19 +131,19 @@ class TestBuildConfigToolCoversEveryLocalImport(unittest.TestCase):
     模組解壓回工作目錄，前提是這些模組本身有先被內嵌進 exe 裡。"""
 
     def test_shared_add_data_covers_installer_core_imports(self):
-        needed = _local_module_imports(os.path.join(REPO_ROOT, "installer_core.py"))
+        needed = _transitive_local_module_imports(os.path.join(REPO_ROOT, "installer_core.py"))
         packaged = {name[:-3] for name in build_config_tool._SHARED_ADD_DATA}
         missing = needed - packaged
         self.assertEqual(missing, set(), f"缺少於 build_config_tool._SHARED_ADD_DATA：{missing}")
 
     def test_shared_add_data_covers_uninstall_imports(self):
-        needed = _local_module_imports(os.path.join(REPO_ROOT, "uninstall.py"))
+        needed = _transitive_local_module_imports(os.path.join(REPO_ROOT, "uninstall.py"))
         packaged = {name[:-3] for name in build_config_tool._SHARED_ADD_DATA}
         missing = needed - packaged
         self.assertEqual(missing, set(), f"缺少於 build_config_tool._SHARED_ADD_DATA：{missing}")
 
     def test_required_files_covers_installer_core_imports(self):
-        needed = _local_module_imports(os.path.join(REPO_ROOT, "installer_core.py"))
+        needed = _transitive_local_module_imports(os.path.join(REPO_ROOT, "installer_core.py"))
         packaged = {os.path.basename(label)[:-3] for label, _ in build_config_tool._REQUIRED_FILES if label.endswith(".py")}
         missing = needed - packaged
         self.assertEqual(missing, set(), f"缺少於 build_config_tool._REQUIRED_FILES：{missing}")

@@ -392,6 +392,35 @@ class TestConfigAssembly(BuildAllTestBase):
         self.assertEqual(captured["doc_icons"], {})
 
 
+class TestTempArtifactCleanupOnFailure(BuildAllTestBase):
+    """真實抓到的問題（F19）：暫存產物（doc_icon.ico、內嵌的前後置腳本、
+    下載下來要內嵌的相依元件安裝檔）原本只有在函式順利跑到最後一段
+    「清理暫存中間檔案」才會被刪除——任何一步中途拋例外（版本字串寫錯、
+    doc icon 檔案不存在、相依元件下載失敗）都會讓這些暫存檔留在
+    workspace_dir 裡，下一輪打包前才會被清掉（如果還記得要清的話）。
+    這裡驗證：bundle_dependencies 下載失敗時，前面已經複製好的 doc_icon
+    暫存檔還是會被清乾淨，不因為後面的步驟失敗就留下殘骸。"""
+
+    def test_doc_icon_temp_file_cleaned_up_when_bundle_download_fails_later(self):
+        doc_icon_src = os.path.join(self.app_dir, "doc.ico")
+        with open(doc_icon_src, "wb") as f:
+            f.write(b"ICO")
+        expected_temp_doc_icon = os.path.join(self.workspace_dir, "doc_icon.ico")
+
+        with mock.patch("builder._download_file", side_effect=OSError("模擬下載失敗")), \
+             self.assertRaises(Exception):
+            self._call_build_all(
+                doc_icon_path=doc_icon_src,
+                dependencies=["vcredist_x64"],
+                bundle_dependencies=["vcredist_x64"],
+            )
+
+        self.assertFalse(
+            os.path.exists(expected_temp_doc_icon),
+            "doc_icon.ico 暫存檔應該在例外拋出後也被清掉，不能留到下一輪打包才清",
+        )
+
+
 class TestErrorPaths(BuildAllTestBase):
     def test_missing_ui_dir_raises(self):
         shutil.rmtree(os.path.join(self.workspace_dir, "ui"))

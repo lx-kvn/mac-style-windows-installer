@@ -50,8 +50,24 @@ def render_version_file(*, product_name, file_version, file_description,
     file_ver_tuple = _parse_version_tuple(file_version)
     prod_ver_tuple = _parse_version_tuple(product_version if product_version is not None else file_version)
     original_filename = original_filename or ""
+    effective_product_version = product_version if product_version is not None else file_version
     lang_codepage_hex = f"{language:04X}{codepage:04X}"
     translation_pair = f"[{language}, {codepage}]"
+
+    # 真實抓到的 bug：這幾個欄位（發行者/應用程式名稱等自由文字）原本用
+    # f-string 手動包一層單引號直接塞進去，值裡只要有一個單引號（例如
+    # "O'Brien Software"）或反斜線，就會讓產生出來的內容不是合法 Python
+    # 語法，PyInstaller 讀取 --version-file 時會編譯失敗——而且是在
+    # build_all() 已經清空 dist/ 之後才爆炸。改成用 repr()，讓 Python
+    # 自己決定怎麼逸出（含選字元/跳脫反斜線），保證產生的內容永遠是
+    # 合法的字串字面值，不管欄位值裡有什麼字元。
+    company_name_lit = repr(company_name)
+    file_description_lit = repr(file_description)
+    file_version_lit = repr(file_version)
+    original_filename_lit = repr(original_filename)
+    legal_copyright_lit = repr(legal_copyright)
+    product_name_lit = repr(product_name)
+    product_version_lit = repr(effective_product_version)
 
     return f"""# UTF-8
 #
@@ -73,14 +89,14 @@ VSVersionInfo(
       [
       StringTable(
         '{lang_codepage_hex}',
-        [StringStruct('CompanyName', '{company_name}'),
-        StringStruct('FileDescription', '{file_description}'),
-        StringStruct('FileVersion', '{file_version}'),
-        StringStruct('InternalName', '{original_filename}'),
-        StringStruct('LegalCopyright', '{legal_copyright}'),
-        StringStruct('OriginalFilename', '{original_filename}'),
-        StringStruct('ProductName', '{product_name}'),
-        StringStruct('ProductVersion', '{product_version if product_version is not None else file_version}')])
+        [StringStruct('CompanyName', {company_name_lit}),
+        StringStruct('FileDescription', {file_description_lit}),
+        StringStruct('FileVersion', {file_version_lit}),
+        StringStruct('InternalName', {original_filename_lit}),
+        StringStruct('LegalCopyright', {legal_copyright_lit}),
+        StringStruct('OriginalFilename', {original_filename_lit}),
+        StringStruct('ProductName', {product_name_lit}),
+        StringStruct('ProductVersion', {product_version_lit})])
       ]),
     VarFileInfo([VarStruct('Translation', {translation_pair})])
   ]

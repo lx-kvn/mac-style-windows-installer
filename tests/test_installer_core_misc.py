@@ -167,6 +167,20 @@ class TestCheckExistingInstall(unittest.TestCase):
         self.assertTrue(result["exists"])
         self.assertEqual(result["hive"], "HKLM")
 
+    def test_missing_display_version_is_not_treated_as_not_installed(self):
+        """真實抓到的問題（B13）：登錄表項目缺 DisplayVersion 這個值
+        （手動建立的項目、舊版打包工具留下的、或損毀的登錄表）時，
+        QueryValueEx() 拋出的 FileNotFoundError 原本被最外層那個 bare
+        except 一律當成「這個 hive 沒有這個項目」處理，換下一個 hive
+        試，兩邊都試完就回報「沒裝過」——明明 InstallLocation 都還在，
+        只是版本號讀不到，卻整個升級偵測被跳過，新舊兩份安裝並存。"""
+        reg_path = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\MyApp"
+        self.fake_reg.set_hklm(reg_path, {"InstallLocation": "C:\\Apps\\Old"})  # 沒有 DisplayVersion
+        api = make_installer_api(app_name="MyApp", version="2.0.0")
+        result = api.check_existing_install()
+        self.assertTrue(result["exists"])
+        self.assertEqual(result["install_path"], "C:\\Apps\\Old")
+
     def test_finds_existing_install_in_hkcu_even_when_current_settings_use_hklm(self):
         reg_path = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\MyApp"
         self.fake_reg.set_hkcu(reg_path, {"InstallLocation": "C:\\Users\\Tester\\AppData\\Local\\Programs\\MyApp", "DisplayVersion": "1.0.0"})
@@ -241,6 +255,23 @@ class TestAddToPathEnv(unittest.TestCase):
         with mock.patch("installer_core.ctypes.windll.user32.SendMessageTimeoutW"):
             added_dir = api._add_to_path_env()
         self.assertEqual(added_dir, "C:\\Apps\\MyApp")
+
+    def test_still_returns_target_dir_when_broadcast_notification_fails(self):
+        """真實抓到的問題（B11）：SetValueEx 那一步已經真的把值寫進登錄表
+        了，下面「通知其他視窗環境變數變了」的廣播呼叫只是錦上添花，不是
+        PATH 有沒有寫入的一部分。原本這個廣播呼叫失敗會讓整個函式往外拋
+        例外，導致呼叫端 path_directory 停在空字串——_rollback() 因此會
+        誤判成「PATH 根本沒寫入」而略過移除，即使登錄表其實已經被改了，
+        回滾後 PATH 殘留一個裝到一半的安裝路徑。"""
+        self.fake_reg.set_hklm(self._path_key(), {})
+        api = make_installer_api(selected_path="C:\\Apps\\MyApp")
+        with mock.patch(
+            "installer_core.ctypes.windll.user32.SendMessageTimeoutW",
+            side_effect=OSError("模擬廣播通知失敗"),
+        ):
+            added_dir = api._add_to_path_env()
+        self.assertEqual(added_dir, "C:\\Apps\\MyApp")
+        self.assertEqual(self.fake_reg.hklm(self._path_key())["Path"], "C:\\Apps\\MyApp")
 
 
 class TestLocalAppdataFiles(unittest.TestCase):
@@ -465,6 +496,7 @@ class TestRunUpgradeUninstall(unittest.TestCase):
 
         def fake_subprocess_run(*args, **kwargs):
             call_order.append("uninstall_exe")
+            return mock.Mock(returncode=0)
 
         with mock.patch.object(self.api, "_backup_existing_install", side_effect=fake_backup), \
              mock.patch("installer_core.subprocess.run", side_effect=fake_subprocess_run):
@@ -495,6 +527,7 @@ class TestRunUpgradeUninstall(unittest.TestCase):
 
         def fake_subprocess_run(cmd, **kwargs):
             captured_cmd["cmd"] = cmd
+            return mock.Mock(returncode=0)
 
         with mock.patch("installer_core.subprocess.run", side_effect=fake_subprocess_run):
             self.api.run_upgrade_uninstall()
@@ -507,11 +540,28 @@ class TestRunUpgradeUninstall(unittest.TestCase):
 
         def fake_subprocess_run(cmd, **kwargs):
             captured_cmd["cmd"] = cmd
+            return mock.Mock(returncode=0)
 
         with mock.patch("installer_core.subprocess.run", side_effect=fake_subprocess_run):
             self.api.run_upgrade_uninstall()
 
         self.assertNotIn("--restart-explorer", captured_cmd["cmd"])
+
+    def test_nonzero_exit_code_from_old_uninstall_exe_is_reported_as_failure(self):
+        """真實抓到的問題（B6）：舊版 uninstall.exe 的結束碼原本完全被
+        忽略——subprocess.run() 的回傳值連變數都沒接。uninstall.py 自己
+        的慣例是 0=成功、非 0=失敗（見 run_silent_uninstall()），舊版
+        uninstall.exe 如果因為檔案被鎖住、manifest 損毀等原因回報失敗，
+        這裡完全偵測不到，新版安裝流程會誤以為舊版本已經清乾淨，繼續
+        往下覆蓋安裝，實際上舊版本殘留的檔案可能還在。"""
+        with open(os.path.join(self.old_install_dir, "extra.txt"), "w") as f:
+            f.write("舊資料")
+
+        with mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=1)):
+            result = self.api.run_upgrade_uninstall()
+
+        self.assertEqual(result["status"], "error")
+        self.assertTrue(os.path.exists(os.path.join(self.old_install_dir, "extra.txt")), "失敗時備份應該被復原回原位")
 
     def test_always_passes_upgrade_flag_to_old_uninstall_exe(self):
         """真實抓到的 bug：舊版 uninstall.exe 尾端的自我刪除是背景、不等待的
@@ -524,6 +574,7 @@ class TestRunUpgradeUninstall(unittest.TestCase):
 
         def fake_subprocess_run(cmd, **kwargs):
             captured_cmd["cmd"] = cmd
+            return mock.Mock(returncode=0)
 
         with mock.patch("installer_core.subprocess.run", side_effect=fake_subprocess_run):
             self.api.run_upgrade_uninstall()
@@ -597,6 +648,40 @@ class TestRunUpgradeUninstallElevation(unittest.TestCase):
         mock_run.assert_called_once()
         mock_elevated.assert_not_called()
 
+    def test_refuses_to_run_uninstall_exe_from_hkcu_when_current_process_is_elevated(self):
+        """真實抓到的安全性問題：HKCU 是一般使用者身分就寫得進去的登錄表
+        位置。如果目前這個安裝程式行程已經持有系統管理員權杖，執行從 HKCU
+        找到的 uninstall.exe——不管是透過 subprocess.run 還是
+        ShellExecute，子行程都會繼承呼叫端目前的權杖——等於讓任何能以
+        同一個使用者身分寫入 HKCU 的人，都能讓這支已提權的安裝程式代為
+        執行任意程式碼，還帶著系統管理員權限。這個組合（hive=HKCU 且目前
+        行程已經是提權狀態）必須直接拒絕自動執行，改成請使用者自行移除
+        舊版本，不能像其他情境一樣靜默呼叫。"""
+        self._seed_hkcu()
+        with mock.patch.object(self.api, "_is_current_process_elevated", return_value=True), \
+             mock.patch.object(self.api, "_run_uninstall_exe_elevated") as mock_elevated, \
+             mock.patch("installer_core.subprocess.run") as mock_run:
+            result = self.api.run_upgrade_uninstall()
+
+        self.assertEqual(result["status"], "error")
+        mock_run.assert_not_called()
+        mock_elevated.assert_not_called()
+
+    def test_still_runs_uninstall_exe_from_hkcu_when_current_process_not_elevated(self):
+        """對照組：hive=HKCU 但目前行程本身沒有提權時，沒有權限差異、沒有
+        風險（跟一般使用者身分下的正常重新安裝完全一樣），這個組合原本就
+        該正常執行，不該被上面那條新增的圍堵規則誤傷。"""
+        self._seed_hkcu()
+        self.api.no_admin_install = True
+        with mock.patch.object(self.api, "_is_current_process_elevated", return_value=False), \
+             mock.patch.object(self.api, "_run_uninstall_exe_elevated") as mock_elevated, \
+             mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=0)) as mock_run:
+            result = self.api.run_upgrade_uninstall()
+
+        self.assertEqual(result["status"], "success")
+        mock_run.assert_called_once()
+        mock_elevated.assert_not_called()
+
 
 class TestRunUninstallExeElevated(unittest.TestCase):
     """_run_uninstall_exe_elevated()：透過 ShellExecuteExW + "runas" 動詞
@@ -613,6 +698,12 @@ class TestRunUninstallExeElevated(unittest.TestCase):
             with self.assertRaises(Exception):
                 self.api._run_uninstall_exe_elevated("C:\\App\\uninstall.exe", ["--silent"])
 
+    def _fake_get_exit_code(self, exit_code_value):
+        def fake_get_exit_code(handle, exit_code_ptr):
+            exit_code_ptr.contents.value = exit_code_value
+            return 1
+        return fake_get_exit_code
+
     def test_waits_for_process_and_closes_handle(self):
         WAIT_OBJECT_0 = 0
 
@@ -622,6 +713,7 @@ class TestRunUninstallExeElevated(unittest.TestCase):
 
         with mock.patch("installer_core.ctypes.windll.shell32.ShellExecuteExW", side_effect=fake_shell_execute), \
              mock.patch("installer_core.ctypes.windll.kernel32.WaitForSingleObject", return_value=WAIT_OBJECT_0) as mock_wait, \
+             mock.patch("installer_core.ctypes.windll.kernel32.GetExitCodeProcess", side_effect=self._fake_get_exit_code(0)), \
              mock.patch("installer_core.ctypes.windll.kernel32.CloseHandle") as mock_close:
             self.api._run_uninstall_exe_elevated("C:\\App\\uninstall.exe", ["--silent"], timeout_ms=5000)
 
@@ -642,6 +734,37 @@ class TestRunUninstallExeElevated(unittest.TestCase):
             with self.assertRaises(Exception):
                 self.api._run_uninstall_exe_elevated("C:\\App\\uninstall.exe", ["--silent"], timeout_ms=100)
         mock_close.assert_called_once_with(12345)  # 逾時也要記得收尾釋放控制代碼
+
+    def test_raises_when_process_exit_code_is_nonzero(self):
+        """真實抓到的問題（B6）：舊版 uninstall.exe 透過這條跨 UAC 路徑
+        執行時，結束碼原本完全沒有被檢查——WaitForSingleObject 等到行程
+        結束就直接視為成功，不管它實際上是不是真的執行成功。"""
+        def fake_shell_execute(sei_ptr):
+            sei_ptr.contents.hProcess = 12345
+            return 1
+
+        with mock.patch("installer_core.ctypes.windll.shell32.ShellExecuteExW", side_effect=fake_shell_execute), \
+             mock.patch("installer_core.ctypes.windll.kernel32.WaitForSingleObject", return_value=0), \
+             mock.patch("installer_core.ctypes.windll.kernel32.GetExitCodeProcess", side_effect=self._fake_get_exit_code(1)), \
+             mock.patch("installer_core.ctypes.windll.kernel32.CloseHandle") as mock_close:
+            with self.assertRaises(Exception):
+                self.api._run_uninstall_exe_elevated("C:\\App\\uninstall.exe", ["--silent"])
+        mock_close.assert_called_once_with(12345)
+
+    def test_raises_when_process_handle_is_null(self):
+        """真實抓到的問題：SEE_MASK_NOCLOSEPROCESS 模式下，如果沒有真的
+        產生一個行程（hProcess 是 NULL），WaitForSingleObject(NULL, ...)
+        實際上會回傳 WAIT_FAILED，不是原本判斷式唯一認得的 WAIT_TIMEOUT，
+        會被誤判成「等待成功」繼續往下跑，而不是明確的錯誤。"""
+        def fake_shell_execute(sei_ptr):
+            sei_ptr.contents.hProcess = None
+            return 1
+
+        with mock.patch("installer_core.ctypes.windll.shell32.ShellExecuteExW", side_effect=fake_shell_execute), \
+             mock.patch("installer_core.ctypes.windll.kernel32.WaitForSingleObject") as mock_wait:
+            with self.assertRaises(Exception):
+                self.api._run_uninstall_exe_elevated("C:\\App\\uninstall.exe", ["--silent"])
+        mock_wait.assert_not_called()
 
 
 class TestWaitForSelectedPathWritable(unittest.TestCase):
@@ -781,6 +904,27 @@ class TestProcessRunningDetection(unittest.TestCase):
         self.assertIn("app.exe", result["message"])
         self.assertFalse(os.path.exists(self.install_dir), "偵測到執行中不該建立安裝目錄、開始複製檔案")
 
+    def test_restore_point_not_created_when_main_exe_is_running(self):
+        """真實抓到的問題（B15）：系統還原點原本在磁碟空間檢查之後就
+        立刻建立，發生在「主程式執行中」「舊版本移除失敗」這幾個仍然
+        會整個中止安裝的檢查之前——使用者被要求先關閉程式再重試時，
+        已經憑空多了一個其實對應不到任何真實安裝的還原點，白白消耗
+        還原點的儲存空間（VSS 儲存是有限的環狀空間，可能因此擠掉一個
+        真正有用的舊還原點）。應該延後到這些還會中止安裝的檢查都通過、
+        真正要開始動手（建立安裝目錄）前才建立。"""
+        api = make_installer_api(
+            app_name="MyApp", main_exe="app.exe", selected_path=self.install_dir,
+            file_associations=[], add_to_path=False, create_restore_point_before_install=True,
+        )
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch("installer_core._is_process_running", return_value=True), \
+             mock.patch("installer_core.restore_point.create_restore_point") as mock_restore_point:
+            api.trigger_installation(create_desktop_shortcut=False)
+
+        mock_restore_point.assert_not_called()
+
     def test_skip_process_check_bypasses_the_detection(self):
         """保底選項：偵測卡死關不掉時（見 CONTEXT.md 的說明），讓使用者
         可以略過偵測強制繼續，不會被卡死在 process_running 狀態。"""
@@ -903,6 +1047,60 @@ class TestRollback(unittest.TestCase):
         api._rollback(["only.txt"], log=None)
         self.assertFalse(os.path.exists(self.tmp_dir), "回滾後資料夾裡如果真的空了，應該連資料夾一起刪掉")
 
+    def test_does_not_delete_files_that_pre_existed_before_this_install(self):
+        """真實抓到的問題（B7）：_rollback() 文件字串本身宣稱「不會動到
+        selected_path 底下其他既有內容」，但實作對 copied_rel_paths 裡的
+        每一筆一律 os.remove()——這份清單記錄的是「這次安裝複製過的檔案」
+        （見 B10 的時機修正），不是「這次安裝『新建立』的檔案」。使用者
+        選了一個已經有同名檔案的資料夾（例如登錄表項目遺失後的重新安裝，
+        或單純共用資料夾）時，那個檔案會被複製覆蓋、記進 copied_rel_paths，
+        安裝失敗回滾時被整個刪掉——使用者原本的檔案就這樣憑空消失了，
+        而不是「至少維持覆蓋後的內容」這種可以接受的次佳結果。"""
+        with open(os.path.join(self.tmp_dir, "existing.txt"), "w") as f:
+            f.write("使用者安裝前就有的檔案，複製時被覆蓋，回滾時不該被整個刪掉")
+        api = make_installer_api(selected_path=self.tmp_dir)
+        api._rollback(["existing.txt"], log=None, pre_existing_rel_paths={"existing.txt"})
+        self.assertTrue(os.path.exists(os.path.join(self.tmp_dir, "existing.txt")))
+
+
+class TestPartialCopyFailureRollback(unittest.TestCase):
+    """真實抓到的問題（B10）：rel 原本要等 shutil.copy2() 完全成功、
+    完整性驗證都跑完才會被記進 copied_rel_paths——如果 copy2() 中途拋
+    例外（例如磁碟滿了）但已經在目的地寫入部分內容，這個部分檔案不會
+    被記錄，_rollback() 也就不會嘗試清掉它，留下一個孤兒殘留檔案。"""
+
+    def setUp(self):
+        self.resource_dir = tempfile.mkdtemp()
+        self.app_contents_dir = os.path.join(self.resource_dir, "app_contents")
+        os.makedirs(self.app_contents_dir)
+        with open(os.path.join(self.app_contents_dir, "app.exe"), "wb") as f:
+            f.write(b"fake-app")
+        self.install_dir = tempfile.mkdtemp()
+        shutil.rmtree(self.install_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.resource_dir, ignore_errors=True)
+        shutil.rmtree(self.install_dir, ignore_errors=True)
+
+    def test_partial_copy_failure_leaves_no_orphaned_file_after_rollback(self):
+        def fake_copy2(src, dst):
+            with open(dst, "wb") as f:
+                f.write(b"partial")
+            raise OSError("模擬磁碟已滿，複製中途失敗")
+
+        api = make_installer_api(app_name="MyApp", main_exe="app.exe", selected_path=self.install_dir)
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch("installer_core.shutil.copy2", side_effect=fake_copy2):
+            result = api.trigger_installation(create_desktop_shortcut=False)
+
+        self.assertEqual(result["status"], "error")
+        self.assertFalse(
+            os.path.exists(os.path.join(self.install_dir, "app.exe")),
+            "複製中途失敗留下的部分檔案應該被回滾清掉，不能變成孤兒殘留",
+        )
+
 
 class TestRollbackCoversSystemEntries(unittest.TestCase):
     """真實抓到的缺口：_rollback() 原本只清『這次安裝已經複製出去的檔案』，
@@ -947,7 +1145,7 @@ class TestRollbackCoversSystemEntries(unittest.TestCase):
                 path_directory="C:\\Apps\\MyApp",
             )
         mock_path.assert_called_once_with("C:\\Apps\\MyApp", True)
-        mock_unregister.assert_called_once_with([".foo"])
+        mock_unregister.assert_called_once_with([".foo"], no_admin_install=True)
         self.assertEqual(
             mock_shortcut.call_args_list,
             [
@@ -956,6 +1154,36 @@ class TestRollbackCoversSystemEntries(unittest.TestCase):
             ],
         )
         mock_registry.assert_called_once_with("MyApp", True)
+
+
+class TestRollbackCoversWindowsServiceAndScheduledTask(unittest.TestCase):
+    """真實抓到的缺口（B1/F3）：_rollback() 原本完全不知道 windows_service/
+    scheduled_task 這兩類新寫入。服務/排程工作建立成功之後，只要後面任何
+    一步（PATH 寫入、manifest 寫入等）失敗，這兩個系統資源就會永久孤兒
+    化——安裝在失敗那一刻根本還沒走到寫 manifest 那步，uninstall.py 永遠
+    不會知道它們存在，沒有任何自動化路徑能清掉。"""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_removes_service_and_task_when_both_were_created(self):
+        api = make_installer_api(selected_path=self.tmp_dir, app_name="MyApp")
+        with mock.patch("installer_core.windows_service.remove_service") as mock_rm_svc, \
+             mock.patch("installer_core.scheduled_task.remove_scheduled_task") as mock_rm_task:
+            api._rollback([], log=None, windows_service_name="MySvc", scheduled_task_name="MyTask")
+        mock_rm_svc.assert_called_once_with("MySvc")
+        mock_rm_task.assert_called_once_with("MyTask")
+
+    def test_does_nothing_when_neither_was_created(self):
+        api = make_installer_api(selected_path=self.tmp_dir, app_name="MyApp")
+        with mock.patch("installer_core.windows_service.remove_service") as mock_rm_svc, \
+             mock.patch("installer_core.scheduled_task.remove_scheduled_task") as mock_rm_task:
+            api._rollback([], log=None)
+        mock_rm_svc.assert_not_called()
+        mock_rm_task.assert_not_called()
 
 
 class TestTriggerInstallationRollsBackSystemEntriesOnLateFailure(unittest.TestCase):
@@ -987,7 +1215,7 @@ class TestTriggerInstallationRollsBackSystemEntriesOnLateFailure(unittest.TestCa
              mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
              mock.patch.object(api, "_register_uninstall_entry"), \
              mock.patch.object(api, "_create_shortcut", return_value=True), \
-             mock.patch("installer_core.file_assoc.register"), \
+             mock.patch("installer_core.file_assoc.register") as mock_register, \
              mock.patch.object(api, "_add_to_path_env", return_value="C:\\Apps\\MyApp"), \
              mock.patch("installer_core.json.dump", side_effect=RuntimeError("模擬寫入 manifest 失敗")), \
              mock.patch("installer_core.system_entries.remove_from_path") as mock_path, \
@@ -997,10 +1225,71 @@ class TestTriggerInstallationRollsBackSystemEntriesOnLateFailure(unittest.TestCa
             result = api.trigger_installation(create_desktop_shortcut=True)
 
         self.assertEqual(result["status"], "error")
+        self.assertEqual(mock_register.call_args.kwargs.get("no_admin_install"), False)
         mock_path.assert_called_once_with("C:\\Apps\\MyApp", False)
-        mock_unregister.assert_called_once_with([".foo"])
+        mock_unregister.assert_called_once_with([".foo"], no_admin_install=False)
         self.assertEqual(mock_shortcut.call_count, 2, "開始功能表 + 桌面捷徑都建立成功過，都該被回滾")
         mock_registry.assert_called_once_with("MyApp", False)
+
+    def test_service_and_task_removed_when_manifest_write_fails_after_creation(self):
+        api = make_installer_api(
+            app_name="MyApp", main_exe="app.exe", selected_path=self.install_dir,
+            windows_service={"service_name": "MySvc", "exe_relative_path": "app.exe"},
+            scheduled_task={"task_name": "MyTask", "exe_relative_path": "app.exe"},
+        )
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_register_uninstall_entry"), \
+             mock.patch.object(api, "_create_shortcut", return_value=True), \
+             mock.patch("installer_core.windows_service.create_service", return_value=True), \
+             mock.patch("installer_core.scheduled_task.create_scheduled_task", return_value=True), \
+             mock.patch("installer_core.json.dump", side_effect=RuntimeError("模擬寫入 manifest 失敗")), \
+             mock.patch("installer_core.windows_service.remove_service") as mock_rm_svc, \
+             mock.patch("installer_core.scheduled_task.remove_scheduled_task") as mock_rm_task:
+            result = api.trigger_installation(create_desktop_shortcut=True)
+
+        self.assertEqual(result["status"], "error")
+        mock_rm_svc.assert_called_once_with("MySvc")
+        mock_rm_task.assert_called_once_with("MyTask")
+
+
+class TestInstallLogWrittenOnFailure(unittest.TestCase):
+    """真實抓到的 bug（F24）：log_lines 原本只在安裝完全成功時才寫出，
+    十幾個提早失敗的 return 分支完全沒有寫進任何檔案——偏偏失敗時的診斷
+    資訊才是這份 log 真正有用的時候，這支 exe 是 --noconsole 編譯的，
+    使用者/事後排查完全沒有其他管道看到這些訊息（跟 run_silent_install()
+    早年踩過的「印給空氣看」是同一類問題）。"""
+
+    def setUp(self):
+        self.resource_dir = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.resource_dir, "app_contents"))
+        with open(os.path.join(self.resource_dir, "app_contents", "app.exe"), "wb") as f:
+            f.write(b"fake")
+        self.install_dir = tempfile.mkdtemp()
+        shutil.rmtree(self.install_dir)  # 讓 selected_path 一開始就不存在
+        self.fallback_path = os.path.join(tempfile.gettempdir(), "MyApp_install_log.txt")
+
+    def tearDown(self):
+        shutil.rmtree(self.resource_dir, ignore_errors=True)
+        shutil.rmtree(self.install_dir, ignore_errors=True)
+        if os.path.exists(self.fallback_path):
+            os.remove(self.fallback_path)
+
+    def test_disk_space_failure_still_writes_a_log(self):
+        api = make_installer_api(app_name="MyApp", selected_path=self.install_dir)
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
+             mock.patch.object(api, "_check_disk_space", return_value=(False, 100, 100 * 1024 * 1024)):
+            result = api.trigger_installation()
+
+        self.assertEqual(result["status"], "error")
+        self.assertTrue(
+            os.path.exists(self.fallback_path),
+            "selected_path 這時候還不存在，log 應該落到 %TEMP% fallback，而不是完全沒寫",
+        )
+        with open(self.fallback_path, encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("MyApp", content)
 
 
 class TestGetUiLanguage(unittest.TestCase):
@@ -1411,6 +1700,25 @@ class TestTriggerInstallationCreatesWindowsService(unittest.TestCase):
             manifest = json.load(f)
         self.assertEqual(manifest["windows_service_name"], "")
 
+    def test_service_creation_failure_is_surfaced_as_warning_in_result(self):
+        """真實抓到的問題（B17）：服務/排程工作建立失敗原本只寫進
+        install_log.txt——這支 exe 是 --noconsole 編譯的，安裝介面上完全
+        不會顯示任何提示，使用者會以為「打包時設定的服務」已經正常裝好，
+        直到某天發現它根本不存在才會察覺。回傳結果裡要帶上結構化的警告，
+        讓呼叫端（GUI）有機會真的顯示給使用者看，不能只藏在使用者通常
+        不會去看的 log 檔裡。"""
+        api = self._make_api(windows_service={"service_name": "MySvc", "exe_relative_path": "app.exe"})
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_register_uninstall_entry"), \
+             mock.patch("installer_core.windows_service.create_service", return_value=False):
+            result = api.trigger_installation(create_desktop_shortcut=False)
+
+        self.assertEqual(result["status"], "success")
+        self.assertIn("warnings", result)
+        self.assertTrue(any("MySvc" in w for w in result["warnings"]))
+
 
 class TestTriggerInstallationCreatesScheduledTask(unittest.TestCase):
     """scheduled_task packaging 欄位有設定時，trigger_installation() 應該
@@ -1669,24 +1977,43 @@ class TestInstallDependency(unittest.TestCase):
         self.assertIn("Fake Dependency", result["message"])
 
     def test_temp_installer_file_is_removed_after_success(self):
+        """真實抓到的問題：原本用固定、可預測的檔名
+        （%TEMP%\\dep_installer_<key>.exe），改成每次下載都用 mkdtemp()
+        產生獨立的暫存資料夾——這裡不再假設固定路徑，改成直接攔截
+        subprocess.run 實際收到的執行檔路徑，驗證那個路徑（以及它所在的
+        暫存資料夾）事後真的被清乾淨，不只是刪檔案留下空資料夾。"""
         api = make_installer_api()
-        expected_tmp_path = os.path.join(tempfile.gettempdir(), f"dep_installer_{self.fake_key}.exe")
+        captured = {}
+
+        def fake_subprocess_run(cmd, **kwargs):
+            captured["run_path"] = cmd[0]
+            return mock.Mock(returncode=0)
+
         with self._register_fake_checker(lambda: True), \
              mock.patch("installer_core.bits_download.download_via_bits", return_value=False), \
              mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response()), \
-             mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=0)):
+             mock.patch("installer_core.subprocess.run", side_effect=fake_subprocess_run):
             api.install_dependency(self.fake_key)
-        self.assertFalse(os.path.exists(expected_tmp_path))
+
+        self.assertFalse(os.path.exists(captured["run_path"]))
+        self.assertFalse(os.path.exists(os.path.dirname(captured["run_path"])))
 
     def test_temp_installer_file_is_removed_even_when_installer_process_fails(self):
-        expected_tmp_path = os.path.join(tempfile.gettempdir(), f"dep_installer_{self.fake_key}.exe")
         api = make_installer_api()
+        captured = {}
+
+        def fake_subprocess_run(cmd, **kwargs):
+            captured["run_path"] = cmd[0]
+            raise OSError("模擬子程序啟動失敗")
+
         with self._register_fake_checker(lambda: False), \
              mock.patch("installer_core.bits_download.download_via_bits", return_value=False), \
              mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response()), \
-             mock.patch("installer_core.subprocess.run", side_effect=OSError("模擬子程序啟動失敗")):
+             mock.patch("installer_core.subprocess.run", side_effect=fake_subprocess_run):
             api.install_dependency(self.fake_key)
-        self.assertFalse(os.path.exists(expected_tmp_path))
+
+        self.assertFalse(os.path.exists(captured["run_path"]))
+        self.assertFalse(os.path.exists(os.path.dirname(captured["run_path"])))
 
     def test_bits_success_skips_urllib_entirely(self):
         api = make_installer_api()
@@ -1711,6 +2038,94 @@ class TestInstallDependency(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         mock_bits.assert_called_once()
         mock_urlopen.assert_called_once()
+
+    def test_truncated_download_is_rejected_without_running_installer(self):
+        """真實抓到的問題：Content-Length 原本只被拿來算進度百分比，從未
+        用來確認真的下載完整——連線中途斷掉時 read() 只是回傳空字串正常
+        結束迴圈，不會拋例外，會去執行一個被截斷的安裝檔。"""
+        response = mock.MagicMock()
+        response.__enter__ = mock.Mock(return_value=response)
+        response.__exit__ = mock.Mock(return_value=False)
+        response.getheader.return_value = "1000"  # 宣稱總共 1000 bytes
+        response.read.side_effect = [b"only-13-bytes", b""]  # 實際只給 13 bytes 就斷了
+        api = make_installer_api()
+        with self._register_fake_checker(lambda: True), \
+             mock.patch("installer_core.bits_download.download_via_bits", return_value=False), \
+             mock.patch("installer_core.urllib.request.urlopen", return_value=response), \
+             mock.patch("installer_core.subprocess.run") as mock_run:
+            result = api.install_dependency(self.fake_key)
+        self.assertEqual(result["status"], "error")
+        mock_run.assert_not_called()
+
+    def _custom_dependency_entry(self, sha256, registry_path="SOFTWARE\\Fake"):
+        """組一筆完整的 custom_dependencies 項目（不是只帶 sha256）。
+
+        真實抓到的測試陷阱：_build_dependency_checkers() 對「key 撞名」
+        是直接用 custom_dependencies 整個覆蓋掉 DEPENDENCY_CHECKERS 裡的
+        內建/測試用假 checker（見該函式的文件字串，這是刻意設計，讓真正
+        的自訂相依元件可以蓋掉同名內建項目）——如果 custom_dependencies
+        只帶 sha256、沒帶 display_name/download_url/registry_check，會
+        整個蓋掉 _register_fake_checker() 準備好的假 checker，check_fn
+        變成指向一個空的 registry_check（永遠查不到），連鎖造成「裝完
+        還是偵測不到」這種看似無關的錯誤，不是 sha256 邏輯本身的問題。
+        這裡改成組一筆完整項目，registry_check 指向呼叫端用 FakeWinReg
+        佈置好的機碼，才能讓 check_fn() 在下載/安裝流程走完後正確回傳
+        True。
+        """
+        return {
+            "key": self.fake_key,
+            "display_name": "Fake Dependency",
+            "download_url": "https://example.test/fake.exe",
+            "silent_args": ["/quiet"],
+            "sha256": sha256,
+            "registry_check": {"hive": "HKLM", "path": registry_path},
+        }
+
+    def test_sha256_mismatch_is_rejected_without_running_installer(self):
+        """真實抓到的問題：下載回來的相依元件安裝檔完全沒有任何完整性/
+        來源驗證就直接執行——custom_dependencies 有設定 sha256 時，下載完
+        要先比對，不符合就拒絕執行，不能照單全收。sha256 比對發生在呼叫
+        check_fn() 複查之前，所以這裡不需要佈置真的能通過的登錄表機碼。
+        """
+        api = make_installer_api(custom_dependencies=[self._custom_dependency_entry("0" * 64)])
+        with mock.patch("installer_core.bits_download.download_via_bits", return_value=False), \
+             mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response(b"fake-exe-bytes")), \
+             mock.patch("installer_core.subprocess.run") as mock_run:
+            result = api.install_dependency(self.fake_key)
+        self.assertEqual(result["status"], "error")
+        mock_run.assert_not_called()
+
+    def test_sha256_match_allows_install_to_proceed(self):
+        import hashlib
+        body = b"fake-exe-bytes"
+        expected = hashlib.sha256(body).hexdigest()
+        fake_reg = FakeWinReg()
+        fake_reg.set_hklm("SOFTWARE\\Fake", {})
+        api = make_installer_api(custom_dependencies=[self._custom_dependency_entry(expected)])
+        with mock.patch.dict(sys.modules, {"winreg": fake_reg}), \
+             mock.patch("installer_core.bits_download.download_via_bits", return_value=False), \
+             mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response(body)), \
+             mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=0)):
+            result = api.install_dependency(self.fake_key)
+        self.assertEqual(result["status"], "success")
+
+    def test_sha256_uppercase_in_custom_dependencies_still_matches(self):
+        """packaging_core._validate_dependency_policy() 已經會正規化成
+        小寫，這裡額外驗證即使某個呼叫端（例如直接手動編輯設定檔）繞過
+        那道正規化、留下大寫的 sha256，比對時仍然不能因為大小寫不同而
+        誤判失敗。"""
+        import hashlib
+        body = b"fake-exe-bytes"
+        expected = hashlib.sha256(body).hexdigest().upper()
+        fake_reg = FakeWinReg()
+        fake_reg.set_hklm("SOFTWARE\\Fake", {})
+        api = make_installer_api(custom_dependencies=[self._custom_dependency_entry(expected)])
+        with mock.patch.dict(sys.modules, {"winreg": fake_reg}), \
+             mock.patch("installer_core.bits_download.download_via_bits", return_value=False), \
+             mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response(body)), \
+             mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=0)):
+            result = api.install_dependency(self.fake_key)
+        self.assertEqual(result["status"], "success")
 
 
 class TestGenericRegistryCheck(unittest.TestCase):
@@ -2102,6 +2517,22 @@ class TestNoAdminInstall(unittest.TestCase):
         reg_path = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\MyApp"
         self.assertIsNotNone(self.fake_reg.hklm(reg_path))
         self.assertIsNone(self.fake_reg.hkcu(reg_path))
+
+    def test_register_uninstall_entry_removes_partially_written_key_on_failure(self):
+        # B12：CreateKey 一呼叫就會立刻建立機碼，後面 11 個 SetValueEx 是對
+        # 同一個已存在機碼逐一寫值——如果中途某一個失敗，不應該留下一個
+        # 只寫了一半的孤兒登錄表機碼。這裡讓第 6 個值（DisplayVersion）
+        # 寫入失敗，驗證前面已經寫進去的 5 個值連同機碼本身都被清乾淨。
+        api = make_installer_api(
+            no_admin_install=False, app_name="MyApp", selected_path="C:\\Fake\\MyApp",
+            main_exe="app.exe",
+        )
+        reg_path = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\MyApp"
+        self.fake_reg.fail_on_value_name = "DisplayVersion"
+        with mock.patch.object(api, "_required_size", return_value=0):
+            with self.assertRaises(OSError):
+                api._register_uninstall_entry()
+        self.assertIsNone(self.fake_reg.hklm(reg_path))
 
     def test_add_to_path_uses_hkcu_environment_when_no_admin(self):
         self.fake_reg.set_hkcu("Environment", {})

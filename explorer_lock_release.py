@@ -318,12 +318,25 @@ def release_locking_processes(processes, path=None, registry=_real_winreg,
                 else:
                     remaining = session.list_locking_processes()
                 log(f"[explorer_lock_release] Restart Manager 優雅關閉後重新偵測，剩餘鎖定: {remaining}")
-                session.restart()
                 if not remaining:
-                    session.close()
-                    log("[explorer_lock_release] Restart Manager 優雅關閉已解開鎖，不需要強制關殼層")
-                    return None
+                    # 真實抓到的 bug：session.restart() 原本在這裡立刻呼叫，
+                    # 發生在呼叫端真正做完檔案操作之前——剛被 RM 優雅關閉的
+                    # 應用程式一旦被喚醒，有可能在檔案操作完成前搶先重新
+                    # 開啟/鎖住同一個檔案，重演 AutoRestartShell 那段機制
+                    # 原本要避免的競態（見下面強制關殼層那條路：重啟
+                    # explorer.exe 也是延後到 restore_after_lock_release()
+                    # 才做，不是在這裡提前做）。改成把 session 原封不動放進
+                    # 回傳的狀態，交給 restore_after_lock_release() 在真正
+                    # 的時機點（呼叫端做完檔案操作之後）才觸發 restart()。
+                    log("[explorer_lock_release] Restart Manager 優雅關閉已解開鎖，"
+                        "不需要強制關殼層；restart() 延後到檔案操作完成後才呼叫")
+                    return {"restart_manager_session": session}
                 processes = [{"pid": pid, "name": name} for pid, name in remaining]
+                # remaining 不是空的：這些應用程式沒有真的放手，還是得靠下面
+                # 的強制關殼層才能解鎖。這裡不呼叫 session.restart()——剛被
+                # 優雅關閉的應用程式如果現在就恢復，很可能立刻把檔案鎖回去，
+                # 讓接下來的強制關殼層等於白做；已知限制：這個分支被 RM
+                # 優雅關閉的應用程式不會自動恢復，需要使用者自己手動重開。
             else:
                 log("[explorer_lock_release] Restart Manager 優雅關閉呼叫失敗或沒有可關閉的應用程式")
         else:
@@ -359,12 +372,28 @@ def release_locking_processes(processes, path=None, registry=_real_winreg,
 
 def restore_after_lock_release(forced_down_state, registry=_real_winreg, log=None):
     """呼叫端在後續檔案操作完成（不管成功或失敗）之後呼叫。forced_down_state
-    是 None 就什麼都不做；不是 None 就手動重啟 explorer.exe（Popen，
-    best-effort，吞例外），並把 AutoRestartShell 寫回讀到的舊值（沒讀到
-    就用預設值 "1"）。"""
+    是 None 就什麼都不做；帶 "restart_manager_session" 的狀態（見
+    release_locking_processes() 的 Restart Manager 優雅關閉分支）呼叫該
+    session 的 restart() 喚醒剛才優雅關閉的應用程式後關閉 session；否則
+    視為既有的強制關殼層狀態，手動重啟 explorer.exe（Popen，best-effort，
+    吞例外），並把 AutoRestartShell 寫回讀到的舊值（沒讀到就用預設值
+    "1"）。這兩種狀態形狀互斥（release_locking_processes() 同一次呼叫
+    只會走其中一條路），所以用 key 是否存在分流就夠。"""
     log = log or _noop_log
     if forced_down_state is None:
         return
+
+    session = forced_down_state.get("restart_manager_session")
+    if session is not None:
+        log("[explorer_lock_release] restore_after_lock_release：呼叫 Restart Manager 喚醒剛才優雅關閉的應用程式")
+        try:
+            session.restart()
+        except Exception as e:
+            log(f"[explorer_lock_release] Restart Manager restart() 失敗: {e}")
+        finally:
+            session.close()
+        return
+
     log(f"[explorer_lock_release] restore_after_lock_release：重啟 explorer.exe，還原 AutoRestartShell={forced_down_state}")
     try:
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)

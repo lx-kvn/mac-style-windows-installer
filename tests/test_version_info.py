@@ -2,6 +2,7 @@
 
 只測純函式的字串輸出跟寫檔行為，不涉及真的呼叫 PyInstaller。
 """
+import ast
 import os
 import sys
 import tempfile
@@ -73,6 +74,26 @@ class TestRenderVersionFile(unittest.TestCase):
         )
         self.assertIn("StringStruct('CompanyName', '')", content)
         self.assertIn("StringStruct('LegalCopyright', '')", content)
+
+    def test_apostrophe_in_company_name_does_not_break_generated_syntax(self):
+        """真實抓到的 bug：欄位值原本用手動 f-string 包一層單引號直接塞進
+        去，發行者/應用程式名稱只要含一個單引號（例如 "O'Brien Software"、
+        "Nando's"）就會提早把 Python 字串字面值截斷，PyInstaller 讀這份
+        version-file 時會因為語法錯誤而編譯失敗——而且是在 dist/ 已經被
+        build_all() 清空之後才爆炸。改成用 repr() 讓 Python 自己決定
+        怎麼逸出，這裡驗證產生的整份內容本身是合法的 Python 語法（用
+        ast.parse 實際解析，而不是只看有沒有拋例外）。"""
+        content = version_info.render_version_file(
+            product_name="O'Brien Tools", file_version="1.0.0", file_description="d",
+            company_name="Nando's", legal_copyright="Copyright © 2026 O'Brien",
+        )
+        ast.parse(content)  # 語法不合法時這裡會直接拋 SyntaxError
+
+    def test_backslash_in_field_does_not_break_generated_syntax(self):
+        content = version_info.render_version_file(
+            product_name=r"C:\Weird\Name", file_version="1.0.0", file_description="d",
+        )
+        ast.parse(content)
 
 
 class TestWriteVersionFile(unittest.TestCase):

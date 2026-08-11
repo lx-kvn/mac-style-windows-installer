@@ -291,8 +291,19 @@ def _load_uninstall_context(argv):
 
     manifest = {}
     if os.path.exists(manifest_path):
-        with open(manifest_path, "r", encoding="utf-8") as f:
-            manifest = json.load(f)
+        # 真實抓到的 bug：這裡原本沒有 try/except（緊接著幾行之後讀
+        # installer_config.json 那段反而有）——一份損毀的 manifest（例如
+        # 安裝途中斷電、寫到一半的檔案）會讓 JSONDecodeError 直接往外拋出
+        # main()，這支 exe 是 --noconsole 編譯的，使用者會看到完全沒有
+        # 任何反應。損毀時（含有效 JSON 但不是物件，例如 `[]`）都退回跟
+        # 「完全沒有 manifest」一樣的預設值，讓後續流程盡量繼續。
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                manifest = loaded
+        except Exception:
+            pass
 
     app_name = manifest.get("app_name")
     if not app_name and os.path.exists(config_path):
@@ -354,14 +365,23 @@ def _perform_uninstall_steps(ctx, locking_processes, kill_locking_processes, log
     無人值守一律視為同意，維持原本「更新覆蓋安裝不用問」的行為）跟
     report_progress 要不要真的推播進度給前端。
 
-    回傳 safe_to_remove_whole_dir（bool）：True 表示資料夾裡確定只剩自己
-    （uninstall.exe），呼叫端可以安全整個清空；False 表示資料夾裡還留有
-    其他東西，呼叫端只能刪自己、把資料夾留著。
+    回傳 (safe_to_remove_whole_dir, failures)：
+      - safe_to_remove_whole_dir（bool）：True 表示資料夾裡確定只剩自己
+        （uninstall.exe），呼叫端可以安全整個清空；False 表示資料夾裡還
+        留有其他東西，呼叫端只能刪自己、把資料夾留著。
+      - failures（list[str]）：真實抓到的問題（F20）——登錄表項目/捷徑
+        移除失敗原本完全被忽略，remove_registry_entry() 的回傳值只在
+        成功時被拿來 log，remove_shortcut() 的回傳值整個被丟棄，不管
+        實際上有沒有刪掉都無條件 log 成功，讓使用者在 PATH/捷徑/登錄表
+        項目全部沒清乾淨的情況下，還是看到一個「解除安裝完成」的畫面。
+        這裡把每一步實際失敗（而不是「呼叫沒拋例外」）的項目收集起來，
+        讓呼叫端有機會如實回報「完成，但有 N 項沒清乾淨」。
     """
     app_name = ctx["app_name"]
     manifest = ctx["manifest"]
     current_dir = ctx["current_dir"]
     no_admin_install = ctx["no_admin_install"]
+    failures = []
 
     def progress(percent, message):
         log(message)
@@ -371,19 +391,31 @@ def _perform_uninstall_steps(ctx, locking_processes, kill_locking_processes, log
     progress(10, "正在清理 Windows 註冊表...")
     if remove_registry_entry(app_name, no_admin_install):
         log("已移除解除安裝登錄表項目")
+    else:
+        msg = "移除解除安裝登錄表項目失敗"
+        log(f"[警告] {msg}")
+        failures.append(msg)
 
     progress(25, "正在移除捷徑...")
     if manifest.get("start_menu_shortcut"):
-        remove_shortcut(app_name, desktop=False, no_admin_install=no_admin_install)
-        log("已移除開始功能表捷徑")
+        if remove_shortcut(app_name, desktop=False, no_admin_install=no_admin_install):
+            log("已移除開始功能表捷徑")
+        else:
+            msg = "移除開始功能表捷徑失敗"
+            log(f"[警告] {msg}")
+            failures.append(msg)
     if manifest.get("desktop_shortcut"):
-        remove_shortcut(app_name, desktop=True, no_admin_install=no_admin_install)
-        log("已移除桌面捷徑")
+        if remove_shortcut(app_name, desktop=True, no_admin_install=no_admin_install):
+            log("已移除桌面捷徑")
+        else:
+            msg = "移除桌面捷徑失敗"
+            log(f"[警告] {msg}")
+            failures.append(msg)
 
     file_associations = manifest.get("file_associations") or []
     if file_associations:
         progress(40, "正在移除檔案關聯...")
-        file_assoc.unregister(file_associations)
+        file_assoc.unregister(file_associations, no_admin_install=no_admin_install)
         log(f"已移除檔案關聯: {file_associations}")
 
     if manifest.get("path_added"):
@@ -397,7 +429,9 @@ def _perform_uninstall_steps(ctx, locking_processes, kill_locking_processes, log
         if windows_service.remove_service(windows_service_name):
             log(f"已移除 Windows 服務: {windows_service_name}")
         else:
-            log(f"[警告] 移除 Windows 服務 {windows_service_name} 失敗")
+            msg = f"移除 Windows 服務「{windows_service_name}」失敗"
+            log(f"[警告] {msg}")
+            failures.append(msg)
 
     scheduled_task_name = manifest.get("scheduled_task_name")
     if scheduled_task_name:
@@ -405,7 +439,9 @@ def _perform_uninstall_steps(ctx, locking_processes, kill_locking_processes, log
         if scheduled_task.remove_scheduled_task(scheduled_task_name):
             log(f"已移除排程工作: {scheduled_task_name}")
         else:
-            log(f"[警告] 移除排程工作 {scheduled_task_name} 失敗")
+            msg = f"移除排程工作「{scheduled_task_name}」失敗"
+            log(f"[警告] {msg}")
+            failures.append(msg)
 
     progress(65, "正在刪除安裝目錄下的檔案...")
     files_to_remove = manifest.get("files")
@@ -492,7 +528,7 @@ def _perform_uninstall_steps(ctx, locking_processes, kill_locking_processes, log
         explorer_lock_release.restore_after_lock_release(forced_down_state)
 
     progress(95, "正在寫入解除安裝紀錄...")
-    return safe_to_remove_whole_dir
+    return safe_to_remove_whole_dir, failures
 
 
 def run_silent_uninstall(ctx, argv):
@@ -516,18 +552,26 @@ def run_silent_uninstall(ctx, argv):
         return 1
 
     locking_processes = _compute_locking_processes(ctx, argv)
-    safe_to_remove_whole_dir = _perform_uninstall_steps(
+    safe_to_remove_whole_dir, failures = _perform_uninstall_steps(
         ctx, locking_processes, kill_locking_processes=True, log=log, report_progress=None,
     )
-
-    _write_uninstall_log(log_lines, app_name, argv)
+    if failures:
+        # 真實抓到的問題（F20）：這些失敗原本完全不會反映在任何地方。
+        # 靜默模式沒有互動畫面可以顯示，至少確保寫進 log 檔，不要讓
+        # exit code 0（成功）掩蓋掉「其實有幾項沒清乾淨」這件事。
+        log(f"[警告] 解除安裝完成，但有 {len(failures)} 項沒有清乾淨：{failures}")
 
     # 更新覆蓋安裝流程呼叫的是「舊版本」的 uninstall.exe，接下來
     # installer_core.py 馬上就要在同一個目錄裡寫入新版本的檔案（包含
     # 覆蓋這支 uninstall.exe 自己）——要不要排背景自我刪除指令的判斷
     # 收在 self_delete.schedule_if_needed() 裡（看 argv 裡有沒有
     # --upgrade），這裡不用再自己先判斷一次。
-    self_delete.schedule_if_needed(argv, ctx["current_dir"], argv[0], safe_to_remove_whole_dir)
+    #
+    # 傳入 log 且放在 _write_uninstall_log() 之前呼叫（F17）：非 ANSI
+    # 路徑的 fallback/失敗訊息要寫進 log_lines，才能真的落到 log 檔裡，
+    # 不是排完程才寫檔，讓這筆記錄錯過那次寫檔時機。
+    self_delete.schedule_if_needed(argv, ctx["current_dir"], argv[0], safe_to_remove_whole_dir, log=log)
+    _write_uninstall_log(log_lines, app_name, argv)
     return 0
 
 
@@ -618,11 +662,15 @@ class UninstallerAPI:
             self._log_lines.append(msg)
 
         try:
-            self._safe_to_remove_whole_dir = _perform_uninstall_steps(
+            self._safe_to_remove_whole_dir, failures = _perform_uninstall_steps(
                 ctx, self._locking_processes, kill_locking_processes, log,
                 report_progress=self._report_progress,
             )
-            return {"status": "success"}
+            # 真實抓到的問題（F20）：這些失敗原本完全不會反映在互動畫面上
+            # ——回傳固定的 {"status": "success"}，不管實際上有沒有真的
+            # 清乾淨。跟 installer_core.py 的 warnings 欄位（見 B17）同一種
+            # 做法：帶回結構化的失敗清單，讓前端有機會顯示給使用者看。
+            return {"status": "success", "warnings": failures}
         except Exception as e:
             log(f"[錯誤] {e}")
             return {"status": "error", "message": str(e)}
@@ -660,8 +708,14 @@ class UninstallerAPI:
             window.hide()
         except Exception:
             pass
+        # F17：log 傳進去、且放在 _write_uninstall_log() 之前呼叫——非
+        # ANSI 路徑的 fallback/失敗訊息要寫進 self._log_lines，才能真的
+        # 落到 log 檔裡，不是排完程才寫檔，讓這筆記錄錯過那次寫檔時機。
+        self_delete.schedule_if_needed(
+            sys.argv, self.current_dir, sys.argv[0], self._safe_to_remove_whole_dir,
+            log=self._log_lines.append,
+        )
         _write_uninstall_log(self._log_lines, self.app_name, sys.argv)
-        self_delete.schedule_if_needed(sys.argv, self.current_dir, sys.argv[0], self._safe_to_remove_whole_dir)
         os._exit(0)
 
     def cancel(self):

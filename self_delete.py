@@ -105,7 +105,24 @@ def _build_bat_script(current_dir, exe_path, safe_to_remove_whole_dir):
     )
 
 
-def schedule_if_needed(argv, current_dir, exe_path, safe_to_remove_whole_dir):
+def _write_bat_file(bat_path, content):
+    """用系統 ANSI 編碼（mbcs）寫出 .bat 檔案——cmd.exe 依系統目前的
+    OEM/ANSI 編碼逐位元組解析批次檔，這裡的編碼要跟它一致，安裝路徑裡的
+    中文/日文等字元才能被正確寫入、正確解析。"""
+    with open(bat_path, "w", encoding="mbcs") as f:
+        f.write(content)
+
+
+def _get_short_path(path):
+    """回傳 path 的 8.3 短路徑名稱（純 ASCII，任何系統編碼都能正確表示）。
+    路徑不存在、磁碟區沒有啟用短檔名產生等情況會取得失敗，回傳 None。"""
+    import ctypes
+    buf = ctypes.create_unicode_buffer(260)
+    length = ctypes.windll.kernel32.GetShortPathNameW(path, buf, len(buf))
+    return buf.value if length else None
+
+
+def schedule_if_needed(argv, current_dir, exe_path, safe_to_remove_whole_dir, log=None):
     """判斷要不要排程、真的排程，兩件事一起做——呼叫端只要給 `argv`，
     不用自己先呼叫 `is_upgrade_call()`/內部的排程判斷，前置條件收在
     這裡，不會有呼叫端忘記檢查的問題。
@@ -117,17 +134,47 @@ def schedule_if_needed(argv, current_dir, exe_path, safe_to_remove_whole_dir):
     但在 `--noconsole` 的行程裡繼承無效控制代碼會讓 `CreateProcess`
     直接失敗，`Popen()` 拋出例外（`OSError: [WinError 6] The handle is
     invalid` 之類），整個自我刪除背景指令根本沒有真的被排上去。這裡
-    明確指定 `stdin=stdout=stderr=subprocess.DEVNULL`。外層包一層
-    `try/except`：這一步本來就是 best-effort，排程失敗也不該讓呼叫端
-    沒辦法把視窗關掉/流程繼續往下走。
+    明確指定 `stdin=stdout=stderr=subprocess.DEVNULL`。
+
+    真實抓到的 bug（F17）：`.bat` 內容固定用 `encoding="mbcs"`（系統目前
+    的 ANSI 編碼）寫入，如果安裝路徑含有系統目前 locale 編碼無法表示的
+    字元（例如簡體中文 Windows 上裝了一個路徑含繁體中文特殊字、或日文/
+    韓文路徑），`open(..., encoding="mbcs").write()` 會丟
+    `UnicodeEncodeError`，原本整段被最外層 `try/except Exception: pass`
+    吞掉，`uninstall.exe` 就這樣永遠不會被排程自我刪除，而且完全沒有任何
+    記錄可以事後追查。修法：先試著取得 current_dir/exe_path 的 8.3 短
+    路徑名稱（純 ASCII，任何系統編碼都寫得進去），改用短路徑重新組一份
+    `.bat` 再試一次；短路徑也拿不到的話才真的放棄，而且不管走哪個分支，
+    都透過 `log`（呼叫端已經有的 log_lines 收集函式）留下一筆記錄，不再
+    是完全無聲的失敗。
     """
     if not _should_schedule(is_upgrade_call(argv)):
         return
+    if log is None:
+        log = lambda msg: None
+
     bat_content = _build_bat_script(current_dir, exe_path, safe_to_remove_whole_dir)
     bat_path = os.path.join(tempfile.gettempdir(), f"_mswi_uninstall_cleanup_{os.getpid()}.bat")
     try:
-        with open(bat_path, "w", encoding="mbcs") as f:
-            f.write(bat_content)
+        _write_bat_file(bat_path, bat_content)
+    except UnicodeEncodeError:
+        short_dir = _get_short_path(current_dir)
+        short_exe = _get_short_path(exe_path)
+        if not (short_dir and short_exe):
+            log(f"[警告] 安裝路徑含有系統目前編碼無法表示的字元，且無法取得短路徑名稱，跳過自我刪除排程：{current_dir}")
+            return
+        try:
+            bat_content = _build_bat_script(short_dir, short_exe, safe_to_remove_whole_dir)
+            _write_bat_file(bat_path, bat_content)
+            log(f"[警告] 安裝路徑含有系統目前編碼無法表示的字元，自我刪除改用短路徑名稱：{short_dir}")
+        except Exception as e:
+            log(f"[警告] 安裝路徑含有系統目前編碼無法表示的字元，改用短路徑名稱後仍無法排程自我刪除：{e}")
+            return
+    except Exception as e:
+        log(f"[警告] 無法排程自我刪除：{e}")
+        return
+
+    try:
         subprocess.Popen(
             f'"{bat_path}"',
             shell=True,
@@ -136,5 +183,5 @@ def schedule_if_needed(argv, current_dir, exe_path, safe_to_remove_whole_dir):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-    except Exception:
-        pass
+    except Exception as e:
+        log(f"[警告] 無法排程自我刪除：{e}")

@@ -22,13 +22,25 @@ from install_scope import InstallScope
 
 
 def remove_registry_entry(app_name, no_admin_install=False, registry=_real_winreg):
+    """真實抓到的 bug：no_admin_install 從 manifest 讀出來的值可能跟舊
+    版本實際安裝時用的模式對不上（manifest 遺失這個欄位時 uninstall.py
+    預設回退成 False，或 manifest 被手動編輯過）——原本只查衍生出來的
+    單一 hive，真正的登錄表項目在另一個 hive 時完全找不到，DeleteKey
+    失敗、留下永久殘留在「已安裝的應用程式」清單裡，且失敗還被吞掉、
+    連 log 都沒有。改成跟 check_existing_install() 一樣雙 hive 都試：
+    優先試 no_admin_install 衍生出來的那個，找不到才試另一個。
+    """
     reg_path = f"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{app_name}"
-    hive = InstallScope(no_admin_install, registry=registry).registry_hive
-    try:
-        registry.DeleteKey(hive, reg_path)
-        return True
-    except Exception:
-        return False
+    scope = InstallScope(no_admin_install, registry=registry)
+    primary_hive = scope.registry_hive
+    other_hive = registry.HKEY_CURRENT_USER if primary_hive == registry.HKEY_LOCAL_MACHINE else registry.HKEY_LOCAL_MACHINE
+    for hive in (primary_hive, other_hive):
+        try:
+            registry.DeleteKey(hive, reg_path)
+            return True
+        except Exception:
+            continue
+    return False
 
 
 def remove_shortcut(app_name, desktop=False, no_admin_install=False, registry=_real_winreg):

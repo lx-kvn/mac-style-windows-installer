@@ -25,6 +25,58 @@ from _fakes import FakeWinReg
 import uninstall as un
 
 
+class TestPerformUninstallStepsReportsFailures(unittest.TestCase):
+    """真實抓到的問題（F20）：登錄表項目/捷徑移除失敗原本完全被忽略——
+    remove_registry_entry() 的回傳值只在成功時被拿來 log，失敗時連
+    log 都沒有；remove_shortcut() 的回傳值整個被丟棄，不管實際上有沒有
+    刪掉都無條件 log 成功。互動式解除安裝可以在 PATH/捷徑/登錄表項目
+    全部沒清乾淨的情況下，還是讓使用者看到一個綠色的「解除安裝完成」
+    畫面。_perform_uninstall_steps() 現在額外回傳一份失敗項目清單，讓
+    呼叫端有機會如實回報「完成，但有 N 項沒清乾淨」，而不是照單全收。
+    """
+
+    def _make_ctx(self, current_dir, manifest=None, no_admin_install=False):
+        return {
+            "app_name": "MyApp",
+            "manifest": manifest or {},
+            "current_dir": current_dir,
+            "no_admin_install": no_admin_install,
+        }
+
+    def setUp(self):
+        self.current_dir = tempfile.mkdtemp()
+        self.self_name = "uninstall.exe"
+        with open(os.path.join(self.current_dir, self.self_name), "w") as f:
+            f.write("fake")
+        self.argv_patcher = mock.patch.object(un.sys, "argv", [os.path.join(self.current_dir, self.self_name)])
+        self.argv_patcher.start()
+
+    def tearDown(self):
+        self.argv_patcher.stop()
+        shutil.rmtree(self.current_dir, ignore_errors=True)
+
+    def test_returns_tuple_with_empty_failures_on_full_success(self):
+        ctx = self._make_ctx(self.current_dir, manifest={"files": []})
+        with mock.patch("uninstall.remove_registry_entry", return_value=True):
+            result = un._perform_uninstall_steps(ctx, [], False, log=lambda m: None)
+        self.assertEqual(result, (True, []))
+
+    def test_registry_entry_removal_failure_is_collected(self):
+        ctx = self._make_ctx(self.current_dir, manifest={"files": []})
+        with mock.patch("uninstall.remove_registry_entry", return_value=False):
+            safe_to_remove, failures = un._perform_uninstall_steps(ctx, [], False, log=lambda m: None)
+        self.assertTrue(any("登錄表" in f for f in failures))
+
+    def test_shortcut_removal_failure_is_collected(self):
+        ctx = self._make_ctx(
+            self.current_dir, manifest={"files": [], "start_menu_shortcut": True},
+        )
+        with mock.patch("uninstall.remove_registry_entry", return_value=True), \
+             mock.patch("uninstall.remove_shortcut", return_value=False):
+            safe_to_remove, failures = un._perform_uninstall_steps(ctx, [], False, log=lambda m: None)
+        self.assertTrue(any("捷徑" in f for f in failures))
+
+
 class TestPerformUninstallStepsLockRelease(unittest.TestCase):
     """_perform_uninstall_steps()：需要結束鎖定檔案的程式時，實際的釋放
     邏輯（先關瀏覽視窗、不夠才暫停 AutoRestartShell 強制關殼層）收在
@@ -151,6 +203,53 @@ class TestPerformUninstallStepsWindowsService(unittest.TestCase):
             un._perform_uninstall_steps(ctx, [], False, log=lambda m: None)
 
         mock_remove.assert_not_called()
+
+
+class TestPerformUninstallStepsFileAssociations(unittest.TestCase):
+    """真實抓到的 bug：file_assoc.unregister() 補上 no_admin_install 參數
+    （見 file_assoc.py/tests/test_file_assoc.py）之後，這裡的呼叫端一直
+    沒有跟著把 ctx["no_admin_install"] 傳進去——預設值 False 剛好跟
+    unregister() 原本唯一支援的 HKLM 行為一致，所以沒有立刻爆炸，但
+    no_admin_install=True 裝出來的安裝（檔案關聯寫在 HKCU）解除安裝時
+    會去清 HKLM，清不到真正寫入的那份，殘留關聯永遠留著。"""
+
+    def _make_ctx(self, current_dir, manifest=None, no_admin_install=False):
+        return {
+            "app_name": "MyApp",
+            "manifest": manifest or {},
+            "current_dir": current_dir,
+            "no_admin_install": no_admin_install,
+        }
+
+    def setUp(self):
+        self.current_dir = tempfile.mkdtemp()
+        self.self_name = "uninstall.exe"
+        with open(os.path.join(self.current_dir, self.self_name), "w") as f:
+            f.write("fake")
+        self.argv_patcher = mock.patch.object(un.sys, "argv", [os.path.join(self.current_dir, self.self_name)])
+        self.argv_patcher.start()
+
+    def tearDown(self):
+        self.argv_patcher.stop()
+        shutil.rmtree(self.current_dir, ignore_errors=True)
+
+    def test_passes_no_admin_install_true_through_to_unregister(self):
+        ctx = self._make_ctx(
+            self.current_dir, manifest={"files": [], "file_associations": [".foo"]}, no_admin_install=True,
+        )
+        with mock.patch("uninstall.file_assoc.unregister") as mock_unregister:
+            un._perform_uninstall_steps(ctx, [], False, log=lambda m: None)
+
+        mock_unregister.assert_called_once_with([".foo"], no_admin_install=True)
+
+    def test_passes_no_admin_install_false_through_to_unregister(self):
+        ctx = self._make_ctx(
+            self.current_dir, manifest={"files": [], "file_associations": [".foo"]}, no_admin_install=False,
+        )
+        with mock.patch("uninstall.file_assoc.unregister") as mock_unregister:
+            un._perform_uninstall_steps(ctx, [], False, log=lambda m: None)
+
+        mock_unregister.assert_called_once_with([".foo"], no_admin_install=False)
 
 
 class TestPerformUninstallStepsScheduledTask(unittest.TestCase):
@@ -354,9 +453,9 @@ class TestUninstallerAPI(unittest.TestCase):
 
     def test_run_uninstall_success_updates_safe_to_remove_flag(self):
         api = self._make_api()
-        with mock.patch("uninstall._perform_uninstall_steps", return_value=True) as mock_perform:
+        with mock.patch("uninstall._perform_uninstall_steps", return_value=(True, [])) as mock_perform:
             result = api.run_uninstall(False)
-        self.assertEqual(result, {"status": "success"})
+        self.assertEqual(result, {"status": "success", "warnings": []})
         self.assertTrue(api._safe_to_remove_whole_dir)
         mock_perform.assert_called_once()
 
@@ -388,7 +487,9 @@ class TestUninstallerAPI(unittest.TestCase):
             api.finish_and_exit()
         fake_window.hide.assert_called_once()
         mock_log.assert_called_once()
-        mock_schedule.assert_called_once_with(sys.argv, self.tmp_dir, sys.argv[0], True)
+        mock_schedule.assert_called_once_with(
+            sys.argv, self.tmp_dir, sys.argv[0], True, log=api._log_lines.append
+        )
         mock_exit.assert_called_once_with(0)
 
     def test_cancel_hard_exits_without_deleting(self):
@@ -431,6 +532,29 @@ class TestLoadUninstallContext(unittest.TestCase):
             json.dump({"app_name": "FromConfig"}, f)
         ctx = un._load_uninstall_context([self.exe_path])
         self.assertEqual(ctx["app_name"], "FromConfig")
+
+    def test_corrupt_manifest_does_not_crash(self):
+        """真實抓到的 bug：install_manifest.json 的 json.load() 原本沒有
+        try/except（緊接著六行之後讀 installer_config.json 那段反而有），
+        一份損毀的 manifest（例如安裝途中斷電、寫到一半的檔案）會讓
+        JSONDecodeError 直接往外拋出 main()——這支 exe 是 --noconsole
+        編譯的，使用者會看到完全沒有任何反應，看起來像是「按了解除安裝
+        什麼事都沒發生」，而不是明確的錯誤訊息。損毀時應該退回跟「完全
+        沒有 manifest」一樣的預設值，讓後續流程盡量繼續。"""
+        with open(os.path.join(self.tmp_dir, "install_manifest.json"), "w", encoding="utf-8") as f:
+            f.write("{ 這不是合法的 JSON")
+        ctx = un._load_uninstall_context([self.exe_path])
+        self.assertEqual(ctx["app_name"], "DefaultApp")
+        self.assertEqual(ctx["manifest"], {})
+
+    def test_manifest_that_is_a_json_array_does_not_crash(self):
+        """有效 JSON、但不是物件（例如 `[]`）：manifest.get(...) 會直接
+        AttributeError，同樣要當成「沒有可用的 manifest」處理。"""
+        with open(os.path.join(self.tmp_dir, "install_manifest.json"), "w", encoding="utf-8") as f:
+            json.dump([], f)
+        ctx = un._load_uninstall_context([self.exe_path])
+        self.assertEqual(ctx["app_name"], "DefaultApp")
+        self.assertEqual(ctx["manifest"], {})
 
 
 ## 自我刪除（.bat 產生＋重試邏輯 + --upgrade 旗標判斷）已經拆到

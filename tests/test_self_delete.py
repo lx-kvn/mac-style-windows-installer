@@ -126,5 +126,67 @@ class TestScheduleIfNeeded(unittest.TestCase):
         mock_popen.assert_not_called()
 
 
+class TestScheduleIfNeededNonAnsiPathFallback(unittest.TestCase):
+    """F17：真實抓到的 bug——`.bat` 內容固定用系統目前的 ANSI 編碼
+    （`mbcs`）寫入，安裝路徑如果含有這個編碼表示不了的字元（例如系統
+    locale 跟安裝路徑語系不一致），`open(..., encoding="mbcs").write()`
+    會丟 UnicodeEncodeError，原本整段被最外層 `except Exception: pass`
+    吞掉，`uninstall.exe` 永遠不會被排程自我刪除、也完全沒有任何記錄。
+    修法：改用 8.3 短路徑名稱（純 ASCII）重試一次，兩種結果都要記錄。"""
+
+    _NOT_UPGRADE_ARGV = ["uninstall.exe"]
+
+    def test_falls_back_to_short_path_when_mbcs_encoding_fails(self):
+        calls = {"n": 0}
+
+        def fake_write(bat_path, content):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise UnicodeEncodeError("mbcs", "\u65e5", 0, 1, "no mapping")
+            with open(bat_path, "w", encoding="utf-8") as f:
+                f.write(content)
+
+        log_messages = []
+        try:
+            with mock.patch("self_delete._write_bat_file", side_effect=fake_write), \
+                 mock.patch("self_delete._get_short_path", return_value="C:\\SHORT~1\\U.EXE"), \
+                 mock.patch("self_delete.subprocess.Popen") as mock_popen:
+                self_delete.schedule_if_needed(
+                    self._NOT_UPGRADE_ARGV, "C:\\日本語\\App", "C:\\日本語\\App\\uninstall.exe", True,
+                    log=log_messages.append,
+                )
+            mock_popen.assert_called_once()
+            self.assertEqual(calls["n"], 2)
+            self.assertTrue(any("短路徑" in m for m in log_messages), log_messages)
+        finally:
+            bat_path = os.path.join(
+                tempfile.gettempdir(), f"_mswi_uninstall_cleanup_{os.getpid()}.bat"
+            )
+            if os.path.exists(bat_path):
+                os.remove(bat_path)
+
+    def test_gives_up_and_logs_when_short_path_unavailable(self):
+        log_messages = []
+        with mock.patch("self_delete._write_bat_file", side_effect=UnicodeEncodeError("mbcs", "\u65e5", 0, 1, "no mapping")), \
+             mock.patch("self_delete._get_short_path", return_value=None), \
+             mock.patch("self_delete.subprocess.Popen") as mock_popen:
+            self_delete.schedule_if_needed(
+                self._NOT_UPGRADE_ARGV, "C:\\日本語\\App", "C:\\日本語\\App\\uninstall.exe", True,
+                log=log_messages.append,
+            )
+        mock_popen.assert_not_called()
+        self.assertTrue(log_messages, "非 ANSI 路徑且短路徑也拿不到時，必須留下記錄，不能靜默放棄")
+
+    def test_default_log_is_a_noop_when_not_provided(self):
+        # 沒帶 log 參數（維持舊呼叫端相容）不應該讓函式整個炸掉。
+        with mock.patch("self_delete._write_bat_file", side_effect=UnicodeEncodeError("mbcs", "\u65e5", 0, 1, "no mapping")), \
+             mock.patch("self_delete._get_short_path", return_value=None), \
+             mock.patch("self_delete.subprocess.Popen") as mock_popen:
+            self_delete.schedule_if_needed(
+                self._NOT_UPGRADE_ARGV, "C:\\日本語\\App", "C:\\日本語\\App\\uninstall.exe", True,
+            )
+        mock_popen.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

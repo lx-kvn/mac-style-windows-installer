@@ -31,6 +31,7 @@ import ctypes
 import subprocess
 import urllib.request
 import zlib
+import hashlib
 import webview
 from datetime import datetime
 from window_drag import WindowDragController
@@ -69,6 +70,21 @@ def _file_checksum(path, chunk_size=1024 * 1024):
                 break
             crc = zlib.crc32(chunk, crc)
     return crc
+
+
+def _file_sha256(path, chunk_size=1024 * 1024):
+    """算檔案的 SHA-256 摘要（十六進位小寫字串），用來驗證下載回來的相依
+    元件安裝檔沒有被竄改——這裡的目的是密碼學等級的完整性/來源驗證，
+    跟 `_file_checksum()`（CRC32，只防「複製過程中壞掉」）用途不同，
+    不要混用。"""
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def get_resource_path(relative_path):
@@ -112,11 +128,11 @@ def _generic_registry_check(hive, path, value_name=None, expected=None):
     """
     import winreg
     try:
-        key = winreg.OpenKey(_registry_hive(hive), path)
-        if value_name is None:
-            return True
-        val, _ = winreg.QueryValueEx(key, value_name)
-        return val == expected
+        with winreg.OpenKey(_registry_hive(hive), path) as key:
+            if value_name is None:
+                return True
+            val, _ = winreg.QueryValueEx(key, value_name)
+            return val == expected
     except Exception:
         return False
 
@@ -132,19 +148,19 @@ def _read_registry_version(hive, path, value_name=None, enum_subkeys=False):
     """
     import winreg
     try:
-        key = winreg.OpenKey(_registry_hive(hive), path)
-        if enum_subkeys:
-            versions = []
-            i = 0
-            while True:
-                try:
-                    versions.append(winreg.EnumKey(key, i))
-                except OSError:
-                    break
-                i += 1
-            return max(versions, key=_parse_version) if versions else None
-        val, _ = winreg.QueryValueEx(key, value_name)
-        return str(val)
+        with winreg.OpenKey(_registry_hive(hive), path) as key:
+            if enum_subkeys:
+                versions = []
+                i = 0
+                while True:
+                    try:
+                        versions.append(winreg.EnumKey(key, i))
+                    except OSError:
+                        break
+                    i += 1
+                return max(versions, key=_parse_version) if versions else None
+            val, _ = winreg.QueryValueEx(key, value_name)
+            return str(val)
     except Exception:
         return None
 
@@ -253,17 +269,39 @@ def _is_process_running(exe_name):
 def _parse_version(v):
     """把版本字串拆成數字 tuple，例如 "1.10.2" -> (1, 10, 2)，
     這樣才能正確比較「1.10.0 > 1.2.0」，單純字串比較會誤判成 1.10.0 < 1.2.0。
-    非數字的部分（例如 "1.0.0-beta"）只取數字部分，忽略後綴。
+
+    每一段只取「開頭連續的數字」，遇到第一個非數字字元就停止，忽略後面的
+    全部內容。真實抓到的 bug：原本的實作是把整段裡「所有」數字字元濾出來
+    再串接，"1.0.0-rc2" 最後一段 "0-rc2" 會被濾成 '0'+'2' -> "02" -> 2，
+    解析結果跟 "1.0.2" 完全一樣——版次後綴反而讓版本號變大，
+    `_compare_versions()` 因此會把候選版判斷成比正式版新，方向完全反了。
     """
     parts = []
     for p in str(v).split('.'):
-        digits = ''.join(ch for ch in p if ch.isdigit())
+        digits = ''
+        for ch in p:
+            if not ch.isdigit():
+                break
+            digits += ch
         parts.append(int(digits) if digits else 0)
     return tuple(parts)
 
 
+def _has_prerelease_suffix(v):
+    """版本字串裡有沒有語意上的版次後綴（例如 "1.0.0-rc2"/"1.0.0-beta"
+    的 "-rc2"/"-beta"）。這個專案的版本欄位是自由文字，不強制 semver，
+    用「有沒有連字號」當「這是預發布版」的慣例標記已經足夠涵蓋常見情境，
+    不需要完整的 semver 解析器。"""
+    return '-' in str(v)
+
+
 def _compare_versions(v1, v2):
-    """回傳 1 表示 v1 > v2，0 表示相等，-1 表示 v1 < v2"""
+    """回傳 1 表示 v1 > v2，0 表示相等，-1 表示 v1 < v2。
+
+    數字部分相等時，額外比較有沒有預發布後綴——有後綴的版本視為比同樣
+    數字、沒有後綴的正式版舊（"1.0.0-rc2" < "1.0.0"），才符合一般認知的
+    版次語意。
+    """
     t1, t2 = _parse_version(v1), _parse_version(v2)
     length = max(len(t1), len(t2))
     t1 = t1 + (0,) * (length - len(t1))
@@ -272,6 +310,11 @@ def _compare_versions(v1, v2):
         return 1
     if t1 < t2:
         return -1
+    pre1, pre2 = _has_prerelease_suffix(v1), _has_prerelease_suffix(v2)
+    if pre1 and not pre2:
+        return -1
+    if pre2 and not pre1:
+        return 1
     return 0
 
 
@@ -518,6 +561,16 @@ class InstallerAPI:
             return {"status": "error", "message": "未知的相依元件。"}
         check_fn, display_name, url, silent_args = checker
 
+        # sha256（選填）：custom_dependencies 這一筆如果有設定，下載完成後、
+        # 執行前用來驗證檔案完整性/沒被竄改——見 packaging_core.py 的驗證
+        # 與正規化（統一小寫），這裡再 .lower() 一次是保底，避免繞過打包
+        # 驗證直接手動編輯設定檔的情境。內建相依元件目前沒有這個欄位。
+        expected_sha256 = next(
+            (str(e.get("sha256")).lower() for e in self.custom_dependencies
+             if str(e.get("key", "")).strip() == key and e.get("sha256")),
+            None,
+        )
+
         # bundle_dependencies：打包時已經把這個相依元件的安裝檔內嵌進安裝檔裡
         # （見 packaging_core.py/builder.py 的 bundle_dependencies 處理），
         # 直接執行內嵌檔案即可，不用再連網下載——適合「不確定目標機器有沒有
@@ -525,11 +578,19 @@ class InstallerAPI:
         # 命名規則一致。
         bundled_path = get_resource_path(os.path.join("dependencies", f"{key}.exe"))
         run_path = None
+        tmp_dir = None
         if key in self.bundle_dependencies and os.path.exists(bundled_path):
             run_path = bundled_path
             self._report_dependency_progress(55, f"正在安裝 {display_name}...")
         else:
-            tmp_path = os.path.join(tempfile.gettempdir(), f"dep_installer_{key}.exe")
+            # 真實抓到的問題：原本用固定、可預測的檔名
+            # （%TEMP%\dep_installer_<key>.exe）。如果這支安裝程式是在提權
+            # 更高的情境下執行（例如透過 MDM/GPO 用 SYSTEM 帳號靜默部署，
+            # %TEMP% 解析成所有已驗證使用者都寫得進去的 C:\Windows\Temp），
+            # 這個固定路徑本身就是可以被搶先寫入的競態視窗。改成每次下載
+            # 都用 mkdtemp() 產生一個獨立、不可預測的暫存資料夾。
+            tmp_dir = tempfile.mkdtemp(prefix="mswi_dep_")
+            tmp_path = os.path.join(tmp_dir, f"{key}.exe")
             self._report_dependency_progress(5, f"正在下載 {display_name}...")
             # 優先走 BITS（斷點續傳、背景低優先權下載），沒裝 pywin32 或
             # BITS 呼叫本身失敗都會 best-effort 回傳 False，退回原本的
@@ -556,9 +617,31 @@ class InstallerAPI:
                                 if total:
                                     percent = 5 + int(downloaded / total * 50)  # 下載階段佔 5%-55%
                                     self._report_dependency_progress(percent, f"正在下載 {display_name}...")
+                        # 真實抓到的問題：Content-Length 原本只被拿來算進度
+                        # 百分比，從未拿來確認真的下載完整——連線中途斷掉時
+                        # read() 只是回傳空字串正常結束迴圈，不會拋例外，
+                        # 會去執行一個被截斷的安裝檔。
+                        if total is not None and downloaded != total:
+                            shutil.rmtree(tmp_dir, ignore_errors=True)
+                            return {
+                                "status": "error",
+                                "message": f"下載 {display_name} 失敗：下載不完整"
+                                           f"（預期 {total} bytes，實際收到 {downloaded} bytes）。",
+                            }
                 except Exception as e:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
                     return {"status": "error", "message": f"下載 {display_name} 失敗：{e}"}
             run_path = tmp_path
+
+            if expected_sha256:
+                actual_sha256 = _file_sha256(run_path)
+                if actual_sha256 != expected_sha256:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                    return {
+                        "status": "error",
+                        "message": f"{display_name} 下載完整性驗證失敗（sha256 不符），"
+                                   f"可能是下載過程被竄改，已略過執行。",
+                    }
 
         try:
             self._report_dependency_progress(60, f"正在安裝 {display_name}...")
@@ -568,13 +651,11 @@ class InstallerAPI:
             return {"status": "error", "message": f"執行 {display_name} 安裝程式失敗：{e}"}
         finally:
             # 內嵌檔案是這次安裝檔自己的資源（PyInstaller 解壓出來的暫存內容
-            # 或開發模式下的原始檔案），不是我們自己下載到 %TEMP% 的暫存檔，
-            # 不能刪除；只清掉真的是我們下載出來的那份。
-            if run_path != bundled_path:
-                try:
-                    os.remove(run_path)
-                except Exception:
-                    pass
+            # 或開發模式下的原始檔案），不是我們自己下載出來的暫存資料夾，
+            # 不能刪除；只清掉真的是我們下載出來的那份（連同它所在的暫存
+            # 資料夾一起清，不留下空資料夾）。
+            if tmp_dir is not None:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
 
         self._report_dependency_progress(95, "正在確認安裝結果...")
         if check_fn():
@@ -618,8 +699,24 @@ class InstallerAPI:
         for hive in (primary_hive, other_hive):
             try:
                 with winreg.OpenKey(hive, reg_path) as key:
-                    install_loc, _ = winreg.QueryValueEx(key, "InstallLocation")
-                    old_version, _ = winreg.QueryValueEx(key, "DisplayVersion")
+                    try:
+                        install_loc, _ = winreg.QueryValueEx(key, "InstallLocation")
+                    except Exception:
+                        # 連 InstallLocation 都沒有，這個機碼沒有可用的資訊，
+                        # 換下一個 hive 試。
+                        continue
+                    try:
+                        old_version, _ = winreg.QueryValueEx(key, "DisplayVersion")
+                    except Exception:
+                        # 真實抓到的 bug：DisplayVersion 缺值（手動建立的
+                        # 登錄表項目、舊版打包工具留下的、或損毀的登錄表）
+                        # 原本會讓這整個機碼被最外層的 bare except 一併當成
+                        # 「這個 hive 沒有這個項目」處理，兩邊 hive 都試完
+                        # 就回報「沒裝過」——明明 InstallLocation 都還在，
+                        # 卻整個升級偵測被跳過，新舊兩份安裝並存。缺版本號
+                        # 時當成「未知的舊版本」處理（一律視為需要更新），
+                        # 而不是讓整個偵測失效。
+                        old_version = "0.0.0"
                     comparison = _compare_versions(self.version, old_version)
                     return {
                         "exists": True,
@@ -788,10 +885,25 @@ class InstallerAPI:
         ok = ctypes.windll.shell32.ShellExecuteExW(ctypes.pointer(sei))
         if not ok:
             raise OSError("無法以系統管理員權限啟動舊版解除安裝程式（使用者可能取消了 UAC 提示）。")
+
+        # 真實抓到的問題：SEE_MASK_NOCLOSEPROCESS 模式下，如果沒有真的
+        # 產生一個行程（hProcess 是 NULL），WaitForSingleObject(NULL, ...)
+        # 實際上會回傳 WAIT_FAILED，不是這裡原本唯一判斷的 WAIT_TIMEOUT，
+        # 會被誤判成「等待成功」繼續往下跑，而不是明確的錯誤。
+        if not sei.hProcess:
+            raise OSError("啟動舊版解除安裝程式失敗：沒有取得有效的行程控制代碼。")
+
         try:
             wait_result = ctypes.windll.kernel32.WaitForSingleObject(sei.hProcess, timeout_ms)
             if wait_result == WAIT_TIMEOUT:
                 raise TimeoutError("舊版解除安裝程式執行逾時。")
+            # 真實抓到的問題（B6）：結束碼原本完全沒有被檢查——等到行程
+            # 結束就直接視為成功，不管它實際上是不是真的執行成功。跟
+            # uninstall.py 自己的慣例一致：0=成功、非 0=失敗。
+            exit_code = ctypes.c_ulong(0)
+            ctypes.windll.kernel32.GetExitCodeProcess(sei.hProcess, ctypes.pointer(exit_code))
+            if exit_code.value != 0:
+                raise RuntimeError(f"舊版解除安裝程式回報失敗（結束碼 {exit_code.value}）。")
         finally:
             ctypes.windll.kernel32.CloseHandle(sei.hProcess)
 
@@ -836,6 +948,25 @@ class InstallerAPI:
         if not os.path.exists(uninstall_exe):
             return {"status": "error", "message": "找不到舊版本的解除安裝程式，請先手動移除舊版本後再安裝。"}
 
+        # 真實抓到的安全性問題：HKCU 是一般使用者身分就寫得進去的登錄表
+        # 位置。如果目前這個安裝程式行程已經持有系統管理員權杖，執行從
+        # HKCU 找到的 uninstall.exe——不管是透過 subprocess.run 還是
+        # ShellExecute，子行程都會繼承呼叫端目前的權杖——等於讓任何能以
+        # 同一個使用者身分寫入 HKCU 的人，都能讓這支已提權的安裝程式代為
+        # 執行任意程式碼，還帶著系統管理員權限。這個組合（hive=HKCU 且
+        # 目前行程已經提權）沒有正當情境會出現：正常的免權限安裝在免權限
+        # 行程底下執行；只有攻擊者刻意偽造 HKCU 項目、剛好又遇到使用者
+        # 這次改用需要管理員權限的方式重新打包，才會踩進這個組合。直接
+        # 拒絕自動執行，不嘗試用簽章或路徑白名單這類還沒有基礎建設支撐
+        # 的方式去區分「這個 HKCU 項目到底可不可信」。
+        if info.get("hive") == "HKCU" and self._is_current_process_elevated():
+            return {
+                "status": "error",
+                "message": "偵測到舊版本的登錄表項目位於使用者層級（HKCU），但目前安裝程式"
+                           "正以系統管理員權限執行。為了安全，不會自動代為執行來源不受信任的"
+                           "舊版解除安裝程式，請先手動移除舊版本後再安裝。",
+            }
+
         self._upgrade_backup_original_path = install_path
         self._upgrade_backup_path = self._backup_existing_install(install_path)
 
@@ -856,7 +987,15 @@ class InstallerAPI:
             if info.get("hive") == "HKLM" and not self._is_current_process_elevated():
                 self._run_uninstall_exe_elevated(uninstall_exe, args, timeout_ms=30000)
             else:
-                subprocess.run([uninstall_exe] + args, timeout=30, creationflags=creationflags)
+                # 真實抓到的問題（B6）：這裡的回傳值原本連變數都沒接，
+                # 舊版 uninstall.exe 的結束碼完全被忽略。uninstall.py 自己
+                # 的慣例是 0=成功、非 0=失敗（見 run_silent_uninstall()）——
+                # 舊版本如果因為檔案被鎖住、manifest 損毀等原因回報失敗，
+                # 這裡完全偵測不到，會誤以為舊版本已經清乾淨，繼續往下
+                # 覆蓋安裝，實際上舊版本殘留的檔案可能還在。
+                result = subprocess.run([uninstall_exe] + args, timeout=30, creationflags=creationflags)
+                if result.returncode != 0:
+                    raise RuntimeError(f"舊版解除安裝程式回報失敗（結束碼 {result.returncode}）。")
             self._wait_for_selected_path_writable()
             return {"status": "success"}
         except Exception as e:
@@ -909,21 +1048,35 @@ class InstallerAPI:
         # 不吞例外：這支 exe 是 --noconsole 編譯，print() 沒有任何地方會顯示
         # （同一類問題見規格文件 §8.7），失敗時直接讓例外往外拋，交給
         # trigger_installation() 既有的外層 except 處理（回滾 + 回報使用者）。
-        with winreg.CreateKey(hive, reg_path) as key:
-            winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, self.app_name)
-            winreg.SetValueEx(key, "UninstallString", 0, winreg.REG_SZ, f'"{uninstall_exe}"')
-            # QuietUninstallString：Windows「設定 > 已安裝的應用程式」偵測到這個欄位時，
-            # 會優先用它做靜默解除安裝（例如企業用 MDM/群組原則批次移除），
-            # 沒有這個欄位的話，系統只能呼叫一般的 UninstallString，會跳出確認視窗。
-            winreg.SetValueEx(key, "QuietUninstallString", 0, winreg.REG_SZ, f'"{uninstall_exe}" --silent')
-            winreg.SetValueEx(key, "InstallLocation", 0, winreg.REG_SZ, self.selected_path)
-            winreg.SetValueEx(key, "Publisher", 0, winreg.REG_SZ, self.publisher)
-            winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, self.version)
-            winreg.SetValueEx(key, "DisplayIcon", 0, winreg.REG_SZ, main_exe_path)
-            winreg.SetValueEx(key, "InstallDate", 0, winreg.REG_SZ, datetime.now().strftime("%Y%m%d"))
-            winreg.SetValueEx(key, "EstimatedSize", 0, winreg.REG_DWORD, estimated_size_kb)
-            winreg.SetValueEx(key, "NoModify", 0, winreg.REG_DWORD, 1)
-            winreg.SetValueEx(key, "NoRepair", 0, winreg.REG_DWORD, 1)
+        #
+        # winreg.CreateKey() 一呼叫就會立刻建立機碼，後面 11 個 SetValueEx
+        # 是對同一個已存在機碼逐一寫值——如果中途某一個失敗（例如磁碟/登錄表
+        # 配額問題），呼叫端的 registry_entry_created 旗標永遠不會被設成
+        # True（因為這個函式沒有正常 return），導致 _rollback() 不知道要
+        # 清掉這個只寫了一半的機碼，留下永久的孤兒登錄表項目。這裡用
+        # try/except 保證：要嘛完整 11 個值都寫成功，要嘛什麼都不留下。
+        try:
+            with winreg.CreateKey(hive, reg_path) as key:
+                winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, self.app_name)
+                winreg.SetValueEx(key, "UninstallString", 0, winreg.REG_SZ, f'"{uninstall_exe}"')
+                # QuietUninstallString：Windows「設定 > 已安裝的應用程式」偵測到這個欄位時，
+                # 會優先用它做靜默解除安裝（例如企業用 MDM/群組原則批次移除），
+                # 沒有這個欄位的話，系統只能呼叫一般的 UninstallString，會跳出確認視窗。
+                winreg.SetValueEx(key, "QuietUninstallString", 0, winreg.REG_SZ, f'"{uninstall_exe}" --silent')
+                winreg.SetValueEx(key, "InstallLocation", 0, winreg.REG_SZ, self.selected_path)
+                winreg.SetValueEx(key, "Publisher", 0, winreg.REG_SZ, self.publisher)
+                winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, self.version)
+                winreg.SetValueEx(key, "DisplayIcon", 0, winreg.REG_SZ, main_exe_path)
+                winreg.SetValueEx(key, "InstallDate", 0, winreg.REG_SZ, datetime.now().strftime("%Y%m%d"))
+                winreg.SetValueEx(key, "EstimatedSize", 0, winreg.REG_DWORD, estimated_size_kb)
+                winreg.SetValueEx(key, "NoModify", 0, winreg.REG_DWORD, 1)
+                winreg.SetValueEx(key, "NoRepair", 0, winreg.REG_DWORD, 1)
+        except Exception:
+            try:
+                winreg.DeleteKey(hive, reg_path)
+            except Exception:
+                pass
+            raise
 
     def _create_shortcut(self, desktop=False, log=None):
         """建立開始功能表或桌面捷徑（依賴 pywin32，未安裝時靜默略過）。
@@ -1042,20 +1195,32 @@ class InstallerAPI:
         # 不吞例外：理由同上，讓 PATH 寫入失敗時整個安裝流程失敗回滾。
         key = winreg.OpenKey(hive, sub_key, 0, winreg.KEY_ALL_ACCESS)
         try:
-            current, reg_type = winreg.QueryValueEx(key, "Path")
-        except FileNotFoundError:
-            current, reg_type = "", winreg.REG_EXPAND_SZ
-        parts = [p for p in current.split(";") if p]
-        if not any(os.path.normcase(p) == os.path.normcase(target_dir) for p in parts):
-            parts.append(target_dir)
-            winreg.SetValueEx(key, "Path", 0, reg_type, ";".join(parts))
-        winreg.CloseKey(key)
+            try:
+                current, reg_type = winreg.QueryValueEx(key, "Path")
+            except FileNotFoundError:
+                current, reg_type = "", winreg.REG_EXPAND_SZ
+            parts = [p for p in current.split(";") if p]
+            if not any(os.path.normcase(p) == os.path.normcase(target_dir) for p in parts):
+                parts.append(target_dir)
+                winreg.SetValueEx(key, "Path", 0, reg_type, ";".join(parts))
+        finally:
+            winreg.CloseKey(key)
 
-        HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG = 0xFFFF, 0x1A, 0x0002
-        result = ctypes.c_long()
-        ctypes.windll.user32.SendMessageTimeoutW(
-            HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment", SMTO_ABORTIFHUNG, 5000, ctypes.byref(result)
-        )
+        # 真實抓到的問題（B11）：上面 SetValueEx 那一步已經真的把值寫進
+        # 登錄表了——這個廣播呼叫只是「通知其他視窗環境變數變了」的錦上
+        # 添花，不是「PATH 有沒有寫入」的一部分。原本失敗會讓整個函式
+        # 往外拋例外，導致呼叫端拿到的 path_directory 停在空字串，
+        # _rollback() 因此誤判成「PATH 根本沒寫入」而略過移除，即使
+        # 登錄表其實已經被改了，回滾後留下裝到一半的安裝路徑殘留在 PATH
+        # 裡。改成 best-effort：失敗只吞掉，不影響 target_dir 的回傳。
+        try:
+            HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG = 0xFFFF, 0x1A, 0x0002
+            result = ctypes.c_long()
+            ctypes.windll.user32.SendMessageTimeoutW(
+                HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment", SMTO_ABORTIFHUNG, 5000, ctypes.byref(result)
+            )
+        except Exception:
+            pass
         return target_dir
 
     # ------------------------------------------------------------------
@@ -1112,20 +1277,39 @@ class InstallerAPI:
 
     def _rollback(self, copied_rel_paths, log=None, *,
                   registry_entry_created=False, shortcuts_created=None,
-                  file_associations_registered=False, path_directory=None):
+                  file_associations_registered=False, path_directory=None,
+                  windows_service_name="", scheduled_task_name="",
+                  pre_existing_rel_paths=None):
         """安裝失敗時的回滾：把這次安裝已經寫入的東西清掉，盡量讓系統回到
         安裝前的乾淨狀態。只清掉『這次安裝這一輪自己寫入的部分』，不會動到
         selected_path（或 local_appdata_files 落地的 _local_appdata_root()）
         底下其他既有內容（例如使用者選了一個已經有東西的資料夾）。
 
         真實抓到的缺口：原本只清複製出去的檔案，但安裝流程後段還會依序寫入
-        解除安裝登錄表項目/捷徑/檔案關聯/PATH——這幾步任何一步後面的步驟
-        失敗，前面已經成功寫入的部分完全不會被回滾。這裡依「後寫的先復原」
-        順序（跟安裝時 _register_uninstall_entry → _create_shortcut →
-        file_assoc.register → _add_to_path_env 的順序相反）補上這四類。
+        解除安裝登錄表項目/捷徑/檔案關聯/Windows 服務/排程工作/PATH——這幾步
+        任何一步後面的步驟失敗，前面已經成功寫入的部分完全不會被回滾。這裡
+        依「後寫的先復原」順序（跟安裝時 _register_uninstall_entry →
+        _create_shortcut → file_assoc.register → windows_service.create_service
+        → scheduled_task.create_scheduled_task → _add_to_path_env 的順序相反）
+        補上這六類。
+
+        windows_service_name/scheduled_task_name 尤其重要：這兩項成功建立後
+        完全沒有寫進任何 manifest（安裝在這裡失敗時，manifest 根本還沒寫），
+        uninstall.py 永遠不會知道它們存在，是唯一還能清掉它們的地方。
+
+        pre_existing_rel_paths：真實抓到的問題（B7）——這個文件字串本身
+        宣稱「不會動到 selected_path 底下其他既有內容」，但 copied_rel_paths
+        記錄的是「這次安裝複製過的檔案」，不是「這次安裝新建立的檔案」。
+        使用者選了一個已經有同名檔案的資料夾時，那個檔案會被複製覆蓋、
+        一樣記進 copied_rel_paths，安裝失敗回滾時原本會被整個刪掉——
+        使用者原本的檔案就這樣憑空消失，而不是「至少維持覆蓋後的內容」
+        這種可以接受的次佳結果。這裡列出的相對路徑一律跳過刪除。
         """
+        pre_existing_rel_paths = pre_existing_rel_paths or set()
         removed = 0
         for rel in copied_rel_paths:
+            if rel in pre_existing_rel_paths:
+                continue
             try:
                 path = self._resolve_installed_path(rel)
                 if os.path.exists(path):
@@ -1141,8 +1325,12 @@ class InstallerAPI:
 
         if path_directory:
             system_entries.remove_from_path(path_directory, self.no_admin_install)
+        if scheduled_task_name:
+            scheduled_task.remove_scheduled_task(scheduled_task_name)
+        if windows_service_name:
+            windows_service.remove_service(windows_service_name)
         if file_associations_registered:
-            file_assoc.unregister(self.file_associations)
+            file_assoc.unregister(self.file_associations, no_admin_install=self.no_admin_install)
         for desktop in (shortcuts_created or []):
             system_entries.remove_shortcut(self.app_name, desktop=desktop, no_admin_install=self.no_admin_install)
         if registry_entry_created:
@@ -1172,10 +1360,63 @@ class InstallerAPI:
         shortcuts_created = []
         file_associations_registered = False
         path_directory = None
+        windows_service_name = ""
+        scheduled_task_name = ""
 
         def log(msg):
             log_lines.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
+        try:
+            return self._trigger_installation_impl_inner(
+                create_desktop_shortcut, skip_process_check, log_lines, log,
+                copied_rel_paths, current_copy_target,
+                registry_entry_created, shortcuts_created, file_associations_registered,
+                path_directory, windows_service_name, scheduled_task_name,
+            )
+        finally:
+            # 真實抓到的 bug（F24）：這份 log 原本只在安裝完全成功那條路徑
+            # 才會寫出，十幾個提早失敗的 return 分支完全沒有寫——偏偏失敗
+            # 時的診斷資訊才是這份 log 真正有用的時候，這支 exe 是
+            # --noconsole 編譯的，使用者/事後排查完全沒有其他管道看到這些
+            # 訊息。改成不管從哪個出口離開都會嘗試寫一份：優先寫進
+            # selected_path（安裝成功、或失敗但目錄已經建立時，跟使用者
+            # 直覺會去找的位置一致），selected_path 還不存在（或寫不進去、
+            # 或被 _rollback() 清空刪掉）時 fallback 到 %TEMP%（跟
+            # run_silent_install() 既有的 fallback 慣例一致）。
+            content = "\n".join(log_lines)
+            wrote = False
+            try:
+                if os.path.isdir(self.selected_path):
+                    with open(os.path.join(self.selected_path, "install_log.txt"), "w", encoding="utf-8") as f:
+                        f.write(content)
+                    wrote = True
+            except Exception:
+                pass
+            if not wrote:
+                try:
+                    fallback_path = os.path.join(tempfile.gettempdir(), f"{self.app_name}_install_log.txt")
+                    with open(fallback_path, "w", encoding="utf-8") as f:
+                        f.write(content)
+                except Exception:
+                    pass
+
+    def _trigger_installation_impl_inner(
+        self, create_desktop_shortcut, skip_process_check, log_lines, log,
+        copied_rel_paths, current_copy_target,
+        registry_entry_created, shortcuts_created, file_associations_registered,
+        path_directory, windows_service_name, scheduled_task_name,
+    ):
+        # 真實抓到的問題（B17）：服務/排程工作建立失敗原本只寫進
+        # install_log.txt——這支 exe 是 --noconsole 編譯的，安裝介面上
+        # 完全不會顯示任何提示，使用者會以為打包時設定的服務已經正常
+        # 裝好，直到某天發現它根本不存在才會察覺。收集成結構化的清單，
+        # 隨成功結果一起回傳，讓呼叫端（GUI）有機會顯示給使用者看，不能
+        # 只藏在使用者通常不會去看的 log 檔裡。
+        warnings = []
+        # 真實抓到的問題（B7）：見 _rollback() 的 pre_existing_rel_paths
+        # 說明——提前宣告，讓下面兩個 except 區塊不管是複製迴圈開始前還是
+        # 開始後才失敗，都能安全參照這個變數。
+        pre_existing_rel_paths = set()
         try:
             src_dir = get_resource_path("app_contents")
             if not os.path.exists(src_dir):
@@ -1192,12 +1433,6 @@ class InstallerAPI:
                                 f"目標磁碟剩餘 {free // (1024 * 1024)} MB。",
                 }
             log(f"磁碟空間檢查通過（需要約 {required // (1024 * 1024)} MB）")
-
-            if self.create_restore_point_before_install:
-                if restore_point.create_restore_point(f"安裝 {self.app_name} {self.version}"):
-                    log("已建立系統還原點")
-                else:
-                    log("[警告] 建立系統還原點失敗（不影響安裝結果）")
 
             # 主程式執行中偵測：回傳獨立於一般 "error" 的狀態值，讓前端可以
             # 跳出「關閉程式並繼續安裝／取消」的互動選擇，而不是直接判定
@@ -1230,6 +1465,24 @@ class InstallerAPI:
                 os.makedirs(self.selected_path)
             log(f"安裝目標路徑: {self.selected_path}")
 
+            # 真實抓到的問題（B15）：系統還原點建立原本在磁碟空間檢查之後
+            # 就立刻執行，發生在「主程式執行中」「舊版本移除失敗」這幾個
+            # 仍然會整個中止安裝的檢查之前——使用者被要求先關閉程式再重試
+            # 時，已經憑空多了一個其實對應不到任何真實安裝的還原點，白白
+            # 消耗還原點的儲存空間（VSS 儲存是有限的環狀空間，可能因此
+            # 擠掉一個真正有用的舊還原點）。改成延後到這裡：這些還會中止
+            # 安裝的檢查都已經通過、真正要開始動手（安裝目錄已建立）之前。
+            if self.create_restore_point_before_install:
+                # 措辭刻意不寫「已建立系統還原點」：Windows 8 之後如果
+                # 24 小時內已經建立過還原點，SRSetRestorePoint 會略過真的
+                # 建立新的一份，但仍然回傳成功（見 restore_point.py 的
+                # 已知限制說明）——這裡的回傳值只能保證「呼叫成功、系統上
+                # 有近期可用的還原點」，不能保證這次真的新建了一個。
+                if restore_point.create_restore_point(f"安裝 {self.app_name} {self.version}"):
+                    log("系統還原點已就緒（可能是新建立的，也可能是 24 小時內的既有還原點）")
+                else:
+                    log("[警告] 建立系統還原點失敗（不影響安裝結果）")
+
             # pre-install 腳本：檔案還沒複製之前執行，失敗視為安裝失敗中止——
             # 主程式可能依賴這個腳本先做的事（例如停用某個會鎖住待複製檔案
             # 的服務），腳本沒成功執行完，後面的複製流程不該假裝沒事繼續跑。
@@ -1259,7 +1512,17 @@ class InstallerAPI:
                 src_f = os.path.join(src_dir, rel)
                 dest_f = self._resolve_installed_path(rel)
                 os.makedirs(os.path.dirname(dest_f), exist_ok=True)
+                if os.path.exists(dest_f):
+                    pre_existing_rel_paths.add(rel)
                 current_copy_target = dest_f
+                # 真實抓到的問題（B10）：rel 原本要等 shutil.copy2() 完全
+                # 成功、完整性驗證都跑完才會被記進 copied_rel_paths——
+                # copy2() 如果中途拋例外（例如磁碟滿了）但已經在目的地
+                # 寫入部分內容，這個部分檔案就不會被記錄，_rollback()
+                # 也就不會嘗試清掉它，留下孤兒殘留檔案。改成在複製之前
+                # 就先記錄；_rollback() 本來就用 os.path.exists() 判斷要
+                # 不要刪，複製根本沒開始寫的情況一樣安全（no-op）。
+                copied_rel_paths.append(rel)
                 shutil.copy2(src_f, dest_f)
 
                 # 完整性驗證：先比大小（快），大小一致才進一步比 checksum（較慢但更可靠，
@@ -1268,7 +1531,6 @@ class InstallerAPI:
                     integrity_errors.append(rel)
                 elif _file_checksum(src_f) != _file_checksum(dest_f):
                     integrity_errors.append(rel)
-                copied_rel_paths.append(rel)
 
                 percent = int((i + 1) / total * 80)  # 複製階段佔整體流程的 0-80%
                 if percent != last_reported:
@@ -1277,7 +1539,7 @@ class InstallerAPI:
 
             if integrity_errors:
                 log(f"完整性驗證失敗的檔案: {integrity_errors}")
-                self._rollback(copied_rel_paths, log)
+                self._rollback(copied_rel_paths, log, pre_existing_rel_paths=pre_existing_rel_paths)
                 self._restore_upgrade_backup()
                 return {
                     "status": "error",
@@ -1335,12 +1597,14 @@ class InstallerAPI:
                 main_exe_path = self._resolve_installed_path(self.main_exe)
                 icon_refs = self._resolve_doc_icon_refs(main_exe_path)
                 try:
-                    file_assoc.register(self.file_associations, main_exe_path, self.app_name, icon_refs, log=log)
+                    file_assoc.register(
+                        self.file_associations, main_exe_path, self.app_name, icon_refs, log=log,
+                        no_admin_install=self.no_admin_install,
+                    )
                     file_associations_registered = True
                 except Exception as e:
                     raise RuntimeError(f"檔案關聯註冊失敗：{e}") from e
                 log(f"已註冊檔案關聯: {self.file_associations}")
-            windows_service_name = ""
             if self.windows_service.get("service_name") and self.windows_service.get("exe_relative_path"):
                 service_exe_path = self._resolve_installed_path(self.windows_service["exe_relative_path"])
                 created = windows_service.create_service(
@@ -1352,9 +1616,10 @@ class InstallerAPI:
                     windows_service_name = self.windows_service["service_name"]
                     log(f"已建立 Windows 服務: {windows_service_name}")
                 else:
-                    log(f"[警告] 建立 Windows 服務 {self.windows_service['service_name']} 失敗（不影響安裝結果）")
+                    msg = f"建立 Windows 服務「{self.windows_service['service_name']}」失敗（不影響安裝結果）"
+                    log(f"[警告] {msg}")
+                    warnings.append(msg)
 
-            scheduled_task_name = ""
             if self.scheduled_task.get("task_name") and self.scheduled_task.get("exe_relative_path"):
                 task_exe_path = self._resolve_installed_path(self.scheduled_task["exe_relative_path"])
                 created = scheduled_task.create_scheduled_task(
@@ -1365,7 +1630,9 @@ class InstallerAPI:
                     scheduled_task_name = self.scheduled_task["task_name"]
                     log(f"已建立排程工作: {scheduled_task_name}")
                 else:
-                    log(f"[警告] 建立排程工作 {self.scheduled_task['task_name']} 失敗（不影響安裝結果）")
+                    msg = f"建立排程工作「{self.scheduled_task['task_name']}」失敗（不影響安裝結果）"
+                    log(f"[警告] {msg}")
+                    warnings.append(msg)
 
             path_directory = ""
             if self.add_to_path:
@@ -1411,20 +1678,25 @@ class InstallerAPI:
             with open(os.path.join(self.selected_path, "install_manifest.json"), "w", encoding="utf-8") as f:
                 json.dump(manifest, f, ensure_ascii=False, indent=2)
 
-            with open(os.path.join(self.selected_path, "install_log.txt"), "w", encoding="utf-8") as f:
-                f.write("\n".join(log_lines))
+            # install_log.txt 由外層 _trigger_installation_impl() 的 finally
+            # 統一寫出（見該處說明），這裡不用再寫一次。
 
             self._report_progress(100, "安裝完成")
             self._discard_upgrade_backup()
 
             main_exe_path = self._resolve_installed_path(self.main_exe) if self.main_exe else ""
-            return {"status": "success", "message": "安裝成功", "main_exe_path": main_exe_path}
+            return {
+                "status": "success", "message": "安裝成功", "main_exe_path": main_exe_path,
+                "warnings": warnings,
+            }
 
         except OSError as e:
             self._rollback(
                 copied_rel_paths, log,
                 registry_entry_created=registry_entry_created, shortcuts_created=shortcuts_created,
                 file_associations_registered=file_associations_registered, path_directory=path_directory,
+                windows_service_name=windows_service_name, scheduled_task_name=scheduled_task_name,
+                pre_existing_rel_paths=pre_existing_rel_paths,
             )
             self._restore_upgrade_backup()
             message = self._describe_install_os_error(e, current_copy_target)
@@ -1442,6 +1714,8 @@ class InstallerAPI:
                 copied_rel_paths, log,
                 registry_entry_created=registry_entry_created, shortcuts_created=shortcuts_created,
                 file_associations_registered=file_associations_registered, path_directory=path_directory,
+                windows_service_name=windows_service_name, scheduled_task_name=scheduled_task_name,
+                pre_existing_rel_paths=pre_existing_rel_paths,
             )
             self._restore_upgrade_backup()
             return {"status": "error", "message": f"發生未知錯誤：\n{str(e)}"}

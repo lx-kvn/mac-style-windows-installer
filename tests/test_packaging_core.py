@@ -549,6 +549,96 @@ class TestValidateAndBuildPackData(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(pack_data["bundle_dependencies"], ["vcredist_x64"])
 
+    def test_windows_service_missing_exe_relative_path_is_rejected(self):
+        """真實抓到的問題：windows_service 完全沒有驗證——勾了「安裝為
+        Windows 服務」、填了服務名稱，但主程式下拉選單剛好還沒選（或
+        app_dir 沒有任何 .exe 時的預設空白選項），這種半填的設定原本會
+        直接打包成功，裝到使用者機器上時 installer_core.py 的條件判斷
+        （service_name 跟 exe_relative_path 都要有才會建立）悄悄跳過整個
+        服務建立，沒有任何錯誤訊息、沒有任何警告，使用者以為裝了服務，
+        其實完全沒有。"""
+        _, error = self._validate(self._base_data(windows_service={"service_name": "MySvc"}))
+        self.assertIsNotNone(error)
+
+    def test_windows_service_exe_not_in_app_dir_is_rejected(self):
+        """真實抓到的問題：exe_relative_path 原本完全沒有存在性檢查，
+        跟 main_exe/path_target_exe/pre_install_script 這些同類欄位不
+        一致——sc.exe 不會驗證 binPath 對不對，打錯字會註冊一個永久
+        壞掉、開機就報錯的服務，而且是靜默失敗（installer_core.py 只記
+        警告 log，不會讓安裝回報失敗）。"""
+        _, error = self._validate(self._base_data(windows_service={
+            "service_name": "MySvc", "exe_relative_path": "does_not_exist.exe",
+        }))
+        self.assertIsNotNone(error)
+
+    def test_windows_service_invalid_start_type_is_rejected(self):
+        _, error = self._validate(self._base_data(windows_service={
+            "service_name": "MySvc", "exe_relative_path": "main.exe", "start_type": "whenever",
+        }))
+        self.assertIsNotNone(error)
+
+    def test_valid_windows_service_passes_through(self):
+        pack_data, error = self._validate(self._base_data(windows_service={
+            "service_name": "MySvc", "exe_relative_path": "main.exe", "start_type": "demand",
+        }))
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["windows_service"]["service_name"], "MySvc")
+
+    def test_empty_windows_service_is_valid(self):
+        pack_data, error = self._validate(self._base_data(windows_service={}))
+        self.assertIsNone(error)
+
+    def test_scheduled_task_missing_exe_relative_path_is_rejected(self):
+        _, error = self._validate(self._base_data(scheduled_task={"task_name": "MyTask"}))
+        self.assertIsNotNone(error)
+
+    def test_scheduled_task_exe_not_in_app_dir_is_rejected(self):
+        _, error = self._validate(self._base_data(scheduled_task={
+            "task_name": "MyTask", "exe_relative_path": "does_not_exist.exe",
+        }))
+        self.assertIsNotNone(error)
+
+    def test_valid_scheduled_task_passes_through(self):
+        pack_data, error = self._validate(self._base_data(scheduled_task={
+            "task_name": "MyTask", "exe_relative_path": "main.exe", "trigger": "onlogon",
+        }))
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["scheduled_task"]["task_name"], "MyTask")
+
+    def test_dependencies_min_version_for_disabled_dependency_is_rejected(self):
+        """真實抓到的問題：dependencies_min_version 的 key 完全沒有跟
+        dependencies 清單交叉比對——填了 vcredist_x64 的最低版本，卻沒有
+        在上面勾選啟用 vcredist_x64 偵測，這個最低版本設定形同無效，
+        跟 bundle_dependencies 已經在做的交叉驗證是同一個道理。"""
+        _, error = self._validate(self._base_data(
+            dependencies=[], dependencies_min_version={"vcredist_x64": "14.38"},
+        ))
+        self.assertIsNotNone(error)
+
+    def test_dependencies_min_version_for_custom_dependency_key_is_rejected(self):
+        """真實抓到的問題：dependencies_min_version 只有內建的
+        vcredist_x64/dotnet_desktop 兩個 key 會被 installer_core.py 的
+        _build_dependency_checkers() 實際套用；custom_dependencies 的
+        版本比較走的是各自 registry_check.min_version 那個獨立欄位（見
+        F6）。如果把 custom_dependencies 的 key 填進 dependencies_min_version，
+        會被靜默忽略，使用者以為設定生效了，其實完全沒有。"""
+        _, error = self._validate(self._base_data(
+            dependencies=["my_dep"],
+            custom_dependencies=[{
+                "key": "my_dep", "display_name": "X", "download_url": "https://example.test/x.exe",
+                "registry_check": {"path": "Software\\X"},
+            }],
+            dependencies_min_version={"my_dep": "1.0"},
+        ))
+        self.assertIsNotNone(error)
+
+    def test_valid_dependencies_min_version_passes_through(self):
+        pack_data, error = self._validate(self._base_data(
+            dependencies=["vcredist_x64"], dependencies_min_version={"vcredist_x64": "14.38"},
+        ))
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["dependencies_min_version"], {"vcredist_x64": "14.38"})
+
     def test_signing_without_cert_file_is_rejected(self):
         _, error = self._validate(self._base_data(signing={
             "cert_path": "C:\\does\\not\\exist.pfx", "cert_password_env": "MY_CERT_PW",
@@ -679,6 +769,90 @@ class TestValidateDependencyPolicy(unittest.TestCase):
         )
         self.assertIsNone(error)
         self.assertEqual(bundle, ["vcredist_x64"])
+
+    def test_non_https_download_url_is_rejected(self):
+        """真實抓到的安全性問題：download_url 原本沒有限制協定，http:// 的
+        自訂相依元件會被安裝端下載後直接執行——中間人可以竄改成任意惡意
+        程式，這支安裝程式預設是 --uac-admin 編譯的，等於是遠端程式碼
+        執行。打包階段就要擋掉，不要等到使用者的機器上才出事。"""
+        custom, bundle, error = packaging_core._validate_dependency_policy(
+            [], [{
+                "key": "my_dep", "display_name": "X", "download_url": "http://example.test/x.exe",
+                "registry_check": {"path": "SOFTWARE\\X"},
+            }], []
+        )
+        self.assertIsNone(custom)
+        self.assertIsNotNone(error)
+
+    def test_https_download_url_is_accepted(self):
+        custom, bundle, error = packaging_core._validate_dependency_policy(
+            [], [{
+                "key": "my_dep", "display_name": "X", "download_url": "https://example.test/x.exe",
+                "registry_check": {"path": "SOFTWARE\\X"},
+            }], []
+        )
+        self.assertIsNone(error)
+
+    def test_sha256_is_passed_through_and_normalized_to_lowercase(self):
+        custom, bundle, error = packaging_core._validate_dependency_policy(
+            [], [{
+                "key": "my_dep", "display_name": "X", "download_url": "https://example.test/x.exe",
+                "registry_check": {"path": "SOFTWARE\\X"},
+                "sha256": "ABCDEF0123456789" * 4,
+            }], []
+        )
+        self.assertIsNone(error)
+        self.assertEqual(custom[0]["sha256"], "abcdef0123456789" * 4)
+
+    def test_sha256_with_invalid_format_is_rejected(self):
+        custom, bundle, error = packaging_core._validate_dependency_policy(
+            [], [{
+                "key": "my_dep", "display_name": "X", "download_url": "https://example.test/x.exe",
+                "registry_check": {"path": "SOFTWARE\\X"},
+                "sha256": "not-a-valid-hash",
+            }], []
+        )
+        self.assertIsNone(custom)
+        self.assertIsNotNone(error)
+
+    def test_min_version_is_passed_through_registry_check(self):
+        """真實抓到的 bug：這裡原本用白名單（hive/path/value_name/expected
+        四個鍵）重建 registry_check，min_version/enum_subkeys 兩個欄位
+        被悄悄丟掉——installer_core._make_custom_dependency_checker() 明明
+        已經支援讀 min_version 改走版本比較，GUI 表單填的最低版本卻永遠
+        傳不到那裡，形同無效欄位（更糟的是使用者填了 min_version 卻沒填
+        expected，會退回 exact-match 語意，變成 value==None 恆為 False，
+        這個相依元件在任何機器上都會被誤判成未安裝）。"""
+        custom, bundle, error = packaging_core._validate_dependency_policy(
+            [], [{
+                "key": "my_dep", "display_name": "X", "download_url": "https://example.test/x.exe",
+                "registry_check": {"path": "SOFTWARE\\X", "min_version": "1.2.3", "enum_subkeys": True},
+            }], []
+        )
+        self.assertIsNone(error)
+        self.assertEqual(custom[0]["registry_check"]["min_version"], "1.2.3")
+        self.assertTrue(custom[0]["registry_check"]["enum_subkeys"])
+
+    def test_min_version_omitted_defaults_to_none(self):
+        custom, bundle, error = packaging_core._validate_dependency_policy(
+            [], [{
+                "key": "my_dep", "display_name": "X", "download_url": "https://example.test/x.exe",
+                "registry_check": {"path": "SOFTWARE\\X"},
+            }], []
+        )
+        self.assertIsNone(error)
+        self.assertIsNone(custom[0]["registry_check"]["min_version"])
+        self.assertFalse(custom[0]["registry_check"]["enum_subkeys"])
+
+    def test_sha256_omitted_defaults_to_none(self):
+        custom, bundle, error = packaging_core._validate_dependency_policy(
+            [], [{
+                "key": "my_dep", "display_name": "X", "download_url": "https://example.test/x.exe",
+                "registry_check": {"path": "SOFTWARE\\X"},
+            }], []
+        )
+        self.assertIsNone(error)
+        self.assertIsNone(custom[0]["sha256"])
 
 
 if __name__ == "__main__":

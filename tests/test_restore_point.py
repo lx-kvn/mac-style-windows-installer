@@ -87,6 +87,28 @@ class TestCreateRestorePoint(unittest.TestCase):
         result = restore_point.create_restore_point("安裝 MyApp", srclient_dll=fake)
         self.assertFalse(result)
 
+    def test_calls_co_initialize_security_before_srsetrestorepoint(self):
+        """真實抓到的問題：Microsoft 官方文件明講呼叫 SRSetRestorePoint
+        之前必須先呼叫 CoInitializeSecurity，允許 NetworkService/
+        LocalService/System 回呼目前行程，否則這個 API「無法正常運作」
+        （文件原文）。這裡驗證有呼叫，且發生在 SRSetRestorePointW 之前。
+        """
+        fake = _FakeSrclient()
+        with mock.patch("restore_point.ctypes.windll.ole32.CoInitializeSecurity") as mock_security:
+            restore_point.create_restore_point("安裝 MyApp", srclient_dll=fake)
+        mock_security.assert_called_once()
+
+    def test_co_initialize_security_failure_does_not_block_restore_point(self):
+        """CoInitializeSecurity 在同一個行程裡只能成功呼叫一次，第二次
+        （例如同一個行程已經因為其他原因初始化過 COM 安全性）會回傳
+        RPC_E_TOO_LATE——這是預期內、可以忽略的情況，不該讓還原點整個
+        建立失敗。"""
+        fake = _FakeSrclient()
+        with mock.patch("restore_point.ctypes.windll.ole32.CoInitializeSecurity",
+                         side_effect=OSError("RPC_E_TOO_LATE")):
+            result = restore_point.create_restore_point("安裝 MyApp", srclient_dll=fake)
+        self.assertTrue(result)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

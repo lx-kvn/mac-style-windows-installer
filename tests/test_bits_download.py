@@ -14,6 +14,32 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import bits_download
 
 
+class TestBgJobStateConstantsMatchMicrosoftSpec(unittest.TestCase):
+    """對照 Microsoft 官方文件的 BG_JOB_STATE enum（bits.h）逐一驗證，不跟
+    模組自己的常數比較——如果常數本身就寫錯，跟自己比對永遠不會發現。
+
+    https://learn.microsoft.com/en-us/windows/win32/api/bits/ne-bits-bg_job_state
+    QUEUED=0 CONNECTING=1 TRANSFERRING=2 SUSPENDED=3 ERROR=4
+    TRANSIENT_ERROR=5 TRANSFERRED=6 ACKNOWLEDGED=7 CANCELLED=8
+
+    真實抓到的 bug：這個模組原本把 TRANSFERRED/TRANSIENT_ERROR 兩個值對調，
+    導致下載成功被誤判為錯誤（取消掉已下載的內容，重新用 urllib 下載一次），
+    下載途中的暫時性錯誤反而被誤判為成功（執行一個被截斷的 .exe）。
+    """
+
+    def test_transferring_is_2(self):
+        self.assertEqual(bits_download._BG_JOB_STATE_TRANSFERRING, 2)
+
+    def test_error_is_4(self):
+        self.assertEqual(bits_download._BG_JOB_STATE_ERROR, 4)
+
+    def test_transient_error_is_5(self):
+        self.assertEqual(bits_download._BG_JOB_STATE_TRANSIENT_ERROR, 5)
+
+    def test_transferred_is_6(self):
+        self.assertEqual(bits_download._BG_JOB_STATE_TRANSFERRED, 6)
+
+
 class _FakeProgress:
     def __init__(self, transferred, total):
         self.BytesTransferred = transferred
@@ -115,6 +141,29 @@ class TestDownloadViaBits(unittest.TestCase):
         不拋例外中止呼叫端（呼叫端會退回原本的 urllib 下載）。"""
         result = bits_download.download_via_bits("https://example.test/vc.exe", "C:\\tmp\\vc.exe")
         self.assertIsInstance(result, bool)
+
+    def test_job_stuck_queued_forever_times_out_instead_of_hanging(self):
+        """真實抓到的 bug：輪詢迴圈原本是 while True，沒有任何時間上限——
+        一個卡在 QUEUED/SUSPENDED（例如網路完全斷線、BITS 服務被停用）的
+        job 會讓這個函式永遠不回傳，整個安裝流程的 UI 卡死、沒有任何退路。
+        它取代的 urllib 下載邏輯原本有 timeout=30，這裡不能倒退。"""
+        job = _FakeJob(states=[bits_download._BG_JOB_STATE_TRANSFERRING] * 100000)
+        bcm = _FakeBcm(job)
+        fake_now = [0.0]
+
+        def fake_monotonic():
+            fake_now[0] += 1.0
+            return fake_now[0]
+
+        with mock.patch("bits_download.time.sleep"), \
+             mock.patch("bits_download.time.monotonic", side_effect=fake_monotonic):
+            result = bits_download.download_via_bits(
+                "https://example.test/vc.exe", "C:\\tmp\\vc.exe",
+                bcm_factory=lambda: bcm, max_wait_seconds=30,
+            )
+
+        self.assertFalse(result)
+        self.assertTrue(job.cancelled)
 
 
 if __name__ == "__main__":

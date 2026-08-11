@@ -187,8 +187,8 @@ def build_one_exe(entry_script, output_name, icon_path=None, noconsole=True,
     try:
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         output = subprocess.check_output(
-            f'tasklist /FI "IMAGENAME eq {exe_name}" /NH',
-            shell=True, text=True, stderr=subprocess.DEVNULL, creationflags=creationflags,
+            ["tasklist", "/FI", f"IMAGENAME eq {exe_name}", "/NH"],
+            text=True, stderr=subprocess.DEVNULL, creationflags=creationflags,
         )
         if exe_name.lower() in output.lower():
             return False, (

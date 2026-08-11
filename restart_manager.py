@@ -54,7 +54,45 @@ class _RM_PROCESS_INFO(ctypes.Structure):
 
 
 def _load_rstrtmgr():
-    return ctypes.WinDLL("rstrtmgr")
+    """真實抓到的缺口：這是這個專案裡少數幾支直接呼叫 Windows API 的
+    ctypes 模組中，唯一沒有明確宣告 restype/argtypes 的一支——
+    CONTEXT.md 記錄過同一類問題真實發生過一次（explorer_lock_release.py
+    的 64-bit handle 截斷 bug），restore_point.py 也特別沿用這個既有
+    慣例。沒有明確宣告 argtypes 時，ctypes 只能用 Python 物件的預設轉換
+    規則猜測每個參數的型別，在 64-bit Windows 上傳遞指標（例如
+    RmStartSession 的 phSession 輸出參數）可能被錯誤解讀，導致呼叫看似
+    成功、資料卻是壞的，且不會拋出任何 Python 例外。型別對照
+    Rstrtmgr.h 的官方函式簽章。
+    """
+    dll = ctypes.WinDLL("rstrtmgr")
+
+    dll.RmStartSession.restype = wintypes.DWORD
+    dll.RmStartSession.argtypes = [
+        ctypes.POINTER(wintypes.DWORD), wintypes.DWORD, wintypes.LPWSTR,
+    ]
+
+    dll.RmRegisterResources.restype = wintypes.DWORD
+    dll.RmRegisterResources.argtypes = [
+        wintypes.DWORD, wintypes.UINT, ctypes.POINTER(ctypes.c_wchar_p),
+        wintypes.UINT, ctypes.c_void_p, wintypes.UINT, ctypes.POINTER(ctypes.c_wchar_p),
+    ]
+
+    dll.RmGetList.restype = wintypes.DWORD
+    dll.RmGetList.argtypes = [
+        wintypes.DWORD, ctypes.POINTER(wintypes.UINT), ctypes.POINTER(wintypes.UINT),
+        ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD),
+    ]
+
+    dll.RmEndSession.restype = wintypes.DWORD
+    dll.RmEndSession.argtypes = [wintypes.DWORD]
+
+    dll.RmShutdown.restype = wintypes.DWORD
+    dll.RmShutdown.argtypes = [wintypes.DWORD, ctypes.c_ulong, ctypes.c_void_p]
+
+    dll.RmRestart.restype = wintypes.DWORD
+    dll.RmRestart.argtypes = [wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p]
+
+    return dll
 
 
 def find_locking_processes(file_paths, rm_dll=None):

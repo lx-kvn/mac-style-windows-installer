@@ -21,6 +21,7 @@ class FakeWinReg:
     def __init__(self):
         self.store = {}
         self.fail_on_substring = None  # CreateKey/OpenKey 對到含這個子字串的路徑會丟例外
+        self.fail_on_value_name = None  # SetValueEx 寫到這個值名稱時丟例外，模擬寫到一半失敗
 
     def _maybe_fail(self, subkey):
         if self.fail_on_substring and self.fail_on_substring in subkey:
@@ -52,6 +53,8 @@ class FakeWinReg:
         del self.store[(hive, subkey)]
 
     def SetValueEx(self, key_ctx, name, reserved, value_type, value):
+        if self.fail_on_value_name and name == self.fail_on_value_name:
+            raise OSError(f"模擬寫入 {name} 時失敗")
         self.store[(key_ctx.hive, key_ctx.subkey)][name] = value
 
     def QueryValueEx(self, key_ctx, name):

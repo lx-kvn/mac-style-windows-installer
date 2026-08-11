@@ -67,6 +67,26 @@ class TestBuildOneExe(unittest.TestCase):
         self.assertIn("正在執行中", message)
         self.assertIsNone(exe_path)
 
+    def test_tasklist_check_does_not_use_shell(self):
+        """真實抓到的問題：這裡原本用 shell=True + 手動組成的命令列字串
+        呼叫 tasklist，是這個打包路徑裡唯一還在用 shell=True 的地方——
+        output_name 如果含 `"`/`&` 這類 shell 特殊字元（雖然這裡是開發者
+        自己打包時填的，不是外部輸入，風險低），會被當成 shell 語法解析，
+        而不是單純的檔名。tasklist 本身接受 argv 清單就好，不需要
+        shell=True，改成跟這個專案其他 subprocess 呼叫一致的寫法。"""
+        captured = {}
+
+        def fake_check_output(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["shell"] = kwargs.get("shell", False)
+            return ""
+
+        with mock.patch("build_config_tool.subprocess.check_output", side_effect=fake_check_output):
+            bct.build_one_exe("entry.py", "MyTool")
+
+        self.assertFalse(captured["shell"], "不應該再用 shell=True")
+        self.assertIsInstance(captured["cmd"], list, "改用 argv 清單，不是手動組成的命令列字串")
+
     def test_success_path_builds_command_and_returns_exe_path(self):
         captured_cmd = {}
 

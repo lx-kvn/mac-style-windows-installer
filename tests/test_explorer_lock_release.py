@@ -214,7 +214,15 @@ class TestReleaseLockingProcessesRestartManagerLayer(unittest.TestCase):
         session.shutdown.return_value = shutdown_result
         return session
 
-    def test_rm_shutdown_resolves_lock_skips_forced_shell_restart(self):
+    def test_rm_shutdown_resolves_lock_defers_restart_instead_of_calling_immediately(self):
+        """真實抓到的 bug：session.restart() 原本在這裡立刻呼叫，發生在
+        呼叫端真正做完檔案操作之前——剛被 RM 優雅關閉的應用程式一旦被
+        喚醒，有可能在檔案操作完成前搶先重新開啟/鎖住同一個檔案，重演
+        AutoRestartShell 那段機制原本要避免的競態（見既有的強制關殼層
+        邏輯：restore_after_lock_release() 也是在呼叫端做完檔案操作後
+        才補重啟 explorer.exe，不是在這裡提前做）。改成把這個 session
+        原封不動放進回傳的狀態，交給 restore_after_lock_release() 在
+        真正的時機點才觸發 restart()。"""
         processes = [{"pid": 222, "name": "Windows 檔案總管"}]
         session = self._make_session()
         find_calls = []
@@ -233,10 +241,10 @@ class TestReleaseLockingProcessesRestartManagerLayer(unittest.TestCase):
             )
 
         session.shutdown.assert_called_once()
-        session.restart.assert_called_once()
-        session.close.assert_called_once()
+        session.restart.assert_not_called()
+        session.close.assert_not_called()
         mock_kernel["OpenProcess"].assert_not_called()
-        self.assertIsNone(state)
+        self.assertEqual(state, {"restart_manager_session": session})
         self.assertEqual(self.fake_reg.hkcu(elr._WINLOGON_KEY)["AutoRestartShell"], "1")
 
     def test_rm_shutdown_does_not_resolve_lock_falls_back_to_force_kill(self):
@@ -467,6 +475,16 @@ class TestRestoreAfterLockRelease(unittest.TestCase):
                 {"previous_auto_restart_shell": None}, registry=self.fake_reg,
             )
         self.assertEqual(self.fake_reg.hkcu(elr._WINLOGON_KEY)["AutoRestartShell"], "1")
+
+    def test_restart_manager_session_state_calls_restart_and_closes_session(self):
+        """對應 release_locking_processes() 延後呼叫的那一半：收到帶
+        restart_manager_session 的狀態時，呼叫這個 session 的 restart()
+        喚醒剛才優雅關閉的應用程式，用完後關閉 session，不去動
+        explorer.exe/AutoRestartShell（那是另一條路徑的狀態形狀）。"""
+        session = mock.Mock()
+        elr.restore_after_lock_release({"restart_manager_session": session}, registry=self.fake_reg)
+        session.restart.assert_called_once()
+        session.close.assert_called_once()
 
     def test_swallows_popen_failure(self):
         with mock.patch("explorer_lock_release.subprocess.Popen", side_effect=RuntimeError("模擬失敗")):

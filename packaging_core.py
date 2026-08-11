@@ -18,6 +18,7 @@ pywebview 也能跑。比照這個專案既有「拆出共用深模組」的慣�
 
 import sys
 import os
+import re
 import shutil
 import subprocess
 
@@ -265,21 +266,49 @@ def _validate_dependency_policy(dependencies, custom_dependencies_raw, bundle_de
         registry_check = entry.get("registry_check", {}) or {}
         if not key or not display_name or not download_url or not registry_check.get("path"):
             return None, None, "欄位驗證失敗：<br>custom_dependencies 裡每一筆都必須填 key、display_name、download_url、registry_check.path。"
+        # 真實抓到的安全性問題：download_url 原本沒有限制協定，http:// 的
+        # 相依元件會被安裝端下載後直接執行——中間人可以竄改成任意惡意
+        # 程式，這支安裝程式預設是 --uac-admin 編譯的，等於是遠端程式碼
+        # 執行。打包階段就擋掉，不要等使用者的機器上才出事。
+        if not download_url.lower().startswith("https://"):
+            return None, None, f"欄位驗證失敗：<br>custom_dependencies 的「{key}」download_url 必須是 https:// 開頭，不接受未加密的下載連結。"
         if key in built_in_dependency_keys:
             return None, None, f"欄位驗證失敗：<br>custom_dependencies 的 key「{key}」跟內建的相依元件撞名，請改用其他名稱。"
         if key in seen_custom_keys:
             return None, None, f"欄位驗證失敗：<br>custom_dependencies 的 key「{key}」重複了。"
         seen_custom_keys.add(key)
+
+        # sha256（選填）：下載完成後、執行前用來驗證檔案完整性/沒被竄改，
+        # 見 installer_core.install_dependency()。格式必須是 64 位十六進位
+        # 字元（SHA-256 摘要長度），統一正規化成小寫，比對時不用擔心大小寫。
+        sha256_raw = entry.get("sha256")
+        sha256 = None
+        if sha256_raw:
+            sha256_candidate = str(sha256_raw).strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{64}", sha256_candidate):
+                return None, None, f"欄位驗證失敗：<br>custom_dependencies 的「{key}」sha256 格式不正確，必須是 64 位十六進位字元（SHA-256 摘要）。"
+            sha256 = sha256_candidate
+
         custom_dependencies.append({
             "key": key,
             "display_name": display_name,
             "download_url": download_url,
             "silent_args": list(entry.get("silent_args", []) or []),
+            "sha256": sha256,
             "registry_check": {
                 "hive": registry_check.get("hive", "HKLM"),
                 "path": registry_check.get("path", ""),
                 "value_name": registry_check.get("value_name"),
                 "expected": registry_check.get("expected"),
+                # 真實抓到的 bug：這裡原本只挑 hive/path/value_name/expected
+                # 四個鍵重建 registry_check，min_version/enum_subkeys 被悄悄
+                # 丟掉——installer_core._make_custom_dependency_checker() 明明
+                # 支援讀 min_version 改走版本比較，這兩個欄位傳不到那裡就
+                # 形同無效，而且比單純無效更糟：使用者填了 min_version 卻
+                # 沒填 expected，會退回 exact-match 語意，變成 value==None
+                # 恆為 False，這個相依元件會在任何機器上都被誤判成未安裝。
+                "min_version": registry_check.get("min_version"),
+                "enum_subkeys": bool(registry_check.get("enum_subkeys", False)),
             },
         })
 
@@ -337,6 +366,10 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     custom_dependencies_raw = data.get("custom_dependencies", []) or []
     bundle_dependencies_raw = data.get("bundle_dependencies", []) or []
     signing_raw = data.get("signing", {}) or {}
+    windows_service_raw = data.get("windows_service", {}) or {}
+    scheduled_task_raw = data.get("scheduled_task", {}) or {}
+    dependencies_min_version_raw = data.get("dependencies_min_version", {}) or {}
+    create_restore_point_before_install = bool(data.get("create_restore_point_before_install", False))
 
     if not app_name or not version or not publisher or not exe_name:
         return None, "欄位驗證失敗：<br>所有文字欄位（名稱、版本、發行者、安裝檔名）皆為必填項目，請檢查是否有欄位遺漏。"
@@ -420,6 +453,47 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     for script_field, script_rel in (("pre_install_script", pre_install_script), ("post_install_script", post_install_script)):
         if script_rel and not os.path.exists(os.path.join(app_dir, script_rel)):
             return None, f"欄位驗證失敗：<br>指定的{'安裝前置' if script_field == 'pre_install_script' else '安裝後置'}腳本「{script_rel}」不存在於應用程式資料夾中，請重新選擇。"
+
+    # windows_service/scheduled_task：真實抓到的問題——這兩個新欄位原本
+    # 完全沒有驗證，半填的設定（例如只填了名稱、執行檔還沒選）會直接
+    # 打包成功，裝到使用者機器上時 installer_core.py 靜默跳過整個建立
+    # 動作，不會有任何錯誤或警告；exe_relative_path 打錯字也不會被
+    # 攔下來——sc.exe/schtasks.exe 都不會驗證目標路徑存不存在，會註冊
+    # 一個永久壞掉的服務/排程工作。有填其中一個欄位（代表使用者是真的
+    # 想用這個功能，不是完全沒填的情境）就要求兩者都齊全、且執行檔真的
+    # 存在於 app_dir。
+    _VALID_SERVICE_START_TYPES = {"auto", "demand", "disabled"}
+    if windows_service_raw.get("service_name") or windows_service_raw.get("exe_relative_path"):
+        service_name = str(windows_service_raw.get("service_name", "")).strip()
+        exe_rel = str(windows_service_raw.get("exe_relative_path", "")).strip()
+        if not service_name or not exe_rel:
+            return None, "欄位驗證失敗：<br>windows_service 的 service_name 跟 exe_relative_path 必須同時填寫，或都留空不使用這個功能。"
+        if not os.path.exists(os.path.join(app_dir, exe_rel)):
+            return None, f"欄位驗證失敗：<br>windows_service 指定的執行檔「{exe_rel}」不存在於應用程式資料夾中，請重新選擇。"
+        start_type = str(windows_service_raw.get("start_type", "auto")).strip()
+        if start_type not in _VALID_SERVICE_START_TYPES:
+            return None, f"欄位驗證失敗：<br>windows_service 的 start_type「{start_type}」不是有效值，必須是 auto/demand/disabled 其中之一。"
+
+    if scheduled_task_raw.get("task_name") or scheduled_task_raw.get("exe_relative_path"):
+        task_name = str(scheduled_task_raw.get("task_name", "")).strip()
+        exe_rel = str(scheduled_task_raw.get("exe_relative_path", "")).strip()
+        if not task_name or not exe_rel:
+            return None, "欄位驗證失敗：<br>scheduled_task 的 task_name 跟 exe_relative_path 必須同時填寫，或都留空不使用這個功能。"
+        if not os.path.exists(os.path.join(app_dir, exe_rel)):
+            return None, f"欄位驗證失敗：<br>scheduled_task 指定的執行檔「{exe_rel}」不存在於應用程式資料夾中，請重新選擇。"
+
+    # dependencies_min_version：真實抓到的問題——key 完全沒有跟 dependencies
+    # 清單交叉比對過。installer_core._build_dependency_checkers() 只有對
+    # 內建的 vcredist_x64/dotnet_desktop 兩個 key 套用這裡設定的最低版本
+    # （custom_dependencies 走各自 registry_check.min_version 這個獨立
+    # 欄位，見 F6），填了沒啟用的 key、或填了 custom_dependencies 的 key，
+    # 都會被靜默忽略，使用者以為設定生效了、其實完全沒有。
+    _BUILT_IN_DEPENDENCY_KEYS = {"vcredist_x64", "dotnet_desktop"}
+    for dep_key in dependencies_min_version_raw:
+        if dep_key not in dependencies:
+            return None, f"欄位驗證失敗：<br>dependencies_min_version 的「{dep_key}」沒有在 dependencies 清單裡啟用，這個最低版本設定不會生效。"
+        if dep_key not in _BUILT_IN_DEPENDENCY_KEYS:
+            return None, f"欄位驗證失敗：<br>dependencies_min_version 只支援內建相依元件（vcredist_x64/dotnet_desktop）；自訂相依元件「{dep_key}」的最低版本請改用 custom_dependencies 裡對應項目的 registry_check.min_version。"
 
     # custom_dependencies/bundle_dependencies 只跟彼此有關，驗證規則收在
     # _validate_dependency_policy()（見上方），這裡不用知道細節。
