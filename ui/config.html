@@ -197,10 +197,13 @@
         <div class="form-group">
             <label data-i18n="label_dependencies">相依元件偵測 (選填)</label>
             <div class="checkbox-row"><input type="checkbox" id="dep_vcredist"><label for="dep_vcredist">Visual C++ Redistributable (x64)</label></div>
+            <input type="text" id="dep_vcredist_min_version" style="margin-left: 24px; width: calc(100% - 24px); margin-top: -4px; margin-bottom: 10px;" placeholder="最低版本（選填，例如 14.38.33130）" data-i18n-placeholder="ph_dep_min_version">
             <div class="checkbox-row" style="margin-left: 24px;"><input type="checkbox" id="dep_vcredist_bundle"><label for="dep_vcredist_bundle" data-i18n="label_bundle_dep">內嵌進安裝檔（不需連網下載，安裝檔會變大）</label></div>
             <div class="checkbox-row"><input type="checkbox" id="dep_dotnet"><label for="dep_dotnet">.NET Desktop Runtime</label></div>
+            <input type="text" id="dep_dotnet_min_version" style="margin-left: 24px; width: calc(100% - 24px); margin-top: -4px; margin-bottom: 10px;" placeholder="最低版本（選填，例如 8.0.0）" data-i18n-placeholder="ph_dep_min_version">
             <div class="checkbox-row" style="margin-left: 24px;"><input type="checkbox" id="dep_dotnet_bundle"><label for="dep_dotnet_bundle" data-i18n="label_bundle_dep">內嵌進安裝檔（不需連網下載，安裝檔會變大）</label></div>
             <span class="note" data-i18n="note_dependencies">安裝時會偵測系統是否已安裝，缺少的話提示使用者是否要自動下載並靜默安裝（或選擇略過，不會阻擋主程式安裝）。</span>
+            <span class="note" data-i18n="note_dep_min_version">填了最低版本的話，偵測到已安裝但版本太舊時，也會視同未安裝並提示更新；留空只檢查有沒有安裝，不管版本新舊。</span>
         </div>
 
         <div class="form-group">
@@ -269,6 +272,44 @@
             <div id="custom_deps_rows"></div>
             <button class="btn-browse" type="button" onclick="addCustomDependencyRow()" data-i18n="btn_add_custom_dependency">+ 新增自訂相依元件</button>
             <span class="note" data-i18n="note_custom_dependencies">除了上面內建的 Visual C++ Redistributable / .NET Desktop Runtime，也可以自訂任意相依元件：安裝時用登錄表偵測是否已安裝，缺少的話比照內建元件提示自動下載＋靜默安裝。</span>
+        </div>
+
+        <div class="form-group">
+            <div class="checkbox-row"><input type="checkbox" id="create_restore_point"><label for="create_restore_point" data-i18n="label_restore_point">安裝前建立系統還原點（選填）</label></div>
+            <span class="note" data-i18n="note_restore_point">複製檔案之前呼叫 Windows 系統還原功能建立一個還原點，方便使用者在安裝出問題時自行還原系統。部分系統（例如關閉了系統還原功能，或 Windows Server）可能無法建立，失敗只記錄警告，不會阻擋安裝。</span>
+        </div>
+
+        <div class="form-group">
+            <div class="checkbox-row"><input type="checkbox" id="need_windows_service" onchange="toggleWindowsServiceFields(this.checked)"><label for="need_windows_service" data-i18n="label_windows_service">安裝為 Windows 服務（選填）</label></div>
+            <div id="windows_service_section" style="display: none; margin-top: 8px;">
+                <label data-i18n="label_service_name">服務名稱</label>
+                <input type="text" id="service_name" placeholder="例如: MyAppService" data-i18n-placeholder="ph_service_name">
+                <label style="margin-top: 8px;" data-i18n="label_service_exe">服務執行檔</label>
+                <select id="service_exe_relative_path"><option value="" data-i18n="select_app_dir_first">請先選擇應用程式資料夾</option></select>
+                <label style="margin-top: 8px;" data-i18n="label_service_start_type">啟動類型</label>
+                <select id="service_start_type">
+                    <option value="auto" data-i18n="opt_start_auto">自動（開機啟動）</option>
+                    <option value="demand" data-i18n="opt_start_demand">手動</option>
+                    <option value="disabled" data-i18n="opt_start_disabled">停用</option>
+                </select>
+                <span class="note" data-i18n="note_windows_service">安裝時會用 sc.exe 把上面選的執行檔註冊成 Windows 服務；解除安裝時自動移除，不留殘留。</span>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <div class="checkbox-row"><input type="checkbox" id="need_scheduled_task" onchange="toggleScheduledTaskFields(this.checked)"><label for="need_scheduled_task" data-i18n="label_scheduled_task">建立排程工作（選填）</label></div>
+            <div id="scheduled_task_section" style="display: none; margin-top: 8px;">
+                <label data-i18n="label_task_name">排程工作名稱</label>
+                <input type="text" id="task_name" placeholder="例如: MyAppTask" data-i18n-placeholder="ph_task_name">
+                <label style="margin-top: 8px;" data-i18n="label_task_exe">要執行的執行檔</label>
+                <select id="task_exe_relative_path"><option value="" data-i18n="select_app_dir_first">請先選擇應用程式資料夾</option></select>
+                <label style="margin-top: 8px;" data-i18n="label_task_trigger">觸發條件</label>
+                <select id="task_trigger">
+                    <option value="onlogon" data-i18n="opt_trigger_onlogon">使用者登入時</option>
+                    <option value="onstart" data-i18n="opt_trigger_onstart">系統開機時</option>
+                </select>
+                <span class="note" data-i18n="note_scheduled_task">安裝時會用 schtasks.exe 註冊這個排程工作；解除安裝時自動移除。</span>
+            </div>
         </div>
 
         <div class="form-group">
@@ -563,6 +604,8 @@
                 `,
                 label_dependencies: "相依元件偵測 (選填)",
                 note_dependencies: "安裝時會偵測系統是否已安裝，缺少的話提示使用者是否要自動下載並靜默安裝（或選擇略過，不會阻擋主程式安裝）。",
+                ph_dep_min_version: "最低版本（選填）",
+                note_dep_min_version: "填了最低版本的話，偵測到已安裝但版本太舊時，也會視同未安裝並提示更新；留空只檢查有沒有安裝，不管版本新舊。",
                 label_bundle_dep: "內嵌進安裝檔（不需連網下載，安裝檔會變大）",
                 label_install_location: "安裝位置",
                 label_loc_program_files: "Program Files（預設，需要系統管理員權限）",
@@ -587,6 +630,21 @@
                 ph_cd_reg_path: "登錄表路徑，例如: SOFTWARE\\MyRuntime",
                 ph_cd_value_name: "登錄表值名稱（選填，留空只檢查機碼是否存在）",
                 ph_cd_expected: "期望值（選填）",
+                ph_cd_min_version: "最低版本（選填，有填的話會忽略上面的期望值，改用版本比較）",
+                label_restore_point: "安裝前建立系統還原點（選填）",
+                note_restore_point: "複製檔案之前呼叫 Windows 系統還原功能建立一個還原點，方便使用者在安裝出問題時自行還原系統。部分系統（例如關閉了系統還原功能，或 Windows Server）可能無法建立，失敗只記錄警告，不會阻擋安裝。",
+                label_windows_service: "安裝為 Windows 服務（選填）",
+                label_service_name: "服務名稱", ph_service_name: "例如: MyAppService",
+                label_service_exe: "服務執行檔",
+                label_service_start_type: "啟動類型",
+                opt_start_auto: "自動（開機啟動）", opt_start_demand: "手動", opt_start_disabled: "停用",
+                note_windows_service: "安裝時會用 sc.exe 把上面選的執行檔註冊成 Windows 服務；解除安裝時自動移除，不留殘留。",
+                label_scheduled_task: "建立排程工作（選填）",
+                label_task_name: "排程工作名稱", ph_task_name: "例如: MyAppTask",
+                label_task_exe: "要執行的執行檔",
+                label_task_trigger: "觸發條件",
+                opt_trigger_onlogon: "使用者登入時", opt_trigger_onstart: "系統開機時",
+                note_scheduled_task: "安裝時會用 schtasks.exe 註冊這個排程工作；解除安裝時自動移除。",
                 label_enable_signing: "啟用數位簽章自動化",
                 btn_browse_cert: "選擇 PFX 憑證",
                 label_cert_password_env: "憑證密碼的環境變數名稱",
@@ -678,6 +736,8 @@
                 `,
                 label_dependencies: "Dependency Detection (optional)",
                 note_dependencies: "Detects whether these are installed; if missing, the user is prompted to auto-download and silently install (or skip, without blocking the main install).",
+                ph_dep_min_version: "Minimum version (optional)",
+                note_dep_min_version: "If a minimum version is set, an installed-but-too-old copy is also treated as missing and prompts an update; leave empty to only check presence, regardless of version.",
                 label_bundle_dep: "Bundle into the installer (no download needed at install time; makes the installer larger)",
                 label_install_location: "Install Location",
                 label_loc_program_files: "Program Files (default, requires administrator rights)",
@@ -702,6 +762,21 @@
                 ph_cd_reg_path: "Registry path, e.g. SOFTWARE\\MyRuntime",
                 ph_cd_value_name: "Registry value name (optional; leave empty to just check the key exists)",
                 ph_cd_expected: "Expected value (optional)",
+                ph_cd_min_version: "Minimum version (optional; if set, overrides the expected value above with a version comparison instead)",
+                label_restore_point: "Create a system restore point before install (optional)",
+                note_restore_point: "Calls Windows System Restore right before files are copied, so the user can roll back their system if something goes wrong. Some systems (e.g. System Restore disabled, or Windows Server) may not support it — failure is only logged as a warning and won't block installation.",
+                label_windows_service: "Install as a Windows service (optional)",
+                label_service_name: "Service name", ph_service_name: "e.g. MyAppService",
+                label_service_exe: "Service executable",
+                label_service_start_type: "Start type",
+                opt_start_auto: "Automatic (start at boot)", opt_start_demand: "Manual", opt_start_disabled: "Disabled",
+                note_windows_service: "Registers the selected executable as a Windows service via sc.exe during install; removed automatically on uninstall.",
+                label_scheduled_task: "Create a scheduled task (optional)",
+                label_task_name: "Task name", ph_task_name: "e.g. MyAppTask",
+                label_task_exe: "Executable to run",
+                label_task_trigger: "Trigger",
+                opt_trigger_onlogon: "On user logon", opt_trigger_onstart: "On system startup",
+                note_scheduled_task: "Registers this scheduled task via schtasks.exe during install; removed automatically on uninstall.",
                 label_enable_signing: "Enable code-signing automation",
                 btn_browse_cert: "Choose PFX certificate",
                 label_cert_password_env: "Environment variable holding the cert password",
@@ -945,6 +1020,12 @@
         function togglePathTargetField(checked) {
             document.getElementById('path_target_section').style.display = checked ? 'block' : 'none';
         }
+        function toggleWindowsServiceFields(checked) {
+            document.getElementById('windows_service_section').style.display = checked ? 'block' : 'none';
+        }
+        function toggleScheduledTaskFields(checked) {
+            document.getElementById('scheduled_task_section').style.display = checked ? 'block' : 'none';
+        }
 
         // ---------------- 安裝位置三選一 ----------------
         function getInstallLocation() {
@@ -970,6 +1051,15 @@
 
                 const pathTargetSelect = document.getElementById('path_target_exe');
                 pathTargetSelect.innerHTML = `<option value="">${t('path_target_default_option')}</option>` + exeList.map(p => `<option value="${p}">${p}</option>`).join('');
+
+                // Windows 服務 / 排程工作要指定的執行檔，跟主要執行檔/PATH 目標
+                // 執行檔同一批來源（app_dir 底下的 .exe 清單），選單樣式沿用同一套。
+                const serviceExeSelect = document.getElementById('service_exe_relative_path');
+                serviceExeSelect.innerHTML = exeList.length === 0
+                    ? `<option value="">${t('no_exe_found')}</option>`
+                    : `<option value="">${t('select_placeholder')}</option>` + exeList.map(p => `<option value="${p}">${p}</option>`).join('');
+                const taskExeSelect = document.getElementById('task_exe_relative_path');
+                taskExeSelect.innerHTML = serviceExeSelect.innerHTML;
 
                 // 換了新的應用程式資料夾，之前勾選的相對路徑不再對應同一批檔案，
                 // 直接清掉重選，避免誤帶著舊資料夾的勾選結果送出去。
@@ -1155,6 +1245,7 @@
                     <input type="text" class="cd-value-name" style="flex:1;" placeholder="${t('ph_cd_value_name')}">
                     <input type="text" class="cd-expected" style="flex:0 0 100px;" placeholder="${t('ph_cd_expected')}">
                 </div>
+                <input type="text" class="cd-min-version" style="margin-top:6px;" placeholder="${t('ph_cd_min_version')}">
                 <button type="button" class="btn-browse" style="margin-top:6px;" onclick="removeCustomDependencyRow('${rowId}')">${t('btn_remove')}</button>
             `;
             document.getElementById('custom_deps_rows').appendChild(row);
@@ -1175,6 +1266,7 @@
                     .replace(/，/g, ',').split(',').map(s => s.trim()).filter(s => s.length > 0);
                 const valueName = row.querySelector('.cd-value-name').value.trim();
                 const expectedRaw = row.querySelector('.cd-expected').value.trim();
+                const minVersion = row.querySelector('.cd-min-version').value.trim();
                 result.push({
                     key, display_name: displayName, download_url: downloadUrl, silent_args: silentArgs,
                     registry_check: {
@@ -1182,6 +1274,7 @@
                         path: regPath,
                         value_name: valueName || null,
                         expected: expectedRaw === '' ? null : (isNaN(Number(expectedRaw)) ? expectedRaw : Number(expectedRaw)),
+                        ...(minVersion ? { min_version: minVersion } : {}),
                     },
                 });
             });
@@ -1345,6 +1438,12 @@
                     ...(document.getElementById('dep_vcredist').checked ? ['vcredist_x64'] : []),
                     ...(document.getElementById('dep_dotnet').checked ? ['dotnet_desktop'] : []),
                 ],
+                dependencies_min_version: {
+                    ...(document.getElementById('dep_vcredist').checked && document.getElementById('dep_vcredist_min_version').value.trim()
+                        ? { vcredist_x64: document.getElementById('dep_vcredist_min_version').value.trim() } : {}),
+                    ...(document.getElementById('dep_dotnet').checked && document.getElementById('dep_dotnet_min_version').value.trim()
+                        ? { dotnet_desktop: document.getElementById('dep_dotnet_min_version').value.trim() } : {}),
+                },
                 file_associations: document.getElementById('need_file_assoc').checked ? document.getElementById('file_assoc_input').value : '',
                 need_file_assoc: document.getElementById('need_file_assoc').checked,
                 use_custom_doc_icon: document.getElementById('need_file_assoc').checked && document.getElementById('custom_doc_icon').checked,
@@ -1362,6 +1461,17 @@
                 pre_install_script: document.getElementById('pre_install_script_input').value.trim(),
                 post_install_script: document.getElementById('post_install_script_input').value.trim(),
                 custom_dependencies: collectCustomDependencies(),
+                create_restore_point_before_install: document.getElementById('create_restore_point').checked,
+                windows_service: document.getElementById('need_windows_service').checked ? {
+                    service_name: document.getElementById('service_name').value.trim(),
+                    exe_relative_path: document.getElementById('service_exe_relative_path').value,
+                    start_type: document.getElementById('service_start_type').value,
+                } : {},
+                scheduled_task: document.getElementById('need_scheduled_task').checked ? {
+                    task_name: document.getElementById('task_name').value.trim(),
+                    exe_relative_path: document.getElementById('task_exe_relative_path').value,
+                    trigger: document.getElementById('task_trigger').value,
+                } : {},
                 signing: document.getElementById('enable_signing').checked ? {
                     cert_path: document.getElementById('cert_path_display').innerText === t('no_file_selected') ? '' : document.getElementById('cert_path_display').innerText,
                     cert_password_env: document.getElementById('cert_password_env').value.trim(),
