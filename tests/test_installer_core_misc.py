@@ -16,6 +16,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import installer_core as ic
+import install_journal
 from _fakes import FakeWinReg
 
 
@@ -1170,10 +1171,17 @@ class TestRollbackCoversWindowsServiceAndScheduledTask(unittest.TestCase):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_removes_service_and_task_when_both_were_created(self):
+        """A1 架構後續：windows_service/scheduled_task 這兩類的回滾改用
+        install_journal.InstallJournal 記錄，不再是個別的
+        windows_service_name/scheduled_task_name 旗標參數——_rollback()
+        只要收到 journal，就依相反順序 unwind 裡面記錄的復原動作。"""
         api = make_installer_api(selected_path=self.tmp_dir, app_name="MyApp")
         with mock.patch("installer_core.windows_service.remove_service") as mock_rm_svc, \
              mock.patch("installer_core.scheduled_task.remove_scheduled_task") as mock_rm_task:
-            api._rollback([], log=None, windows_service_name="MySvc", scheduled_task_name="MyTask")
+            journal = install_journal.InstallJournal()
+            journal.record("Windows 服務: MySvc", lambda: ic.windows_service.remove_service("MySvc"))
+            journal.record("排程工作: MyTask", lambda: ic.scheduled_task.remove_scheduled_task("MyTask"))
+            api._rollback([], log=None, journal=journal)
         mock_rm_svc.assert_called_once_with("MySvc")
         mock_rm_task.assert_called_once_with("MyTask")
 

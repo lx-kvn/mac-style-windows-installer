@@ -46,6 +46,7 @@ import windows_service
 import scheduled_task
 import restore_point
 import bits_download
+import install_journal
 from install_scope import InstallScope, local_appdata_root
 
 # 目前介面 chrome（ui/index.html 裡固定的標籤、按鈕、提示文字）支援的語言，
@@ -1278,7 +1279,7 @@ class InstallerAPI:
     def _rollback(self, copied_rel_paths, log=None, *,
                   registry_entry_created=False, shortcuts_created=None,
                   file_associations_registered=False, path_directory=None,
-                  windows_service_name="", scheduled_task_name="",
+                  journal=None,
                   pre_existing_rel_paths=None):
         """安裝失敗時的回滾：把這次安裝已經寫入的東西清掉，盡量讓系統回到
         安裝前的乾淨狀態。只清掉『這次安裝這一輪自己寫入的部分』，不會動到
@@ -1291,11 +1292,19 @@ class InstallerAPI:
         依「後寫的先復原」順序（跟安裝時 _register_uninstall_entry →
         _create_shortcut → file_assoc.register → windows_service.create_service
         → scheduled_task.create_scheduled_task → _add_to_path_env 的順序相反）
-        補上這六類。
+        補上這幾類。
 
-        windows_service_name/scheduled_task_name 尤其重要：這兩項成功建立後
-        完全沒有寫進任何 manifest（安裝在這裡失敗時，manifest 根本還沒寫），
-        uninstall.py 永遠不會知道它們存在，是唯一還能清掉它們的地方。
+        journal（A1 架構後續）：windows_service/scheduled_task 這兩類改用
+        install_journal.InstallJournal 記錄「做了什麼 + 怎麼復原」，取代
+        原本各自一個 windows_service_name/scheduled_task_name 旗標參數——
+        呼叫端建立服務/排程工作成功的當下就把復原動作記進 journal，這裡
+        只要呼叫 journal.unwind() 依相反順序復原，不用再為每一類新的
+        系統資源多加一個旗標參數、多一段對應的 if。這兩項成功建立後完全
+        沒有寫進任何 manifest（安裝在這裡失敗時，manifest 根本還沒寫），
+        uninstall.py 永遠不會知道它們存在，是唯一還能清掉它們的地方，
+        因此順序上要在 registry/shortcuts/file_associations 之前——跟
+        registry_entry_created 等既有的旗標式回滾維持同一套順序，暫時
+        不強行統一寫法（見對應的 ADR：架構稽核 A5）。
 
         pre_existing_rel_paths：真實抓到的問題（B7）——這個文件字串本身
         宣稱「不會動到 selected_path 底下其他既有內容」，但 copied_rel_paths
@@ -1325,10 +1334,8 @@ class InstallerAPI:
 
         if path_directory:
             system_entries.remove_from_path(path_directory, self.no_admin_install)
-        if scheduled_task_name:
-            scheduled_task.remove_scheduled_task(scheduled_task_name)
-        if windows_service_name:
-            windows_service.remove_service(windows_service_name)
+        if journal:
+            journal.unwind(log=log)
         if file_associations_registered:
             file_assoc.unregister(self.file_associations, no_admin_install=self.no_admin_install)
         for desktop in (shortcuts_created or []):
@@ -1351,28 +1358,12 @@ class InstallerAPI:
 
     def _trigger_installation_impl(self, create_desktop_shortcut=True, skip_process_check=False):
         log_lines = [f"=== {self.app_name} 安裝紀錄 {datetime.now().isoformat()} ==="]
-        copied_rel_paths = []  # 提前宣告：任何階段失敗都要能安全參照這個變數做回滾
-        current_copy_target = None  # 目前正在寫入的目的地路徑，複製失敗時用來查是誰鎖住它
-        # 這幾個一樣提前宣告：登錄表/捷徑/檔案關聯/PATH 任何一步之後才失敗，
-        # 都要能安全參照這幾個變數，讓 _rollback() 知道哪些系統項目已經真的
-        # 寫入、需要回滾（見 _rollback() 的說明）。
-        registry_entry_created = False
-        shortcuts_created = []
-        file_associations_registered = False
-        path_directory = None
-        windows_service_name = ""
-        scheduled_task_name = ""
 
         def log(msg):
             log_lines.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
         try:
-            return self._trigger_installation_impl_inner(
-                create_desktop_shortcut, skip_process_check, log_lines, log,
-                copied_rel_paths, current_copy_target,
-                registry_entry_created, shortcuts_created, file_associations_registered,
-                path_directory, windows_service_name, scheduled_task_name,
-            )
+            return self._trigger_installation_impl_inner(create_desktop_shortcut, skip_process_check, log_lines, log)
         finally:
             # 真實抓到的 bug（F24）：這份 log 原本只在安裝完全成功那條路徑
             # 才會寫出，十幾個提早失敗的 return 分支完全沒有寫——偏偏失敗
@@ -1400,23 +1391,31 @@ class InstallerAPI:
                 except Exception:
                     pass
 
-    def _trigger_installation_impl_inner(
-        self, create_desktop_shortcut, skip_process_check, log_lines, log,
-        copied_rel_paths, current_copy_target,
-        registry_entry_created, shortcuts_created, file_associations_registered,
-        path_directory, windows_service_name, scheduled_task_name,
-    ):
-        # 真實抓到的問題（B17）：服務/排程工作建立失敗原本只寫進
-        # install_log.txt——這支 exe 是 --noconsole 編譯的，安裝介面上
-        # 完全不會顯示任何提示，使用者會以為打包時設定的服務已經正常
-        # 裝好，直到某天發現它根本不存在才會察覺。收集成結構化的清單，
-        # 隨成功結果一起回傳，讓呼叫端（GUI）有機會顯示給使用者看，不能
-        # 只藏在使用者通常不會去看的 log 檔裡。
+    def _trigger_installation_impl_inner(self, create_desktop_shortcut, skip_process_check, log_lines, log):
+        # 這一整批都提前在最外層宣告：任何階段（複製迴圈開始前/開始後、
+        # 登錄表/捷徑/檔案關聯/服務/排程工作/PATH 任一步之後）才失敗，
+        # 下面兩個 except 區塊都要能安全參照，讓 _rollback() 知道哪些系統
+        # 項目已經真的寫入、需要回滾（見 _rollback() 的說明）。
+        #
+        # 這些原本是以參數的形式從 _trigger_installation_impl()（外層
+        # try/finally 包裝）傳進來，但外層那份從來沒有真的被讀取過——
+        # copied_rel_paths 雖然透過 .append() 修改會反映到外層的同一個
+        # list 物件，但外層本來就不會再讀它；current_copy_target/
+        # registry_entry_created 等其餘的是用 `=` 整個重新賦值，對外層
+        # 傳進來的參數完全沒有任何效果，是死參數。改成直接在這裡宣告，
+        # 介面更誠實（外層真正需要的只有 log_lines，透過閉包的 log()
+        # 就夠了，不需要這一整批）。
         warnings = []
-        # 真實抓到的問題（B7）：見 _rollback() 的 pre_existing_rel_paths
-        # 說明——提前宣告，讓下面兩個 except 區塊不管是複製迴圈開始前還是
-        # 開始後才失敗，都能安全參照這個變數。
         pre_existing_rel_paths = set()
+        copied_rel_paths = []
+        current_copy_target = None
+        registry_entry_created = False
+        shortcuts_created = []
+        file_associations_registered = False
+        path_directory = None
+        windows_service_name = ""
+        scheduled_task_name = ""
+        journal = install_journal.InstallJournal()
         try:
             src_dir = get_resource_path("app_contents")
             if not os.path.exists(src_dir):
@@ -1614,6 +1613,10 @@ class InstallerAPI:
                 )
                 if created:
                     windows_service_name = self.windows_service["service_name"]
+                    journal.record(
+                        f"Windows 服務: {windows_service_name}",
+                        lambda name=windows_service_name: windows_service.remove_service(name),
+                    )
                     log(f"已建立 Windows 服務: {windows_service_name}")
                 else:
                     msg = f"建立 Windows 服務「{self.windows_service['service_name']}」失敗（不影響安裝結果）"
@@ -1628,6 +1631,10 @@ class InstallerAPI:
                 )
                 if created:
                     scheduled_task_name = self.scheduled_task["task_name"]
+                    journal.record(
+                        f"排程工作: {scheduled_task_name}",
+                        lambda name=scheduled_task_name: scheduled_task.remove_scheduled_task(name),
+                    )
                     log(f"已建立排程工作: {scheduled_task_name}")
                 else:
                     msg = f"建立排程工作「{self.scheduled_task['task_name']}」失敗（不影響安裝結果）"
@@ -1695,7 +1702,7 @@ class InstallerAPI:
                 copied_rel_paths, log,
                 registry_entry_created=registry_entry_created, shortcuts_created=shortcuts_created,
                 file_associations_registered=file_associations_registered, path_directory=path_directory,
-                windows_service_name=windows_service_name, scheduled_task_name=scheduled_task_name,
+                journal=journal,
                 pre_existing_rel_paths=pre_existing_rel_paths,
             )
             self._restore_upgrade_backup()
@@ -1714,7 +1721,7 @@ class InstallerAPI:
                 copied_rel_paths, log,
                 registry_entry_created=registry_entry_created, shortcuts_created=shortcuts_created,
                 file_associations_registered=file_associations_registered, path_directory=path_directory,
-                windows_service_name=windows_service_name, scheduled_task_name=scheduled_task_name,
+                journal=journal,
                 pre_existing_rel_paths=pre_existing_rel_paths,
             )
             self._restore_upgrade_backup()

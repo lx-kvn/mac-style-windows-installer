@@ -112,6 +112,8 @@ class TestEnsureWorkspaceFiles(unittest.TestCase):
             f.write("# NEW restore_point content")
         with open(os.path.join(self.embedded_dir, "bits_download.py"), "w") as f:
             f.write("# NEW bits_download content")
+        with open(os.path.join(self.embedded_dir, "install_journal.py"), "w") as f:
+            f.write("# NEW install_journal content")
         os.makedirs(os.path.join(self.embedded_dir, "ui"))
         with open(os.path.join(self.embedded_dir, "ui", "index.html"), "w") as f:
             f.write("<!-- NEW index.html -->")
@@ -588,6 +590,27 @@ class TestValidateAndBuildPackData(unittest.TestCase):
         pack_data, error = self._validate(self._base_data(windows_service={}))
         self.assertIsNone(error)
 
+    def test_start_type_validation_follows_windows_service_constant(self):
+        """A3（config schema 單一真實來源）：真實抓到的問題——
+        `_VALID_SERVICE_START_TYPES` 原本是這個檔案自己寫死的一份
+        {"auto", "demand", "disabled"}，跟真正執行
+        `sc create ... start= <start_type>` 的 windows_service.py 完全
+        脫鉤。改成從 windows_service.VALID_START_TYPES 讀，windows_service.py
+        才是真正知道 sc.exe 支援哪些 start_type 值的模組。這裡不斷言目前
+        的常數值本身，而是把 windows_service.VALID_START_TYPES 換成一組
+        完全不同的假值，驗證這裡的行為真的跟著變——如果還是走自己寫死
+        的字面常數，這個測試會照樣通過，沒辦法真的證明兩邊有沒有掛勾。"""
+        with mock.patch.object(packaging_core.windows_service, "VALID_START_TYPES", frozenset({"only_this_one"})):
+            _, error = self._validate(self._base_data(windows_service={
+                "service_name": "MySvc", "exe_relative_path": "main.exe", "start_type": "demand",
+            }))
+            self.assertIsNotNone(error, "換掉 windows_service 的常數後，原本有效的 demand 不應該再被接受")
+
+            pack_data, error = self._validate(self._base_data(windows_service={
+                "service_name": "MySvc", "exe_relative_path": "main.exe", "start_type": "only_this_one",
+            }))
+            self.assertIsNone(error, "換掉之後唯一有效的值，應該要被接受")
+
     def test_scheduled_task_missing_exe_relative_path_is_rejected(self):
         _, error = self._validate(self._base_data(scheduled_task={"task_name": "MyTask"}))
         self.assertIsNotNone(error)
@@ -853,6 +876,60 @@ class TestValidateDependencyPolicy(unittest.TestCase):
         )
         self.assertIsNone(error)
         self.assertIsNone(custom[0]["sha256"])
+
+
+class TestBuiltInDependencyKeysFollowDependencyDefs(unittest.TestCase):
+    """A3（config schema 單一真實來源）：真實抓到的問題——這個檔案原本
+    自己獨立寫死了兩份一模一樣的 `{"vcredist_x64", "dotnet_desktop"}`
+    （`_validate_dependency_policy()`/`validate_and_build_pack_data()` 各
+    一份），跟 installer_core.py 實際用來下載安裝這兩個相依元件的
+    `dependency_defs.BUILT_IN_DEPENDENCIES` 完全脫鉤——哪天 dependency_defs
+    新增/移除一個內建相依元件，這裡的驗證邏輯不會自動跟著變，會悄悄跟
+    實際能用的相依元件清單不同步。改成從 dependency_defs.BUILT_IN_DEPENDENCIES
+    動態算出來，不是自己另外維護一份字面常數。
+
+    這裡不斷言目前的常數值（{"vcredist_x64", "dotnet_desktop"}）本身，
+    而是把 dependency_defs.BUILT_IN_DEPENDENCIES 換成一組完全不同的假
+    key，驗證 packaging_core.py 的行為真的跟著變——如果這裡還是走自己
+    寫死的字面常數，這個測試會照樣通過（因為假 key 不在寫死的常數
+    裡），沒辦法真的證明兩邊有沒有掛勾，所以還要反過來確認原本內建的
+    「vcredist_x64」在假清單底下不再被當成內建。"""
+
+    def test_custom_dependency_collision_check_follows_dependency_defs(self):
+        with mock.patch.object(
+            packaging_core.dependency_defs, "BUILT_IN_DEPENDENCIES",
+            {"fake_builtin_dep": {"display_name": "Fake", "download_url": "https://x", "silent_args": []}},
+        ):
+            # 假清單裡有的 key：現在應該被當成內建，跟自訂的撞名。
+            _, _, error = packaging_core._validate_dependency_policy(
+                [], [{
+                    "key": "fake_builtin_dep", "display_name": "X", "download_url": "https://x",
+                    "registry_check": {"path": "SOFTWARE\\X"},
+                }], []
+            )
+            self.assertIsNotNone(error)
+
+            # 原本內建的 vcredist_x64：假清單底下已經不算內建了，可以被
+            # 自訂相依元件使用同一個 key，不應該再被擋下來。
+            custom, _, error = packaging_core._validate_dependency_policy(
+                [], [{
+                    "key": "vcredist_x64", "display_name": "X", "download_url": "https://x",
+                    "registry_check": {"path": "SOFTWARE\\X"},
+                }], []
+            )
+            self.assertIsNone(error)
+            self.assertEqual(custom[0]["key"], "vcredist_x64")
+
+    def test_bundle_dependency_known_keys_follow_dependency_defs(self):
+        with mock.patch.object(
+            packaging_core.dependency_defs, "BUILT_IN_DEPENDENCIES",
+            {"fake_builtin_dep": {"display_name": "Fake", "download_url": "https://x", "silent_args": []}},
+        ):
+            _, bundle, error = packaging_core._validate_dependency_policy(
+                ["fake_builtin_dep"], [], ["fake_builtin_dep"]
+            )
+            self.assertIsNone(error)
+            self.assertEqual(bundle, ["fake_builtin_dep"])
 
 
 if __name__ == "__main__":

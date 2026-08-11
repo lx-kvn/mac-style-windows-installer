@@ -37,6 +37,26 @@ class TestCmdInit(unittest.TestCase):
         for key in ("app_name", "main_exe", "eula_texts", "path_target_exe", "add_to_path"):
             self.assertIn(key, template)
 
+    def test_template_covers_every_field_validate_and_build_pack_data_recognizes(self):
+        """A3（config schema 單一真實來源）：真實抓到的問題——`init` 產生
+        的範本 JSON 原本沒有列出 windows_service/scheduled_task/
+        create_restore_point_before_install/dependencies_min_version 這幾個
+        比較新的欄位，使用者跑 `builder_cli.py init` 拿到的範本，看起來
+        就像這個工具不支援這幾個功能一樣，CLI_USAGE.md 也沒補文件，兩邊
+        一起漏（見 F16 investigation 附帶發現的 A3 audit）。這裡改成拿
+        packaging_core.validate_and_build_pack_data() 實際會處理、且合理
+        預期使用者可能會想在範本裡看到的欄位當作最低限度的清單，
+        確保新加的功能欄位不會被漏在範本之外。"""
+        exit_code = builder_cli.main(["init", "--output", self.output_path])
+        self.assertEqual(exit_code, 0)
+        with open(self.output_path, "r", encoding="utf-8") as f:
+            template = json.load(f)
+        for key in (
+            "windows_service", "scheduled_task", "create_restore_point_before_install",
+            "dependencies_min_version",
+        ):
+            self.assertIn(key, template, f"範本缺少欄位：{key}")
+
 
 class TestCmdListFiles(unittest.TestCase):
     """list-files 子指令：CLI 使用者寫 --local-appdata-files 或 JSON 設定檔

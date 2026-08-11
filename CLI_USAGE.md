@@ -107,6 +107,10 @@ python builder_cli.py pack --config app.json [--其他 flag 覆蓋個別欄位..
 | `no_admin_install` | `--no-admin-install` / `--no-no-admin-install` | 否 | 開啟後整個安裝檔（含解除安裝）完全不要求系統管理員權限，不會跳出 UAC 提示：預設安裝路徑改成 `%LOCALAPPDATA%\Programs\<folder_name>`，解除安裝登錄表、PATH、捷徑都改寫到使用者層級（HKCU、`%APPDATA%`/`%USERPROFILE%\Desktop`）而不是系統層級。適合單一使用者自己安裝、不需要讓電腦上其他使用者共用的情境。見規格文件 §8.25 |
 | `pre_install_script` / `post_install_script` | `--pre-install-script` / `--post-install-script` | 否 | 相對於 `app_dir` 的路徑，指向一支要在安裝前/安裝後自動靜默執行的腳本或執行檔（例如 `.bat`/`.exe`/`.ps1`）。前置腳本失敗會中止整個安裝並回報錯誤；後置腳本失敗只記錄警告，不影響安裝結果（此時主程式已經裝好）。見規格文件 §8.26 |
 | `signing` | （只能透過 JSON） | 否 | 設定後打包時自動用 `signtool` 幫 Setup.exe/uninstall.exe 簽數位簽章：`{"cert_path": "憑證檔案(.pfx)路徑", "cert_password_env": "存放密碼的環境變數名稱", "timestamp_url": "時間戳記伺服器（選填，預設 DigiCert）"}`。密碼不放在設定檔明文裡，只存環境變數名稱；打包當下這個環境變數必須有值，簽章失敗會讓整個 `pack` 流程失敗。需要事先安裝 Windows SDK 或 Visual Studio 取得 `signtool`，並自行準備憑證（本工具不提供、也無法生成憑證）。見規格文件 §8.27 |
+| `windows_service` | （只能透過 JSON） | 否 | 安裝時額外把應用程式的某支執行檔註冊成 Windows 服務：`{"service_name": "服務名稱", "exe_relative_path": "相對於 app_dir 的執行檔路徑", "start_type": "auto/demand/disabled 其中之一，預設 auto"}`。`service_name`/`exe_relative_path` 要嘛兩個都填，要嘛都留空；`exe_relative_path` 指定的檔案必須真的存在於 `app_dir`。解除安裝時會自動移除這個服務。 |
+| `scheduled_task` | （只能透過 JSON） | 否 | 安裝時額外把應用程式的某支執行檔註冊成排程工作：`{"task_name": "工作名稱", "exe_relative_path": "相對於 app_dir 的執行檔路徑", "trigger": "schtasks /sc 支援的觸發條件，預設 onlogon"}`。`task_name`/`exe_relative_path` 要嘛兩個都填，要嘛都留空；`exe_relative_path` 指定的檔案必須真的存在於 `app_dir`。解除安裝時會自動移除這個排程工作。 |
+| `create_restore_point_before_install` | （只能透過 JSON） | 否 | 開啟後，安裝流程開始寫入檔案前，先嘗試建立一個系統還原點，讓使用者萬一想反悔可以透過 Windows 內建的系統還原整個復原（不是這個工具自己的解除安裝功能，是作業系統層級的還原點）。Windows 8 以後同一天內只會真的建立一次還原點（節流限制），短時間內重複安裝不保證每次都產生新的還原點；建立失敗（例如系統還原功能被使用者關閉）不會中止安裝，只是沒有還原點可用。 |
+| `dependencies_min_version` | （只能透過 JSON） | 否 | 只對內建相依元件（`vcredist_x64`/`dotnet_desktop`）額外要求最低版本，例如 `{"dotnet_desktop": "8.0.0"}`；鍵一定要同時列在 `dependencies` 裡（沒啟用等於這個設定不會生效），也只能是內建的兩個 key（自訂相依元件的版本門檻改用 `custom_dependencies` 裡對應項目的 `registry_check.min_version`）。已安裝但版本低於這裡設定的門檻，會被當成「未安裝」，一樣走 `dependencies` 的偵測/自動安裝流程。 |
 
 `eula_texts` 是字典結構，只能透過 JSON 設定檔提供，沒有對應的命令列 flag
 （塞一整包多語言文字進命令列參數不實際）。

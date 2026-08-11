@@ -54,6 +54,14 @@ TEMPLATE = {
     "custom_dependencies": [],
     "bundle_dependencies": [],
     "signing": {},
+    "dependencies_min_version": {},
+    # windows_service/scheduled_task/create_restore_point_before_install：
+    # 真實抓到的問題（A3：config schema 單一真實來源）——這幾個欄位原本
+    # 沒有列在範本裡，跑 builder_cli.py init 拿到的範本看起來就像這個工具
+    # 不支援這幾個功能一樣，跟 CLI_USAGE.md 沒補文件是同一種脫鉤問題。
+    "windows_service": {"service_name": "", "exe_relative_path": "", "start_type": "auto"},
+    "scheduled_task": {"task_name": "", "exe_relative_path": "", "trigger": "onlogon"},
+    "create_restore_point_before_install": False,
 }
 
 # 純量欄位：CLI flag 名稱 -> data 字典鍵名，CLI 有帶值就覆蓋 JSON 對應欄位。

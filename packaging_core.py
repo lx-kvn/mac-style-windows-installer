@@ -23,6 +23,8 @@ import shutil
 import subprocess
 
 import packaging_settings
+import dependency_defs
+import windows_service
 
 # installer_core.py/uninstall.py 這兩支 entry point 實際 import 的專案內部
 # 深模組。真實抓到的 bug：install_scope.py/self_delete.py/system_entries.py
@@ -39,6 +41,7 @@ SHARED_DEEP_MODULES = [
     "restart_manager.py", "dependency_defs.py", "install_scope.py",
     "self_delete.py", "system_entries.py", "explorer_lock_release.py",
     "windows_service.py", "scheduled_task.py", "restore_point.py", "bits_download.py",
+    "install_journal.py",
 ]
 
 
@@ -253,8 +256,14 @@ def _validate_dependency_policy(dependencies, custom_dependencies_raw, bundle_de
     這三個欄位只跟彼此有關——bundle_dependencies 要交叉比對
     custom_dependencies 算出來的 key 清單，才知道「內嵌」這個要求指的是
     哪個相依元件——跟 signing/no_admin_install 這些不相關的欄位無關，
-    獨立成一個函式才能單獨測交叉驗證的規則，不用管其他欄位。"""
-    built_in_dependency_keys = {"vcredist_x64", "dotnet_desktop"}
+    獨立成一個函式才能單獨測交叉驗證的規則，不用管其他欄位。
+
+    真實抓到的問題（A3：config schema 單一真實來源）：內建相依元件的 key
+    原本是這個函式自己寫死一份 {"vcredist_x64", "dotnet_desktop"}，跟
+    installer_core.py 實際用來下載/安裝這兩個相依元件的
+    dependency_defs.BUILT_IN_DEPENDENCIES 完全脫鉤——哪天那邊新增/移除
+    一個內建相依元件，這裡的驗證邏輯不會自動跟著變。改成動態算出來。"""
+    built_in_dependency_keys = set(dependency_defs.BUILT_IN_DEPENDENCIES.keys())
     custom_dependencies = []
     seen_custom_keys = set()
     for entry in custom_dependencies_raw:
@@ -462,7 +471,6 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     # 一個永久壞掉的服務/排程工作。有填其中一個欄位（代表使用者是真的
     # 想用這個功能，不是完全沒填的情境）就要求兩者都齊全、且執行檔真的
     # 存在於 app_dir。
-    _VALID_SERVICE_START_TYPES = {"auto", "demand", "disabled"}
     if windows_service_raw.get("service_name") or windows_service_raw.get("exe_relative_path"):
         service_name = str(windows_service_raw.get("service_name", "")).strip()
         exe_rel = str(windows_service_raw.get("exe_relative_path", "")).strip()
@@ -471,8 +479,12 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
         if not os.path.exists(os.path.join(app_dir, exe_rel)):
             return None, f"欄位驗證失敗：<br>windows_service 指定的執行檔「{exe_rel}」不存在於應用程式資料夾中，請重新選擇。"
         start_type = str(windows_service_raw.get("start_type", "auto")).strip()
-        if start_type not in _VALID_SERVICE_START_TYPES:
-            return None, f"欄位驗證失敗：<br>windows_service 的 start_type「{start_type}」不是有效值，必須是 auto/demand/disabled 其中之一。"
+        # A3：合法值從 windows_service.VALID_START_TYPES 讀，不是這裡自己
+        # 另外寫死一份——windows_service.py 才是真正知道 sc.exe 支援哪些
+        # start_type 值的模組。
+        if start_type not in windows_service.VALID_START_TYPES:
+            valid_list = "/".join(sorted(windows_service.VALID_START_TYPES))
+            return None, f"欄位驗證失敗：<br>windows_service 的 start_type「{start_type}」不是有效值，必須是 {valid_list} 其中之一。"
 
     if scheduled_task_raw.get("task_name") or scheduled_task_raw.get("exe_relative_path"):
         task_name = str(scheduled_task_raw.get("task_name", "")).strip()
@@ -488,11 +500,10 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     # （custom_dependencies 走各自 registry_check.min_version 這個獨立
     # 欄位，見 F6），填了沒啟用的 key、或填了 custom_dependencies 的 key，
     # 都會被靜默忽略，使用者以為設定生效了、其實完全沒有。
-    _BUILT_IN_DEPENDENCY_KEYS = {"vcredist_x64", "dotnet_desktop"}
     for dep_key in dependencies_min_version_raw:
         if dep_key not in dependencies:
             return None, f"欄位驗證失敗：<br>dependencies_min_version 的「{dep_key}」沒有在 dependencies 清單裡啟用，這個最低版本設定不會生效。"
-        if dep_key not in _BUILT_IN_DEPENDENCY_KEYS:
+        if dep_key not in dependency_defs.BUILT_IN_DEPENDENCIES:
             return None, f"欄位驗證失敗：<br>dependencies_min_version 只支援內建相依元件（vcredist_x64/dotnet_desktop）；自訂相依元件「{dep_key}」的最低版本請改用 custom_dependencies 裡對應項目的 registry_check.min_version。"
 
     # custom_dependencies/bundle_dependencies 只跟彼此有關，驗證規則收在

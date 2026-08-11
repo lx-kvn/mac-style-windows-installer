@@ -27,6 +27,13 @@ _SERVICE_STATE_STOPPED = 1
 
 _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+# sc.exe `start=` 參數支援的值（節錄自這裡實際用到的子集，完整列表還有
+# boot/system，這個工具用不到）。這是這個模組對外公開的介面一部分——
+# packaging_core.py 的打包前驗證要判斷使用者填的 start_type 合不合法，
+# 應該從這裡讀，而不是自己另外寫死一份會悄悄跟這裡脫鉤的常數
+# （架構稽核 A3：config schema 單一真實來源）。
+VALID_START_TYPES = frozenset({"auto", "demand", "disabled"})
+
 
 def create_service(service_name, exe_path, display_name=None, start_type="auto"):
     """`sc create <service_name> binPath= "<exe_path>" start= <start_type>`，
