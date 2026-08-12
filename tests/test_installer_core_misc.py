@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import installer_core as ic
 import install_journal
+import install_encryption
 from _fakes import FakeWinReg
 
 
@@ -57,40 +58,52 @@ class TestCliArgs(unittest.TestCase):
             return ic._parse_cli_args()
 
     def test_no_args_defaults(self):
-        silent, install_dir, desktop, log_path = self._parse([])
+        silent, install_dir, desktop, log_path, password = self._parse([])
         self.assertFalse(silent)
         self.assertIsNone(install_dir)
         self.assertTrue(desktop)
         self.assertIsNone(log_path)
+        self.assertIsNone(password)
 
     def test_silent_flag_case_insensitive(self):
-        silent, _, _, _ = self._parse(["/s"])
+        silent, _, _, _, _ = self._parse(["/s"])
         self.assertTrue(silent)
 
     def test_dir_flag(self):
-        _, install_dir, _, _ = self._parse(["/D=C:\\Custom Path"])
+        _, install_dir, _, _, _ = self._parse(["/D=C:\\Custom Path"])
         self.assertEqual(install_dir, "C:\\Custom Path")
 
     def test_long_dir_flag(self):
-        _, install_dir, _, _ = self._parse(["/DIR=D:\\Apps\\MyApp"])
+        _, install_dir, _, _, _ = self._parse(["/DIR=D:\\Apps\\MyApp"])
         self.assertEqual(install_dir, "D:\\Apps\\MyApp")
 
     def test_no_desktop_shortcut_flag(self):
-        _, _, desktop, _ = self._parse(["/NODESKTOPSHORTCUT"])
+        _, _, desktop, _, _ = self._parse(["/NODESKTOPSHORTCUT"])
         self.assertFalse(desktop)
 
     def test_log_flag(self):
-        _, _, _, log_path = self._parse(["/LOG=D:\\logs\\install.txt"])
+        _, _, _, log_path, _ = self._parse(["/LOG=D:\\logs\\install.txt"])
         self.assertEqual(log_path, "D:\\logs\\install.txt")
 
     def test_combined_flags(self):
-        silent, install_dir, desktop, log_path = self._parse(
-            ["/S", "/D=C:\\X", "/NODESKTOPSHORTCUT", "/LOG=C:\\X\\log.txt"]
+        silent, install_dir, desktop, log_path, password = self._parse(
+            ["/S", "/D=C:\\X", "/NODESKTOPSHORTCUT", "/LOG=C:\\X\\log.txt", "/PASSWORD=hunter2"]
         )
         self.assertTrue(silent)
         self.assertEqual(install_dir, "C:\\X")
         self.assertFalse(desktop)
         self.assertEqual(log_path, "C:\\X\\log.txt")
+        self.assertEqual(password, "hunter2")
+
+    def test_password_flag(self):
+        """安裝密碼保護（見 CONTEXT.md）：靜默安裝比照 Inno Setup 既有慣例
+        用 /PASSWORD= 帶密碼。"""
+        _, _, _, _, password = self._parse(["/PASSWORD=hunter2"])
+        self.assertEqual(password, "hunter2")
+
+    def test_no_password_flag_defaults_to_none(self):
+        _, _, _, _, password = self._parse([])
+        self.assertIsNone(password)
 
 
 class TestCheckDiskSpace(unittest.TestCase):
@@ -1298,6 +1311,88 @@ class TestInstallLogWrittenOnFailure(unittest.TestCase):
         with open(self.fallback_path, encoding="utf-8") as f:
             content = f.read()
         self.assertIn("MyApp", content)
+
+
+class TestPasswordProtection(unittest.TestCase):
+    """安裝密碼保護（見 CONTEXT.md「安裝密碼保護」一節）：密碼關卡出現在
+    EULA 之前，通過後把加密的 app_contents 解密到暫存資料夾，取代
+    get_resource_path("app_contents") 當這次安裝的複製來源。"""
+
+    def setUp(self):
+        self.source_dir = tempfile.mkdtemp()
+        with open(os.path.join(self.source_dir, "app.exe"), "wb") as f:
+            f.write(b"fake app bytes")
+        self.resource_dir = tempfile.mkdtemp()
+        self.encrypted_file = os.path.join(self.resource_dir, "app_contents.enc")
+        install_encryption.encrypt_directory(self.source_dir, self.encrypted_file, "correct password")
+
+    def tearDown(self):
+        shutil.rmtree(self.source_dir, ignore_errors=True)
+        shutil.rmtree(self.resource_dir, ignore_errors=True)
+
+    def test_is_password_protected_reflects_config_flag(self):
+        api = make_installer_api(password_protected=True)
+        self.assertTrue(api.is_password_protected())
+        api2 = make_installer_api(password_protected=False)
+        self.assertFalse(api2.is_password_protected())
+
+    def test_verify_install_password_returns_true_when_not_protected_regardless_of_input(self):
+        """沒有密碼保護時，呼叫端不需要先判斷 is_password_protected() 才
+        決定要不要驗證，直接呼叫也要回傳 True（等同『不需要密碼』）。"""
+        api = make_installer_api(password_protected=False)
+        self.assertTrue(api.verify_install_password("anything"))
+        self.assertTrue(api.verify_install_password(""))
+
+    def test_verify_install_password_correct_password_decrypts_and_returns_true(self):
+        api = make_installer_api(password_protected=True)
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)):
+            result = api.verify_install_password("correct password")
+        self.assertTrue(result)
+        self.assertIsNotNone(api._decrypted_payload_dir)
+        with open(os.path.join(api._decrypted_payload_dir, "app.exe"), "rb") as f:
+            self.assertEqual(f.read(), b"fake app bytes")
+        shutil.rmtree(api._decrypted_payload_dir, ignore_errors=True)
+
+    def test_verify_install_password_wrong_password_returns_false_and_leaves_no_temp_dir(self):
+        api = make_installer_api(password_protected=True)
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)):
+            result = api.verify_install_password("wrong password")
+        self.assertFalse(result)
+        self.assertIsNone(api._decrypted_payload_dir)
+
+    def test_app_contents_dir_uses_decrypted_dir_when_protected(self):
+        api = make_installer_api(password_protected=True)
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)):
+            api.verify_install_password("correct password")
+            self.assertEqual(api._app_contents_dir(), api._decrypted_payload_dir)
+        shutil.rmtree(api._decrypted_payload_dir, ignore_errors=True)
+
+    def test_app_contents_dir_uses_resource_path_when_not_protected(self):
+        api = make_installer_api(password_protected=False)
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)):
+            self.assertEqual(api._app_contents_dir(), os.path.join(self.resource_dir, "app_contents"))
+
+    def test_decrypted_payload_dir_cleaned_up_after_trigger_installation(self):
+        """明文解密出來的暫存資料夾，不管這次安裝成功、失敗、還是中途
+        拋出未預期例外，都不該留在磁碟上——跟 install_log.txt 的寫入
+        時機一樣收在 _trigger_installation_impl() 的 finally 區塊。"""
+        api = make_installer_api()
+        leftover_dir = tempfile.mkdtemp()
+        api._decrypted_payload_dir = leftover_dir
+        with mock.patch.object(api, "_trigger_installation_impl_inner", return_value={"status": "success"}), \
+             mock.patch("installer_core.explorer_lock_release.restore_after_lock_release"):
+            api.trigger_installation()
+        self.assertFalse(os.path.exists(leftover_dir))
+        self.assertIsNone(api._decrypted_payload_dir)
+
+    def test_app_contents_dir_raises_before_password_verified(self):
+        """真實會踩到的情境：如果哪個呼叫路徑漏掉先呼叫
+        verify_install_password()，這裡要直接拋例外，不能悄悄回傳一個
+        不存在或錯誤的路徑，讓安裝流程用看起來正常、實際上是空的來源
+        資料夾繼續跑下去。"""
+        api = make_installer_api(password_protected=True)
+        with self.assertRaises(RuntimeError):
+            api._app_contents_dir()
 
 
 class TestGetUiLanguage(unittest.TestCase):
@@ -2612,6 +2707,56 @@ class TestInstallScriptHook(unittest.TestCase):
             ok, msg = api._run_install_script("pre_install_script.bat")
         self.assertFalse(ok)
         self.assertIn("boom", msg)
+
+
+class TestSilentInstallPasswordProtection(unittest.TestCase):
+    """安裝密碼保護（見 CONTEXT.md）：靜默安裝模式不能跳出任何視窗、
+    不能卡住等輸入，密碼缺少或錯誤直接中止並回傳非 0 exit code。"""
+
+    def _make_mock_api(self, MockAPI, password_protected, verify_result=None):
+        instance = MockAPI.return_value
+        instance.app_name = "MyApp"
+        instance.password_protected = password_protected
+        if verify_result is not None:
+            instance.verify_install_password.return_value = verify_result
+        instance.check_existing_install.return_value = {"exists": False}
+        instance.get_dependency_warnings.return_value = []
+        instance.trigger_installation.return_value = {"status": "success", "message": "ok"}
+        return instance
+
+    def test_correct_password_proceeds_with_install(self):
+        with mock.patch("installer_core.InstallerAPI") as MockAPI, \
+             mock.patch("installer_core._acquire_single_instance_lock", return_value=(True, None)):
+            instance = self._make_mock_api(MockAPI, password_protected=True, verify_result=True)
+            exit_code = ic.run_silent_install(password="correct")
+        instance.verify_install_password.assert_called_once_with("correct")
+        instance.trigger_installation.assert_called_once()
+        self.assertEqual(exit_code, 0)
+
+    def test_wrong_password_aborts_without_installing(self):
+        with mock.patch("installer_core.InstallerAPI") as MockAPI, \
+             mock.patch("installer_core._acquire_single_instance_lock", return_value=(True, None)):
+            instance = self._make_mock_api(MockAPI, password_protected=True, verify_result=False)
+            exit_code = ic.run_silent_install(password="wrong")
+        instance.trigger_installation.assert_not_called()
+        self.assertNotEqual(exit_code, 0)
+
+    def test_missing_password_aborts_without_installing(self):
+        with mock.patch("installer_core.InstallerAPI") as MockAPI, \
+             mock.patch("installer_core._acquire_single_instance_lock", return_value=(True, None)):
+            instance = self._make_mock_api(MockAPI, password_protected=True, verify_result=False)
+            exit_code = ic.run_silent_install(password=None)
+        instance.verify_install_password.assert_called_once_with("")
+        instance.trigger_installation.assert_not_called()
+        self.assertNotEqual(exit_code, 0)
+
+    def test_not_password_protected_ignores_password_check(self):
+        with mock.patch("installer_core.InstallerAPI") as MockAPI, \
+             mock.patch("installer_core._acquire_single_instance_lock", return_value=(True, None)):
+            instance = self._make_mock_api(MockAPI, password_protected=False)
+            exit_code = ic.run_silent_install()
+        instance.verify_install_password.assert_not_called()
+        self.assertEqual(exit_code, 0)
 
 
 class TestSilentInstallLogPath(unittest.TestCase):

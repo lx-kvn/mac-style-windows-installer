@@ -47,6 +47,7 @@ import scheduled_task
 import restore_point
 import bits_download
 import install_journal
+import install_encryption
 from install_scope import InstallScope, local_appdata_root
 
 # 目前介面 chrome（ui/index.html 裡固定的標籤、按鈕、提示文字）支援的語言，
@@ -354,6 +355,11 @@ class InstallerAPI:
         self.windows_service = {}
         self.scheduled_task = {}
         self.create_restore_point_before_install = False
+        self.password_protected = False
+        # verify_install_password() 成功後指向解密好的暫存資料夾；密碼
+        # 驗證通過前一律是 None，_app_contents_dir() 靠這個判斷「還沒
+        # 驗證密碼就想拿應用程式檔案」這種不該發生的呼叫順序。
+        self._decrypted_payload_dir = None
         self.ui_language = lang_detect.detect_system_language(SUPPORTED_UI_LANGUAGES, DEFAULT_UI_LANGUAGE)
 
         program_files = os.environ.get("ProgramFiles", "C:\\Program Files")
@@ -447,6 +453,7 @@ class InstallerAPI:
                     self.windows_service = config.get("windows_service", {}) or {}
                     self.scheduled_task = config.get("scheduled_task", {}) or {}
                     self.create_restore_point_before_install = bool(config.get("create_restore_point_before_install", False))
+                    self.password_protected = bool(config.get("password_protected", False))
         except Exception as e:
             print(f"[提示] 使用預設開發模式: {e}")
 
@@ -514,6 +521,45 @@ class InstallerAPI:
         if text:
             return text
         return next(iter(self.eula_texts.values()), "")
+
+    def is_password_protected(self):
+        """安裝密碼保護（見 CONTEXT.md「安裝密碼保護」一節）：前端在
+        pywebviewready 一開始就要問這個，決定要不要在 EULA 之前插入密碼
+        關卡。"""
+        return self.password_protected
+
+    def verify_install_password(self, password):
+        """驗證密碼並把加密的 app_contents 解密到暫存資料夾，成功回傳
+        True、密碼錯誤回傳 False。沒有密碼保護時直接回傳 True（呼叫端
+        不需要先呼叫 is_password_protected() 才決定要不要驗證）。
+
+        解密後的暫存資料夾存在 self._decrypted_payload_dir，後續
+        _app_contents_dir()／_required_size() 都靠這個取得正確的複製
+        來源，取代沒有密碼保護時直接用的 get_resource_path("app_contents")。
+        """
+        if not self.password_protected:
+            return True
+        encrypted_file = get_resource_path("app_contents.enc")
+        dest_dir = tempfile.mkdtemp(prefix="mswi_payload_")
+        try:
+            install_encryption.decrypt_to_directory(encrypted_file, dest_dir, password)
+        except install_encryption.WrongPasswordError:
+            shutil.rmtree(dest_dir, ignore_errors=True)
+            return False
+        self._decrypted_payload_dir = dest_dir
+        return True
+
+    def _app_contents_dir(self):
+        """這次安裝要複製的來源資料夾。沒有密碼保護時就是內嵌資源本身；
+        有密碼保護時必須先呼叫過 verify_install_password() 成功，才會有
+        解密後的暫存資料夾可用——漏掉這個前置呼叫直接拋例外，不要悄悄
+        回傳一個不存在或是空的路徑，讓安裝流程用看起來正常、實際上沒有
+        任何檔案的來源繼續跑下去。"""
+        if self.password_protected:
+            if not self._decrypted_payload_dir:
+                raise RuntimeError("尚未通過密碼驗證，無法取得應用程式檔案")
+            return self._decrypted_payload_dir
+        return get_resource_path("app_contents")
 
     def get_dependency_warnings(self):
         """回傳目前系統缺少的相依元件清單（key + 顯示名稱 + 下載連結），
@@ -1028,7 +1074,7 @@ class InstallerAPI:
             pass
 
     def _required_size(self):
-        return required_install_size(get_resource_path("app_contents"))
+        return required_install_size(self._app_contents_dir())
 
     def _check_disk_space(self):
         return check_disk_space(self._required_size(), self.selected_path, self.default_path)
@@ -1390,6 +1436,12 @@ class InstallerAPI:
                         f.write(content)
                 except Exception:
                     pass
+            # 安裝密碼保護（見 CONTEXT.md）：verify_install_password() 解密出來
+            # 的暫存資料夾裝的是明文應用程式檔案，不管這次安裝成功、失敗、
+            # 還是中途拋出未預期例外，都不該讓這份明文留在磁碟上。
+            if self._decrypted_payload_dir:
+                shutil.rmtree(self._decrypted_payload_dir, ignore_errors=True)
+                self._decrypted_payload_dir = None
 
     def _trigger_installation_impl_inner(self, create_desktop_shortcut, skip_process_check, log_lines, log):
         # 這一整批都提前在最外層宣告：任何階段（複製迴圈開始前/開始後、
@@ -1417,7 +1469,7 @@ class InstallerAPI:
         scheduled_task_name = ""
         journal = install_journal.InstallJournal()
         try:
-            src_dir = get_resource_path("app_contents")
+            src_dir = self._app_contents_dir()
             if not os.path.exists(src_dir):
                 self._restore_upgrade_backup()
                 return {"status": "error", "message": "安裝失敗：找不到內建軟體資源！"}
@@ -1901,13 +1953,17 @@ def _parse_cli_args():
         /NODESKTOPSHORTCUT       靜默安裝時不要建立桌面捷徑（預設會建立）
         /LOG=路徑                指定靜默安裝紀錄檔要寫到哪裡（不帶就維持原本
                                  的 %TEMP%\\<AppName>_silent_install_log.txt）
+        /PASSWORD=密碼           安裝密碼保護（見 CONTEXT.md）開啟時，靜默
+                                 安裝用這個帶密碼——比照 Inno Setup 既有的
+                                 /PASSWORD= 慣例。
 
-    回傳 (silent: bool, install_dir: str|None, create_desktop_shortcut: bool, log_path: str|None)
+    回傳 (silent: bool, install_dir: str|None, create_desktop_shortcut: bool, log_path: str|None, password: str|None)
     """
     silent = False
     install_dir = None
     create_desktop_shortcut = True
     log_path = None
+    password = None
     for raw_arg in sys.argv[1:]:
         arg = raw_arg.strip()
         upper = arg.upper()
@@ -1921,10 +1977,12 @@ def _parse_cli_args():
             create_desktop_shortcut = False
         elif upper.startswith("/LOG="):
             log_path = arg[5:].strip('"')
-    return silent, install_dir, create_desktop_shortcut, log_path
+        elif upper.startswith("/PASSWORD="):
+            password = arg[len("/PASSWORD="):].strip('"')
+    return silent, install_dir, create_desktop_shortcut, log_path, password
 
 
-def run_silent_install(install_dir=None, create_desktop_shortcut=True, log_path=None):
+def run_silent_install(install_dir=None, create_desktop_shortcut=True, log_path=None, password=None):
     """command-line 靜默安裝：完全不開視窗，給企業批次部署（登入腳本、MDM、
     群組原則）用。回傳值直接當這支 exe 的 process exit code：
     0 = 成功，非 0 = 失敗，部署腳本可以直接檢查 errorlevel（cmd）或
@@ -1978,6 +2036,14 @@ def run_silent_install(install_dir=None, create_desktop_shortcut=True, log_path=
         log(f"[錯誤] {api.app_name} 安裝程式已經在執行中。")
         return write_log_and_return(api.app_name, 1)
 
+    # 安裝密碼保護（見 CONTEXT.md「安裝密碼保護」一節）：靜默模式不能跳出
+    # 任何視窗、不能卡住等輸入，密碼缺少或錯誤直接中止並回傳非 0 exit
+    # code，原因寫進這份靜默安裝 log——跟一般靜默安裝錯誤走同一套回報
+    # 管道，不是另外開一個特殊分支。
+    if api.password_protected and not api.verify_install_password(password or ""):
+        log("[錯誤] 這個安裝檔有密碼保護，命令列缺少 /PASSWORD= 或密碼錯誤。")
+        return write_log_and_return(api.app_name, 1)
+
     existing = api.check_existing_install()
     if existing.get("exists"):
         # 實際的移除/備份/復原都交給 trigger_installation() 內部處理（跟 GUI
@@ -1998,10 +2064,10 @@ def run_silent_install(install_dir=None, create_desktop_shortcut=True, log_path=
 
 
 if __name__ == '__main__':
-    _silent, _cli_install_dir, _cli_desktop_shortcut, _cli_log_path = _parse_cli_args()
+    _silent, _cli_install_dir, _cli_desktop_shortcut, _cli_log_path, _cli_password = _parse_cli_args()
 
     if _silent:
-        sys.exit(run_silent_install(_cli_install_dir, _cli_desktop_shortcut, _cli_log_path))
+        sys.exit(run_silent_install(_cli_install_dir, _cli_desktop_shortcut, _cli_log_path, _cli_password))
 
     # 讓 Windows 在非 100% 縮放比例下不要把整個視窗畫面當點陣圖拉伸，避免文字模糊。
     try:

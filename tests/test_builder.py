@@ -392,6 +392,113 @@ class TestConfigAssembly(BuildAllTestBase):
         self.assertEqual(captured["doc_icons"], {})
 
 
+class TestInstallPasswordProtection(BuildAllTestBase):
+    """安裝密碼保護（見 CONTEXT.md「安裝密碼保護」一節）：install_password_env
+    有設定時，app_dir 整包加密成一份檔案再內嵌，不直接把明文資料夾塞進
+    --add-data；installer_config.json 寫入 password_protected 旗標，供
+    installer_core.py 在安裝時知道要不要跳密碼關卡。"""
+
+    def setUp(self):
+        super().setUp()
+        with open(os.path.join(self.app_dir, "main.exe"), "wb") as f:
+            f.write(b"fake main exe bytes")
+
+    def test_password_protected_flag_written_to_config_when_set(self):
+        captured = {}
+
+        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+            if "uninstall.py" in cmd:
+                os.makedirs(self.dist_dir, exist_ok=True)
+                with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
+                    f.write(b"FAKE")
+            else:
+                with open(os.path.join(self.workspace_dir, "installer_config.json"), encoding="utf-8") as f:
+                    captured.update(json.load(f))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch.dict(os.environ, {"MY_TEST_BUILD_INSTALL_PW": "hunter2"}):
+            self._call_build_all(run_side_effect=fake_run, install_password_env="MY_TEST_BUILD_INSTALL_PW")
+        self.assertTrue(captured["password_protected"])
+
+    def test_password_protected_defaults_to_false(self):
+        captured = {}
+
+        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+            if "uninstall.py" in cmd:
+                os.makedirs(self.dist_dir, exist_ok=True)
+                with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
+                    f.write(b"FAKE")
+            else:
+                with open(os.path.join(self.workspace_dir, "installer_config.json"), encoding="utf-8") as f:
+                    captured.update(json.load(f))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        self._call_build_all(run_side_effect=fake_run)
+        self.assertFalse(captured["password_protected"])
+
+    def test_app_contents_embedded_as_encrypted_file_not_plaintext_folder(self):
+        """真實會發生的問題：如果密碼保護開著，卻還是照舊把明文 app_dir
+        整包塞進 --add-data，密碼保護形同虛設——這裡鎖住『有密碼保護時，
+        --add-data 絕對不能直接指向明文的 app_dir』這件事。"""
+        captured_cmd = {}
+
+        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+            if "uninstall.py" in cmd:
+                os.makedirs(self.dist_dir, exist_ok=True)
+                with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
+                    f.write(b"FAKE")
+            else:
+                captured_cmd["cmd"] = list(cmd)
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch.dict(os.environ, {"MY_TEST_BUILD_INSTALL_PW": "hunter2"}):
+            self._call_build_all(run_side_effect=fake_run, install_password_env="MY_TEST_BUILD_INSTALL_PW")
+
+        app_contents_args = [a for a in captured_cmd["cmd"] if a.startswith("--add-data") and "app_contents" in a]
+        self.assertFalse(
+            any(a == f"--add-data={self.app_dir};app_contents" for a in app_contents_args),
+            "密碼保護開啟時，不應該直接把明文 app_dir 塞進 --add-data",
+        )
+
+    def test_encrypted_payload_temp_file_cleaned_up_after_build(self):
+        temp_files_during_build = {}
+
+        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+            if "uninstall.py" in cmd:
+                os.makedirs(self.dist_dir, exist_ok=True)
+                with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
+                    f.write(b"FAKE")
+            else:
+                temp_files_during_build["files"] = set(os.listdir(self.workspace_dir))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch.dict(os.environ, {"MY_TEST_BUILD_INSTALL_PW": "hunter2"}):
+            self._call_build_all(run_side_effect=fake_run, install_password_env="MY_TEST_BUILD_INSTALL_PW")
+
+        encrypted_files_during = {f for f in temp_files_during_build["files"] if f.endswith(".enc")}
+        self.assertTrue(encrypted_files_during, "編譯當下應該有暫存的加密檔案存在，才能被 --add-data 內嵌")
+
+        remaining_after = {f for f in os.listdir(self.workspace_dir) if f.endswith(".enc")}
+        self.assertEqual(remaining_after, set(), "編譯完成後，暫存的加密檔案應該被清乾淨")
+
+    def test_no_password_protection_still_embeds_plaintext_app_dir(self):
+        """沒設定 install_password_env 時，行為完全不變——不應該無緣無故
+        多一道加密/解密流程。"""
+        captured_cmd = {}
+
+        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+            if "uninstall.py" in cmd:
+                os.makedirs(self.dist_dir, exist_ok=True)
+                with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
+                    f.write(b"FAKE")
+            else:
+                captured_cmd["cmd"] = list(cmd)
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        self._call_build_all(run_side_effect=fake_run)
+        self.assertIn(f"--add-data={self.app_dir};app_contents", captured_cmd["cmd"])
+
+
 class TestTempArtifactCleanupOnFailure(BuildAllTestBase):
     """真實抓到的問題（F19）：暫存產物（doc_icon.ico、內嵌的前後置腳本、
     下載下來要內嵌的相依元件安裝檔）原本只有在函式順利跑到最後一段

@@ -42,6 +42,15 @@
     - 桌面捷徑小勾選：畫面下方新增一個不搶視覺的勾選框，值會傳給
       trigger_installation(create_desktop_shortcut)。
     - 安裝完成彈窗新增「立即執行程式」勾選，完成按鈕會依勾選狀態呼叫 launch_app()。
+
+    安裝密碼保護（見 CONTEXT.md「安裝密碼保護」一節）：
+    - 密碼關卡是 EULA 之前的另一道前置關卡，比照 eula-view 同一種「先過
+      這關才能繼續」的模式：is_password_protected() 回傳 true 時，
+      pywebviewready 一開始先顯示 passwordView，通過驗證（呼叫
+      verify_install_password()）才會依序看到 EULA、主拖曳畫面；沒有
+      密碼保護的安裝檔完全跳過這一段，行為不變。
+    - 密碼錯誤不限制重試次數（定位是存取控制，不是防暴力破解），只在
+      畫面上顯示錯誤訊息，讓使用者可以直接重新輸入再試一次。
 -->
 <!DOCTYPE html>
 <html lang="zh-TW">
@@ -69,6 +78,11 @@
             transition: background-color 0.2s, color 0.2s; z-index: 9999;
         }
         .custom-close-btn:hover { background-color: rgba(0, 0, 0, 0.06); color: #1d1d1f; }
+        /* 真實抓到的無障礙問題：這個關閉鈕原本是 <div onclick>，div 預設
+           不在 Tab 鍵操作順序裡，鍵盤使用者完全按不到。補上 tabindex/
+           role="button" 讓它進入 Tab 順序、可以被螢幕報讀器辨識成按鈕，
+           這裡另外補上鍵盤焦點框（跟 .nice-btn 用同一套視覺）。 */
+        .custom-close-btn:focus-visible { outline: 2px solid #0071e3; outline-offset: 2px; background-color: rgba(0, 0, 0, 0.06); color: #1d1d1f; }
         .css-close-icon { position: relative; width: 10px; height: 10px; }
         .css-close-icon::before, .css-close-icon::after {
             content: ''; position: absolute; top: 50%; left: 0; width: 10px; height: 1.5px;
@@ -136,11 +150,23 @@
         .nice-title { font-size: 17px; font-weight: 600; color: #1d1d1f; margin-bottom: 6px; }
         .nice-message { font-size: 13px; color: #86868b; margin-bottom: 20px; text-align: left; line-height: 1.6; }
         .nice-btn {
-            background: #0071e3; color: white; border: none; padding: 8px 24px;
+            background: #0071e3; color: white; border: none;
+            /* 真實抓到的問題：中文字（CJK）字型本身的字面框（glyph metrics）
+               上下不對稱，就算 line-height 調整過，實測文字上方留白 11px、
+               下方 14px，還是偏上約 3px。這裡改用上下不對稱的 padding
+               直接補償（9px/7px，總高度跟原本的 8px/8px 一致，按鈕本身
+               大小不變），不再靠調 line-height 去猜。 */
+            padding: 9px 24px 7px 24px;
             border-radius: 20px; font-size: 13px; font-weight: 500; cursor: pointer;
             transition: background 0.2s; outline: none; margin: 0 4px;
+            line-height: 1.2;
         }
         .nice-btn:hover { background: #0077ED; }
+        /* 真實抓到的無障礙問題：outline: none 拿掉瀏覽器預設的鍵盤焦點框，
+           但沒有補一個替代的視覺標記——用 Tab 鍵切換時，使用者完全看不出
+           目前選到哪個按鈕。用 :focus-visible（只在鍵盤導覽時顯示，滑鼠
+           點擊不顯示，避免點擊後殘留一圈看起來像 bug）補上藍色外框。 */
+        .nice-btn:focus-visible { outline: 2px solid #0071e3; outline-offset: 2px; }
         .nice-btn.secondary { background: #e5e5ea; color: #1d1d1f; }
         .nice-btn.secondary:hover { background: #d8d8dd; }
         /* 「略過偵測，強制繼續」這類最後手段選項：視覺份量刻意比 .secondary
@@ -161,6 +187,18 @@
         .eula-title { font-size: 16px; font-weight: 600; color: #1d1d1f; margin-bottom: 10px; text-align: center; }
         .eula-text-box { flex: 1; overflow-y: auto; background: white; border: 1px solid #e5e5ea; border-radius: 10px; padding: 16px; font-size: 12px; color: #3a3a3c; line-height: 1.7; white-space: pre-wrap; max-height: 320px; }
         .eula-actions { display: flex; justify-content: center; gap: 10px; margin-top: 16px; }
+
+        /* 密碼關卡：跟 eula-view 同一種「前置關卡」模式，出現在 EULA 之前。 */
+        .password-view { display: none; flex-direction: column; align-items: center; width: 360px; margin-top: 8px; }
+        .password-view.active { display: flex; }
+        .password-title { font-size: 16px; font-weight: 600; color: #1d1d1f; margin-bottom: 10px; text-align: center; }
+        .password-hint { font-size: 12px; color: #6e6e73; margin-bottom: 16px; text-align: center; }
+        .password-input { width: 100%; box-sizing: border-box; padding: 10px 14px; border: 1px solid #e5e5ea; border-radius: 10px; font-size: 14px; color: #1d1d1f; font-family: inherit; }
+        .password-input:focus { outline: none; border-color: #0071e3; box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.15); }
+        .password-input.invalid { border-color: #ff3b30; }
+        .password-error { display: none; font-size: 12px; color: #ff3b30; margin-top: 8px; text-align: center; }
+        .password-error.active { display: block; }
+        .password-actions { display: flex; justify-content: center; gap: 10px; margin-top: 16px; }
 
         /* 相依元件自動安裝頁：跟 eula-view 一樣是獨立畫面（不是 modal），
            安裝期間取代 mainView 顯示，裝完/失敗後切回去。 */
@@ -184,8 +222,20 @@
 
     <div class="drag-region" id="dragRegion"></div>
 
-    <div class="custom-close-btn" onclick="closeWindow();" title="關閉" data-i18n-title="close_title">
+    <div class="custom-close-btn" onclick="closeWindow();" onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); closeWindow(); }" tabindex="0" role="button" title="關閉" data-i18n-title="close_title">
         <div class="css-close-icon"></div>
+    </div>
+
+    <!-- 密碼關卡：is_password_protected() 為 true 時才會顯示，出現在 EULA 之前 -->
+    <div class="password-view" id="passwordView">
+        <div class="password-title" id="passwordTitle" data-i18n="password_gate_title">這個安裝檔需要密碼</div>
+        <div class="password-hint" id="passwordHint" data-i18n="password_gate_hint">請輸入安裝密碼以繼續</div>
+        <input type="password" class="password-input" id="passwordInput" data-i18n-placeholder="password_input_placeholder" placeholder="密碼" autocomplete="off">
+        <div class="password-error" id="passwordError" data-i18n="password_wrong_error">密碼錯誤，請重新輸入</div>
+        <div class="password-actions">
+            <button class="nice-btn secondary" onclick="declinePassword()" data-i18n="btn_decline">不同意</button>
+            <button class="nice-btn" onclick="submitPassword()" data-i18n="btn_password_submit">確定</button>
+        </div>
     </div>
 
     <!-- EULA 同意頁：eula_text 非空時才會顯示 -->
@@ -322,6 +372,11 @@
         const I18N = {
             "zh-TW": {
                 close_title: "關閉",
+                password_gate_title: "這個安裝檔需要密碼",
+                password_gate_hint: "請輸入安裝密碼以繼續",
+                password_input_placeholder: "密碼",
+                password_wrong_error: "密碼錯誤，請重新輸入",
+                btn_password_submit: "確定",
                 eula_title: "使用者授權合約",
                 btn_decline: "不同意",
                 btn_accept: "同意並繼續",
@@ -361,6 +416,11 @@
             },
             "en": {
                 close_title: "Close",
+                password_gate_title: "This installer requires a password",
+                password_gate_hint: "Please enter the installation password to continue",
+                password_input_placeholder: "Password",
+                password_wrong_error: "Incorrect password, please try again",
+                btn_password_submit: "OK",
                 eula_title: "End User License Agreement",
                 btn_decline: "Decline",
                 btn_accept: "Agree & Continue",
@@ -412,6 +472,7 @@
             document.documentElement.setAttribute("lang", currentLang);
             document.querySelectorAll("[data-i18n]").forEach(el => { el.innerText = t(el.dataset.i18n); });
             document.querySelectorAll("[data-i18n-title]").forEach(el => { el.setAttribute("title", t(el.dataset.i18nTitle)); });
+            document.querySelectorAll("[data-i18n-placeholder]").forEach(el => { el.setAttribute("placeholder", t(el.dataset.i18nPlaceholder)); });
         }
         function closeWindow() { if (window.pywebview && window.pywebview.api && window.pywebview.api.close_window) { pywebview.api.close_window(); } }
 
@@ -582,6 +643,19 @@
             appLabel.innerText = appName;
             appLabel.setAttribute('title', appName);
 
+            // 密碼關卡：出現在 EULA 之前，通過驗證才會往下走既有的
+            // EULA/主拖曳畫面流程；沒有密碼保護的安裝檔完全跳過這一段。
+            const passwordProtected = await pywebview.api.is_password_protected();
+            if (passwordProtected) {
+                setMainViewVisible(false);
+                document.getElementById('passwordView').classList.add('active');
+                document.getElementById('passwordInput').focus();
+            } else {
+                checkEulaAndProceed();
+            }
+        });
+
+        async function checkEulaAndProceed() {
             const eulaText = await pywebview.api.get_eula_text();
             if (eulaText && eulaText.trim().length > 0) {
                 document.getElementById('eulaTextBox').innerText = eulaText;
@@ -591,6 +665,28 @@
                 setMainViewVisible(true);
                 afterEula();
             }
+        }
+
+        // ---------------- 密碼關卡 ----------------
+        function declinePassword() { closeWindow(); }
+        async function submitPassword() {
+            const input = document.getElementById('passwordInput');
+            const errorEl = document.getElementById('passwordError');
+            const ok = await pywebview.api.verify_install_password(input.value);
+            if (ok) {
+                document.getElementById('passwordView').classList.remove('active');
+                errorEl.classList.remove('active');
+                input.classList.remove('invalid');
+                checkEulaAndProceed();
+            } else {
+                errorEl.classList.add('active');
+                input.classList.add('invalid');
+                input.focus();
+                input.select();
+            }
+        }
+        document.getElementById('passwordInput').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') submitPassword();
         });
 
         async function afterEula() {

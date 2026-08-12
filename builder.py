@@ -48,6 +48,7 @@ from datetime import datetime
 
 import dependency_defs
 import version_info
+import install_encryption
 
 CONFIG_FILE_NAME = "installer_config.json"
 
@@ -114,7 +115,8 @@ def build_all(
     restart_explorer_on_update=False, no_admin_install=False, pre_install_script="", post_install_script="",
     custom_dependencies=None, bundle_dependencies=None, signing=None, custom_install_dir="",
     windows_service=None, scheduled_task=None, dependencies_min_version=None,
-    create_restore_point_before_install=False, workspace_dir=".", progress_callback=None,
+    create_restore_point_before_install=False, install_password_env="",
+    workspace_dir=".", progress_callback=None,
 ):
     """流水線：產生配置 -> 編譯反安裝檔 -> 編譯主安裝檔
 
@@ -219,6 +221,7 @@ def build_all(
         "create_restore_point_before_install": bool(create_restore_point_before_install),
         "pre_install_script": pre_install_embedded,
         "post_install_script": post_install_embedded,
+        "password_protected": bool(install_password_env),
     }
     config_path = os.path.join(workspace_dir, CONFIG_FILE_NAME)
     with open(config_path, "w", encoding="utf-8") as f:
@@ -304,7 +307,6 @@ def build_all(
         "--noconsole",
         f"--name={exe_name}",
         "--add-data=ui;ui",
-        f"--add-data={app_dir};app_contents",
         f"--add-data={config_path};.",
         f"--add-data={built_uninstall};.",
         f"--icon={ico_path}",
@@ -331,7 +333,21 @@ def build_all(
     temp_doc_icons = []
     temp_scripts = []
     temp_dependency_files = []
+    # 安裝密碼保護（見 CONTEXT.md「安裝密碼保護」一節）：有設定
+    # install_password_env 時，app_dir 整包加密成一份檔案再內嵌，
+    # 不能像沒設定密碼保護時那樣直接把明文 app_dir 塞進 --add-data，
+    # 不然密碼保護形同虛設。這份暫存加密檔跟其他暫存產物一樣，在
+    # 下面的 finally 區塊統一清掉。
+    temp_encrypted_payload = None
     try:
+        if install_password_env:
+            password = os.environ.get(install_password_env, "")
+            temp_encrypted_payload = os.path.join(workspace_dir, "app_contents.enc")
+            install_encryption.encrypt_directory(app_dir, temp_encrypted_payload, password)
+            cmd.append(f"--add-data={temp_encrypted_payload};.")
+        else:
+            cmd.append(f"--add-data={app_dir};app_contents")
+
         if doc_icon_path:
             # --add-data 不會重新命名檔案，會保留使用者選的原始檔名，
             # 所以跟現有的 PNG 圖示（temp_icon）一樣，先複製一份固定檔名
@@ -412,6 +428,8 @@ def build_all(
         for temp_path in (uninstall_version_file, main_version_file):
             if os.path.exists(temp_path):
                 os.remove(temp_path)
+        if temp_encrypted_payload and os.path.exists(temp_encrypted_payload):
+            os.remove(temp_encrypted_payload)
 
     if res_installer.returncode != 0:
         tail = ((res_installer.stdout or "") + "\n" + (res_installer.stderr or ""))[-1500:]

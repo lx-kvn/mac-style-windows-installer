@@ -41,7 +41,7 @@ SHARED_DEEP_MODULES = [
     "restart_manager.py", "dependency_defs.py", "install_scope.py",
     "self_delete.py", "system_entries.py", "explorer_lock_release.py",
     "windows_service.py", "scheduled_task.py", "restore_point.py", "bits_download.py",
-    "install_journal.py",
+    "install_journal.py", "install_encryption.py",
 ]
 
 
@@ -249,6 +249,23 @@ def _validate_signing_config(signing_raw):
     }, None
 
 
+def _validate_install_password_env(install_password_env_raw):
+    """驗證 install_password_env（安裝密碼保護，見 CONTEXT.md「安裝密碼
+    保護」一節），回傳 (install_password_env_or_empty_string, error_or_None)。
+
+    比照 _validate_signing_config() 的 cert_password_env 規則：密碼本身
+    不放在設定檔裡，只存存放密碼的環境變數名稱；只檢查環境變數有沒有
+    值，不額外要求密碼長度/複雜度——這是使用者自己開發環境裡設定的
+    密碼，工具沒有立場替使用者決定「多長才算安全」，也要跟結構幾乎
+    一樣的 cert_password_env 保持同一套規則，不要兩邊不同調。"""
+    install_password_env = str(install_password_env_raw or "").strip()
+    if not install_password_env:
+        return "", None
+    if not os.environ.get(install_password_env):
+        return None, f"欄位驗證失敗：<br>環境變數「{install_password_env}」目前沒有值，請先設定好安裝密碼再打包。"
+    return install_password_env, None
+
+
 def _validate_dependency_policy(dependencies, custom_dependencies_raw, bundle_dependencies_raw):
     """驗證 custom_dependencies/bundle_dependencies，回傳
     (custom_dependencies, bundle_dependencies, error_or_None)。
@@ -375,6 +392,7 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     custom_dependencies_raw = data.get("custom_dependencies", []) or []
     bundle_dependencies_raw = data.get("bundle_dependencies", []) or []
     signing_raw = data.get("signing", {}) or {}
+    install_password_env_raw = data.get("install_password_env", "")
     windows_service_raw = data.get("windows_service", {}) or {}
     scheduled_task_raw = data.get("scheduled_task", {}) or {}
     dependencies_min_version_raw = data.get("dependencies_min_version", {}) or {}
@@ -519,6 +537,12 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     if error:
         return None, error
 
+    # install_password_env 只跟自己有關，驗證規則收在
+    # _validate_install_password_env()（見上方）。
+    install_password_env, error = _validate_install_password_env(install_password_env_raw)
+    if error:
+        return None, error
+
     pack_data = dict(data)
     pack_data["folder_name"] = folder_name
     pack_data["file_associations"] = file_associations
@@ -539,4 +563,5 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     pack_data["custom_dependencies"] = custom_dependencies
     pack_data["bundle_dependencies"] = bundle_dependencies
     pack_data["signing"] = signing
+    pack_data["install_password_env"] = install_password_env
     return pack_data, None

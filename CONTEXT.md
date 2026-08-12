@@ -208,3 +208,43 @@ FileVersion/CompanyName/LegalCopyright 這些欄位嵌進 exe 資源，這個專
 欄位，`LegalCopyright` 由「建置當下年份 + 發行者」自動組成，不新增 GUI
 欄位）。這個模組只在開發機的建置流程用到，不會被打包進最終 exe，所以
 不列進 `packaging_core.py` 的 `SHARED_DEEP_MODULES`。
+
+## 安裝密碼保護（Install Password Protection）
+
+**設計階段，尚未實作**（2026-08-12 grilling session 定案，見對應的實作
+task）。選填功能：打包時可以設定一組密碼，安裝時使用者要輸入正確密碼
+才能繼續，否則無法取得應用程式檔案。定位是**存取控制**（防止安裝檔被
+誤傳/亂用），不是防範有心人暴力破解的資安機制——這個定位決定了下面
+好幾個子決策的方向，不要事後模糊掉。
+
+**加密範圍**：只加密內嵌的應用程式檔案本體（`builder.py` 現有
+`--add-data={app_dir};app_contents` 這塊），不加密整個安裝程式——EULA、
+拖曳互動、相依元件偵測這些安裝流程本身的邏輯照常執行，不受密碼保護
+影響。
+
+**打包時**：`app_dir` 整包（不是逐檔案）加密成一份檔案，`--add-data`
+改指向這份加密檔而不是原始資料夾，比照 `doc_icon`/`dependencies` 現有
+「先暫存再 `--add-data`」的模式。密碼透過新增的 JSON 欄位
+**`install_password_env`**（環境變數名稱，不是密碼明文，比照現有
+`signing.cert_password_env` 的做法）在打包當下讀出；`validate_and_build_pack_data()`
+的驗證規則也直接比照 `cert_password_env`——只檢查環境變數有沒有值，
+不額外要求密碼長度/複雜度。演算法用 AES-256-GCM + PBKDF2 金鑰衍生，
+透過新增的 `cryptography` 套件（這個專案第一個真正的第三方加密相依
+套件，PyInstaller 有現成支援）——刻意不用 ctypes 直接刻 BCrypt，因為
+加密邏輯寫錯是資安問題，不該冒手刻 ctypes 介面出錯的風險。
+
+**安裝時**：密碼輸入畫面是一道「前置關卡」，比照現有 EULA 同意頁的
+模式，出現在 EULA **之前**——安裝程式一開啟，有設定密碼保護的話先跳
+這關，通過才會依序看到 EULA、主拖曳畫面。密碼正確後解密整份加密檔到
+一個暫存資料夾，之後完全沿用 `_trigger_installation_impl_inner()`
+現有的複製迴圈/完整性驗證/rollback 邏輯，只是複製來源從
+`get_resource_path("app_contents")` 換成這個解密後的暫存資料夾——這段
+既有邏輯已經踩過好幾輪真實 bug 修正，不去動它。密碼輸入錯誤**不限制
+重試次數**（跟前面的存取控制定位一致：不是要擋暴力猜測，那是 PBKDF2
+高迭代次數的責任，不是 UI 層重試次數限制的責任）。
+
+**靜默安裝**：比照 Inno Setup 既有慣例，新增 **`/PASSWORD=密碼`**
+命令列旗標。沒帶密碼或密碼錯誤時，靜默模式**不能跳出任何視窗、不能
+卡住等輸入**，直接中止並回傳非 0 exit code，原因寫進既有的靜默安裝
+log 機制（`%TEMP%\<app_name>_silent_install_log.txt` 或 `/LOG=` 指定
+路徑）。

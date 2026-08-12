@@ -114,6 +114,8 @@ class TestEnsureWorkspaceFiles(unittest.TestCase):
             f.write("# NEW bits_download content")
         with open(os.path.join(self.embedded_dir, "install_journal.py"), "w") as f:
             f.write("# NEW install_journal content")
+        with open(os.path.join(self.embedded_dir, "install_encryption.py"), "w") as f:
+            f.write("# NEW install_encryption content")
         os.makedirs(os.path.join(self.embedded_dir, "ui"))
         with open(os.path.join(self.embedded_dir, "ui", "index.html"), "w") as f:
             f.write("<!-- NEW index.html -->")
@@ -737,6 +739,34 @@ class TestValidateSigningConfig(unittest.TestCase):
             shutil.rmtree(tmp_dir, ignore_errors=True)
         self.assertIsNone(error)
         self.assertEqual(signing["timestamp_url"], "http://timestamp.digicert.com")
+
+
+class TestValidateInstallPasswordEnv(unittest.TestCase):
+    """_validate_install_password_env()（安裝密碼保護，見 CONTEXT.md）：
+    比照 _validate_signing_config() 的 cert_password_env 規則——密碼本身
+    不放在設定檔裡，只存環境變數名稱，只檢查環境變數有沒有值，不額外
+    要求密碼長度/複雜度。"""
+
+    def test_empty_value_is_valid_and_feature_off(self):
+        install_password_env, error = packaging_core._validate_install_password_env("")
+        self.assertEqual(install_password_env, "")
+        self.assertIsNone(error)
+
+    def test_missing_env_var_value_is_rejected(self):
+        os.environ.pop("MY_TEST_INSTALL_PW_MISSING_UNIT", None)
+        install_password_env, error = packaging_core._validate_install_password_env(
+            "MY_TEST_INSTALL_PW_MISSING_UNIT"
+        )
+        self.assertIsNone(install_password_env)
+        self.assertIsNotNone(error)
+
+    def test_env_var_with_value_passes(self):
+        with mock.patch.dict(os.environ, {"MY_TEST_INSTALL_PW_UNIT": "hunter2"}):
+            install_password_env, error = packaging_core._validate_install_password_env(
+                "MY_TEST_INSTALL_PW_UNIT"
+            )
+        self.assertEqual(install_password_env, "MY_TEST_INSTALL_PW_UNIT")
+        self.assertIsNone(error)
 
 
 class TestValidateDependencyPolicy(unittest.TestCase):

@@ -62,6 +62,7 @@ TEMPLATE = {
     "windows_service": {"service_name": "", "exe_relative_path": "", "start_type": "auto"},
     "scheduled_task": {"task_name": "", "exe_relative_path": "", "trigger": "onlogon"},
     "create_restore_point_before_install": False,
+    "install_password_env": "",
 }
 
 # 純量欄位：CLI flag 名稱 -> data 字典鍵名，CLI 有帶值就覆蓋 JSON 對應欄位。
@@ -78,6 +79,7 @@ _SCALAR_OVERRIDE_FIELDS = [
     ("pre_install_script", "pre_install_script"),
     ("post_install_script", "post_install_script"),
     ("custom_install_dir", "custom_install_dir"),
+    ("install_password_env", "install_password_env"),
 ]
 
 
@@ -211,6 +213,7 @@ def _load_pack_input(args):
     data.setdefault("scheduled_task", data.get("scheduled_task", {}))
     data.setdefault("dependencies_min_version", data.get("dependencies_min_version", {}))
     data.setdefault("create_restore_point_before_install", bool(data.get("create_restore_point_before_install", False)))
+    data.setdefault("install_password_env", data.get("install_password_env", ""))
 
     return data, app_dir, png_path, ico_path, doc_icon_path_selected
 
@@ -279,6 +282,7 @@ def cmd_pack(args):
             scheduled_task=pack_data.get("scheduled_task", {}),
             dependencies_min_version=pack_data.get("dependencies_min_version", {}),
             create_restore_point_before_install=pack_data.get("create_restore_point_before_install", False),
+            install_password_env=pack_data.get("install_password_env", ""),
             workspace_dir=workspace_dir,
             progress_callback=progress_handler,
         )
