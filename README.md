@@ -92,7 +92,7 @@ python build_config_tool.py
 
 This opens a small build GUI where you can pick a custom `.ico` and watch the PyInstaller output as it runs.
 
-Full documentation: see [`使用說明書.md`](使用說明書.md) (Traditional Chinese).
+Full documentation: see [`使用說明書.md`](docs/使用說明書.md) (Traditional Chinese).
 
 ### Roadmap
 
@@ -194,12 +194,12 @@ python build_config_tool.py
 
 會開啟一個小型建置 GUI，可以選自訂的 `.ico`，並即時看到 PyInstaller 的輸出過程。
 
-完整文件請見 [`使用說明書.md`](使用說明書.md)。
+完整文件請見 [`使用說明書.md`](docs/使用說明書.md)。
 
 ### 未來方向
 
 - [ ] 幫 `InstallerBuilder.exe` 透過 [SignPath Foundation](https://signpath.org/) 的免費開源方案做數位簽章（需要這個 repo 本身加上 GitHub Actions 建置流程；注意打包工具**產出**的安裝檔還是簽不到，因為那些是在使用者本機編譯出來的，不經過這個 repo 的 CI）
-- [ ] 多語言介面——**還沒開始，可行性仍在評估。** 除非真的有非中文使用者提出需求，否則優先度偏低
+- [ ] 補齊 `ui/index.html` 漏翻譯的英文字串、把後端動態訊息（進度/錯誤文字）也納入多語言範圍（見〈已知限制〉）
 - [ ] 完整性驗證的雜湊演算法升級選項（目前是 CRC32，未來可以考慮為更高安全需求的情境提供更強的密碼學雜湊）
 - [ ] 讓**輸出的安裝檔**也能被簽章（代表要把編譯流程搬進 CI，是比較大的架構調整）
 
@@ -207,7 +207,7 @@ python build_config_tool.py
 
 - 打包工具本身、以及它產出的安裝檔，目前都還沒有數位簽章（見〈未來方向〉）。
 - 相依元件檢查（VC++ Redistributable、.NET Desktop Runtime）只做偵測，不會靜默安裝該元件本身。
-- 目前沒有多語言介面，全部是繁體中文。
+- 多語言介面已支援 `zh-TW`/`en`（依系統語言自動偵測，三個進入點——安裝、解除安裝、打包工具本身——都有），但範圍不完整：`ui/index.html`（安裝精靈主畫面）有 7 個字串還沒翻成英文（「程式正在執行」/「檔案使用中」/「偵測到較新版本」這三組畫面），英文系統上會 fallback 顯示中文；後端動態產生的進度/錯誤文字（例如「正在複製檔案...」）完全沒有納入這套機制，永遠是繁體中文。
 - 非常舊、沒更新過的 Windows 10 機器，可能需要另外安裝 WebView2 Runtime。
 
 ### 授權

@@ -5,7 +5,7 @@
 把一個應用程式資料夾打包成 macOS 風格拖曳安裝視窗的 Setup exe。
 
 跟圖形介面版本（`InstallerBuilder.exe`/`gui_config.py`，見
-[`使用說明書.md`](使用說明書.md)）共用完全相同的驗證跟編譯邏輯
+[`使用說明書.md`](docs/使用說明書.md)）共用完全相同的驗證跟編譯邏輯
 （`packaging_core.py`/`builder.py`），差別只在「資料從哪裡來」（這裡是
 JSON 設定檔 + 命令列參數，不是表單）跟「進度怎麼呈現」（印到終端機，
 不是視窗裡的進度條）。兩邊產出的安裝檔完全等價。
@@ -78,7 +78,7 @@ python builder_cli.py pack --config app.json [--其他 flag 覆蓋個別欄位..
 以下欄位可以寫在 JSON 設定檔裡，也可以用對應的命令列 flag 覆蓋
 （flag 名稱把底線換成連字號，例如 `app_name` 對應 `--app-name`）。
 **這是「打包時的輸入」，跟打包完產生、內嵌進安裝檔裡的
-`installer_config.json`（見 `規格文件.md` §5.1）是兩個不同的東西**——
+`installer_config.json`（見 `docs/規格文件.md` §5.1）是兩個不同的東西**——
 這份是你要「告訴打包工具做什麼」，那份是打包工具「做完之後留下的紀錄」，
 兩者欄位大致對應但用途不同，不要搞混。
 
