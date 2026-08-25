@@ -1,11 +1,13 @@
 """
 system_entries.py
 ------------------
-解除安裝登錄表項目 / 捷徑 / PATH 環境變數這三種系統層級寫入的「移除」
-原語。原本這幾個函式只活在 uninstall.py 裡（真正解除安裝時才會用到）；
-現在收斂成獨立模組，讓 installer_core.py 安裝失敗時的 rollback 也能呼叫
-同一份實作，清掉這次安裝已經寫入的部分，不用另外維護一份邏輯幾乎一樣
-的複本。
+安裝/解除安裝流程共用的系統層級「移除」原語：解除安裝登錄表項目 / 捷徑 /
+PATH 環境變數這三種登錄表寫入的移除，加上跟登錄表無關的兩個原語——清掉
+刪檔後留下的空目錄（`cleanup_empty_dirs()`）、強制關閉正在執行的主程式
+（`kill_process_by_name()`）。原本這幾個函式只活在 uninstall.py 裡（或
+installer_core.py 各自重複一份幾乎相同的實作），現在收斂成獨立模組，讓
+installer_core.py 安裝失敗時的 rollback、以及安裝/解除安裝流程都能呼叫
+同一份實作，不用另外維護邏輯幾乎一樣的複本。
 
 跟 file_assoc.py 用同一種 registry seam：`registry` 參數預設是真正的
 winreg 模組；測試直接把 tests/_fakes.py 的 FakeWinReg 當參數傳進去，
@@ -16,6 +18,7 @@ hive/目錄的判斷收在 install_scope.InstallScope，跟 installer_core.py
 """
 import ctypes
 import os
+import subprocess
 import winreg as _real_winreg
 
 from install_scope import InstallScope
@@ -71,3 +74,45 @@ def remove_from_path(install_path, no_admin_install=False, registry=_real_winreg
         )
     except Exception:
         pass
+
+
+def cleanup_empty_dirs(root_dir):
+    """清掉 root_dir 底下因為刪檔而變空的子目錄（由裡到外），root_dir
+    本身如果也空了就一併刪除。installer_core.py 安裝失敗 rollback 跟
+    uninstall.py 解除安裝流程都走這個共用邏輯。"""
+    try:
+        for root, dirs, files in os.walk(root_dir, topdown=False):
+            for d in dirs:
+                dpath = os.path.join(root, d)
+                try:
+                    if not os.listdir(dpath):
+                        os.rmdir(dpath)
+                except Exception:
+                    pass
+        if os.path.exists(root_dir) and not os.listdir(root_dir):
+            os.rmdir(root_dir)
+    except Exception:
+        pass
+
+
+def kill_process_by_name(exe_name):
+    """強制關閉指定檔名的行程（只取檔名，忽略路徑），使用者在「偵測到
+    主程式正在執行」的彈窗按下「關閉並繼續」時，安裝/解除安裝流程都會
+    呼叫這個。
+
+    回傳值檢查 taskkill 的 returncode，不是「呼叫沒拋例外就一律回傳
+    True」——找不到目標程序時 taskkill 會用非 0 的 returncode 表示
+    失敗（stderr 導到 DEVNULL），這裡如實反映有沒有真的成功。
+    """
+    if not exe_name:
+        return False
+    try:
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        result = subprocess.run(
+            ["taskkill", "/f", "/im", os.path.basename(exe_name)],
+            creationflags=creationflags, timeout=10,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False

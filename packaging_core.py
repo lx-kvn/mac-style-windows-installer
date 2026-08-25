@@ -41,7 +41,7 @@ SHARED_DEEP_MODULES = [
     "restart_manager.py", "dependency_defs.py", "install_scope.py",
     "self_delete.py", "system_entries.py", "explorer_lock_release.py",
     "windows_service.py", "scheduled_task.py", "restore_point.py", "bits_download.py",
-    "install_journal.py", "install_encryption.py",
+    "install_journal.py", "install_encryption.py", "progress_report.py",
 ]
 
 

@@ -863,7 +863,7 @@ class TestCloseRunningMainExe(unittest.TestCase):
 
     def test_calls_taskkill_with_main_exe_basename(self):
         api = make_installer_api(main_exe="sub\\app.exe")
-        with mock.patch("installer_core.subprocess.run") as mock_run:
+        with mock.patch("system_entries.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
             result = api.close_running_main_exe()
         self.assertTrue(result)
@@ -872,7 +872,7 @@ class TestCloseRunningMainExe(unittest.TestCase):
 
     def test_returns_false_when_taskkill_reports_failure(self):
         api = make_installer_api(main_exe="app.exe")
-        with mock.patch("installer_core.subprocess.run") as mock_run:
+        with mock.patch("system_entries.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 128  # 例如找不到目標程序
             self.assertFalse(api.close_running_main_exe())
 
@@ -882,7 +882,7 @@ class TestCloseRunningMainExe(unittest.TestCase):
 
     def test_swallows_failure(self):
         api = make_installer_api(main_exe="app.exe")
-        with mock.patch("installer_core.subprocess.run", side_effect=RuntimeError("模擬失敗")):
+        with mock.patch("system_entries.subprocess.run", side_effect=RuntimeError("模擬失敗")):
             self.assertFalse(api.close_running_main_exe())
 
 
@@ -1989,6 +1989,28 @@ class TestGetDependencyWarnings(unittest.TestCase):
         ):
             warnings = api.get_dependency_warnings()
         self.assertEqual(warnings, [])
+
+
+class TestModuleLevelWindowDefaultsToNone(unittest.TestCase):
+    """真實抓到的 bug：`window` 這個模組層級全域變數原本從未被初始化過，
+    只有 main() 真正建立 pywebview 視窗時才會賦值。_report_progress()/
+    _report_dependency_progress() 原本能正常運作純粹是意外——`global
+    window` 後直接讀取從未賦值的名字會拋 NameError，但整段邏輯包在自己
+    的 try/except Exception 裡，NameError 被原地吞掉，效果剛好等於
+    「window 還沒建立好就什麼都不做」。改用 progress_report.report_progress()
+    收斂重複程式碼後，呼叫端不再有自己的 try/except 吞掉這個 NameError，
+    才真正暴露這個全域變數從未被正確初始化這件事。"""
+
+    def test_module_level_window_defaults_to_none(self):
+        self.assertIsNone(ic.window)
+
+    def test_report_progress_before_window_created_does_not_raise(self):
+        api = make_installer_api()
+        api._report_progress(10, "測試中")
+
+    def test_report_dependency_progress_before_window_created_does_not_raise(self):
+        api = make_installer_api()
+        api._report_dependency_progress(10, "測試中")
 
 
 class TestInstallDependency(unittest.TestCase):

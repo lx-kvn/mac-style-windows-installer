@@ -11,7 +11,9 @@ winreg 模組，測試直接把 tests/_fakes.py 的 FakeWinReg 當參數傳進�
 不需要 monkeypatch sys.modules 或模組屬性。
 """
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -97,6 +99,64 @@ class TestRemoveFromPath(unittest.TestCase):
         fake_reg = FakeWinReg()
         fake_reg.fail_on_substring = "Environment"
         se.remove_from_path("C:\\Apps\\MyApp", registry=fake_reg)  # 不應該拋例外
+
+
+class TestCleanupEmptyDirs(unittest.TestCase):
+    """installer_core.py 的 rollback（清掉這次安裝已複製的檔案）跟
+    uninstall.py 的解除安裝流程都要清掉刪檔後留下的空目錄，原本兩邊各自
+    有一份逐位元組相同的實作，收斂到這裡（見 tests/test_uninstall.py 的
+    對應測試已搬移過來）。"""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_removes_dir_when_empty(self):
+        se.cleanup_empty_dirs(self.tmp_dir)
+        self.assertFalse(os.path.exists(self.tmp_dir))
+
+    def test_keeps_dir_when_files_remain(self):
+        with open(os.path.join(self.tmp_dir, "keep.txt"), "w") as f:
+            f.write("still here")
+        se.cleanup_empty_dirs(self.tmp_dir)
+        self.assertTrue(os.path.exists(self.tmp_dir))
+
+    def test_removes_nested_empty_subdirs_bottom_up(self):
+        nested = os.path.join(self.tmp_dir, "a", "b")
+        os.makedirs(nested)
+        se.cleanup_empty_dirs(self.tmp_dir)
+        self.assertFalse(os.path.exists(self.tmp_dir))
+
+    def test_swallows_missing_root_dir(self):
+        se.cleanup_empty_dirs(os.path.join(self.tmp_dir, "does-not-exist"))  # 不應該拋例外
+
+
+class TestKillProcessByName(unittest.TestCase):
+    """installer_core.py（安裝流程偵測到主程式正在執行，使用者選擇強制
+    關閉）跟 uninstall.py（解除安裝時同樣的情境）原本各自有一份逐位元組
+    相同的 taskkill 呼叫，收斂到這裡。"""
+
+    def test_calls_taskkill_with_basename_and_returns_true_on_success(self):
+        with mock.patch("system_entries.subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            result = se.kill_process_by_name("sub\\app.exe")
+        self.assertTrue(result)
+        args, kwargs = mock_run.call_args
+        self.assertEqual(args[0], ["taskkill", "/f", "/im", "app.exe"])
+
+    def test_returns_false_when_taskkill_reports_failure(self):
+        with mock.patch("system_entries.subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 128  # 例如找不到目標程序
+            self.assertFalse(se.kill_process_by_name("app.exe"))
+
+    def test_returns_false_without_exe_name(self):
+        self.assertFalse(se.kill_process_by_name(""))
+
+    def test_swallows_exception(self):
+        with mock.patch("system_entries.subprocess.run", side_effect=RuntimeError("模擬失敗")):
+            self.assertFalse(se.kill_process_by_name("app.exe"))
 
 
 if __name__ == "__main__":

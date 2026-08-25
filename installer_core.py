@@ -48,6 +48,7 @@ import restore_point
 import bits_download
 import install_journal
 import install_encryption
+import progress_report
 from install_scope import InstallScope, local_appdata_root
 
 # 目前介面 chrome（ui/index.html 裡固定的標籤、按鈕、提示文字）支援的語言，
@@ -55,6 +56,14 @@ from install_scope import InstallScope, local_appdata_root
 # 開發者可以自訂任意語言代碼，這裡只限制「安裝介面本身」的語言。
 SUPPORTED_UI_LANGUAGES = ["zh-TW", "en"]
 DEFAULT_UI_LANGUAGE = "zh-TW"
+
+# 真實抓到的 bug：main() 真正建立 pywebview 視窗前，_report_progress()/
+# _report_dependency_progress() 就可能被呼叫（例如 install_dependency()
+# 在下載階段就會回報進度）。這裡明確給一個 None 預設值，讓
+# progress_report.report_progress() 的 `if not window: return` 正常生效；
+# 原本沒有這行，純粹是靠這兩個方法各自的 try/except Exception 意外吞掉
+# 讀取未賦值全域變數會拋的 NameError，效果剛好一樣，但不是刻意設計的。
+window = None
 
 
 def _file_checksum(path, chunk_size=1024 * 1024):
@@ -621,12 +630,7 @@ class InstallerAPI:
         元素。
         """
         global window
-        safe_msg = json.dumps(message, ensure_ascii=False)
-        try:
-            if window:
-                window.evaluate_js(f"window.updateDependencyInstallProgress({percent}, {safe_msg})")
-        except Exception:
-            pass
+        progress_report.report_progress(window, "updateDependencyInstallProgress", percent, message)
 
     def install_dependency(self, key):
         """使用者在相依元件彈窗按下「自動安裝」時，依序對每個缺少的元件呼叫
@@ -1103,12 +1107,7 @@ class InstallerAPI:
 
     def _report_progress(self, percent, message):
         global window
-        safe_msg = json.dumps(message, ensure_ascii=False)
-        try:
-            if window:
-                window.evaluate_js(f"window.updateInstallProgress({percent}, {safe_msg})")
-        except Exception:
-            pass
+        progress_report.report_progress(window, "updateInstallProgress", percent, message)
 
     def _required_size(self):
         return required_install_size(self._app_contents_dir())
@@ -1311,26 +1310,6 @@ class InstallerAPI:
     # 主安裝流程
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _cleanup_empty_dirs(root_dir):
-        """清掉 root_dir 底下因為刪檔而變空的子目錄（由裡到外），
-        root_dir 本身如果也空了就一併刪除。main install 目錄跟
-        `_local_appdata_root()` 的回滾清理都走這個共用邏輯。
-        """
-        try:
-            for root, dirs, files in os.walk(root_dir, topdown=False):
-                for d in dirs:
-                    dpath = os.path.join(root, d)
-                    try:
-                        if not os.listdir(dpath):
-                            os.rmdir(dpath)
-                    except Exception:
-                        pass
-            if os.path.exists(root_dir) and not os.listdir(root_dir):
-                os.rmdir(root_dir)
-        except Exception:
-            pass
-
     def _run_install_script(self, script_rel, timeout=120):
         """執行打包時內嵌的 pre/post-install 腳本（見 pre_install_script/
         post_install_script 設定欄位）。腳本以這支安裝程式當下的權限層級
@@ -1409,9 +1388,9 @@ class InstallerAPI:
                     removed += 1
             except Exception:
                 pass
-        self._cleanup_empty_dirs(self.selected_path)
+        system_entries.cleanup_empty_dirs(self.selected_path)
         if self.local_appdata_files:
-            self._cleanup_empty_dirs(self._local_appdata_root())
+            system_entries.cleanup_empty_dirs(self._local_appdata_root())
         if log:
             log(f"安裝失敗，已回滾刪除 {removed} 個已複製的檔案")
 
@@ -1919,27 +1898,10 @@ class InstallerAPI:
     def close_running_main_exe(self):
         """使用者在「偵測到主程式執行中」的彈窗按下「關閉程式並繼續安裝」時
         呼叫：強制關閉正在執行的主程式，讓前端可以接著重新呼叫
-        trigger_installation()。寫法比照 uninstall.py 既有的慣例
-        （taskkill /f、CREATE_NO_WINDOW、吞例外回傳布林值），不做「先禮貌
-        關閉、失敗才強制」這種分層。
-
-        回傳值檢查 taskkill 的 returncode，不是「呼叫沒拋例外就一律回傳
-        True」——找不到目標程序時 taskkill 會用非 0 的 returncode 表示
-        失敗（stderr 導到 DEVNULL，呼叫端原本從沒檢查過），這裡改成
-        如實反映有沒有真的成功。
+        trigger_installation()。跟 uninstall.py 同樣情境共用
+        system_entries.kill_process_by_name()。
         """
-        if not self.main_exe:
-            return False
-        try:
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            result = subprocess.run(
-                ["taskkill", "/f", "/im", os.path.basename(self.main_exe)],
-                creationflags=creationflags, timeout=10,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            return result.returncode == 0
-        except Exception:
-            return False
+        return system_entries.kill_process_by_name(self.main_exe)
 
     def launch_app(self):
         """安裝完成後「立即執行程式」"""

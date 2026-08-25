@@ -103,12 +103,19 @@ import system_entries
 import explorer_lock_release
 import windows_service
 import scheduled_task
+import progress_report
 from window_drag import WindowDragController
 
 # 跟 installer_core.py 的介面語言支援範圍一致：解除安裝助手的畫面 chrome
 # 只認這兩種，跟安裝端同一套規則。
 SUPPORTED_UI_LANGUAGES = ["zh-TW", "en"]
 DEFAULT_UI_LANGUAGE = "zh-TW"
+
+# 真實抓到的 bug：跟 installer_core.py 同一個問題——main() 真正建立
+# pywebview 視窗前，_report_progress() 就可能被呼叫，這裡明確給 None
+# 預設值讓 progress_report.report_progress() 的判斷正常生效，見
+# installer_core.py 對應常數的說明。
+window = None
 
 
 def get_resource_path(relative_path):
@@ -243,24 +250,6 @@ def _local_appdata_resolver(manifest):
         return os.path.normcase(os.path.normpath(rel_path)) in normed
 
     return is_local_appdata_file
-
-
-def _cleanup_empty_dirs(root_dir):
-    """清掉 root_dir 底下因為刪檔而變空的子目錄（由裡到外），
-    root_dir 本身如果也空了就一併刪除。"""
-    try:
-        for root, dirs, files in os.walk(root_dir, topdown=False):
-            for d in dirs:
-                dpath = os.path.join(root, d)
-                try:
-                    if not os.listdir(dpath):
-                        os.rmdir(dpath)
-                except Exception:
-                    pass
-        if os.path.exists(root_dir) and not os.listdir(root_dir):
-            os.rmdir(root_dir)
-    except Exception:
-        pass
 
 
 def _path_removal_target(manifest, current_dir):
@@ -495,7 +484,7 @@ def _perform_uninstall_steps(ctx, locking_processes, kill_locking_processes, log
                     except Exception:
                         pass
             if local_appdata_dir:
-                _cleanup_empty_dirs(local_appdata_dir)
+                system_entries.cleanup_empty_dirs(local_appdata_dir)
             log(f"已依安裝清單刪除 {len(files_to_remove)} 個檔案")
 
             # 清單刪完之後，看看資料夾裡除了自己還剩什麼——這才是真正決定能不能
@@ -616,22 +605,10 @@ class UninstallerAPI:
 
     def close_running_main_exe(self):
         """使用者在『偵測到程式正在執行』畫面按下「關閉應用程式並繼續
-        解除安裝」時呼叫，寫法比照 installer_core.py 既有的
-        close_running_main_exe()：taskkill /f、CREATE_NO_WINDOW、檢查
-        returncode 決定回傳值（不是呼叫沒拋例外就一律回傳 True）。
+        解除安裝」時呼叫，跟 installer_core.py 同樣情境共用
+        system_entries.kill_process_by_name()。
         """
-        if not self.main_exe:
-            return False
-        try:
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            result = subprocess.run(
-                ["taskkill", "/f", "/im", os.path.basename(self.main_exe)],
-                creationflags=creationflags, timeout=10,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            return result.returncode == 0
-        except Exception:
-            return False
+        return system_entries.kill_process_by_name(self.main_exe)
 
     def get_locking_process_names(self):
         """算一次鎖定檔案的程式清單，快取在 self._locking_processes 供
@@ -644,12 +621,7 @@ class UninstallerAPI:
 
     def _report_progress(self, percent, message):
         global window
-        safe_msg = json.dumps(message, ensure_ascii=False)
-        try:
-            if window:
-                window.evaluate_js(f"window.updateUninstallProgress({percent}, {safe_msg})")
-        except Exception:
-            pass
+        progress_report.report_progress(window, "updateUninstallProgress", percent, message)
 
     def run_uninstall(self, kill_locking_processes):
         ctx = {

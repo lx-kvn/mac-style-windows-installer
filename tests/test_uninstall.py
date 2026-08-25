@@ -25,6 +25,16 @@ from _fakes import FakeWinReg
 import uninstall as un
 
 
+class TestModuleLevelWindowDefaultsToNone(unittest.TestCase):
+    """真實抓到的 bug：跟 installer_core.py 同一個問題——`window` 這個
+    模組層級全域變數原本從未被初始化過，_report_progress() 原本能正常
+    運作純粹是意外（NameError 被自己的 try/except Exception 吞掉）。
+    改用 progress_report.report_progress() 收斂重複程式碼後才暴露出來。"""
+
+    def test_module_level_window_defaults_to_none(self):
+        self.assertIsNone(un.window)
+
+
 class TestPerformUninstallStepsReportsFailures(unittest.TestCase):
     """真實抓到的問題（F20）：登錄表項目/捷徑移除失敗原本完全被忽略——
     remove_registry_entry() 的回傳值只在成功時被拿來 log，失敗時連
@@ -409,11 +419,11 @@ class TestUninstallerAPI(unittest.TestCase):
 
     def test_close_running_main_exe_calls_taskkill_with_main_exe_basename(self):
         """使用者在解除安裝端『偵測到程式正在執行』畫面按下「關閉應用程式
-        並繼續解除安裝」時呼叫，寫法比照 installer_core.py 既有的
-        close_running_main_exe()：taskkill /f、CREATE_NO_WINDOW、檢查
-        returncode（不是呼叫沒拋例外就一律回傳 True）。"""
+        並繼續解除安裝」時呼叫，跟 installer_core.py 同樣情境共用
+        system_entries.kill_process_by_name()（見 test_system_entries.py
+        的 TestKillProcessByName），這裡只驗證有正確委派、傳對 main_exe。"""
         api = self._make_api()
-        with mock.patch("uninstall.subprocess.run") as mock_run:
+        with mock.patch("system_entries.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
             result = api.close_running_main_exe()
         self.assertTrue(result)
@@ -422,7 +432,7 @@ class TestUninstallerAPI(unittest.TestCase):
 
     def test_close_running_main_exe_returns_false_when_taskkill_reports_failure(self):
         api = self._make_api()
-        with mock.patch("uninstall.subprocess.run") as mock_run:
+        with mock.patch("system_entries.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 128
             self.assertFalse(api.close_running_main_exe())
 
@@ -436,7 +446,7 @@ class TestUninstallerAPI(unittest.TestCase):
 
     def test_close_running_main_exe_swallows_failure(self):
         api = self._make_api()
-        with mock.patch("uninstall.subprocess.run", side_effect=RuntimeError("模擬失敗")):
+        with mock.patch("system_entries.subprocess.run", side_effect=RuntimeError("模擬失敗")):
             self.assertFalse(api.close_running_main_exe())
 
     def test_get_locking_process_names_caches_and_dedupes(self):
@@ -613,22 +623,8 @@ class TestLocalAppdataResolver(unittest.TestCase):
         self.assertFalse(is_local("cli.exe"))
 
 
-class TestCleanupEmptyDirs(unittest.TestCase):
-    def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp()
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp_dir, ignore_errors=True)
-
-    def test_removes_dir_when_empty(self):
-        un._cleanup_empty_dirs(self.tmp_dir)
-        self.assertFalse(os.path.exists(self.tmp_dir))
-
-    def test_keeps_dir_when_files_remain(self):
-        with open(os.path.join(self.tmp_dir, "keep.txt"), "w") as f:
-            f.write("still here")
-        un._cleanup_empty_dirs(self.tmp_dir)
-        self.assertTrue(os.path.exists(self.tmp_dir))
+# _cleanup_empty_dirs 已收斂進 system_entries.cleanup_empty_dirs()，
+# 對應測試搬到 tests/test_system_entries.py 的 TestCleanupEmptyDirs。
 
 
 class TestManifestDeletionRoutesLocalAppdataFiles(unittest.TestCase):

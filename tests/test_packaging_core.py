@@ -116,6 +116,8 @@ class TestEnsureWorkspaceFiles(unittest.TestCase):
             f.write("# NEW install_journal content")
         with open(os.path.join(self.embedded_dir, "install_encryption.py"), "w") as f:
             f.write("# NEW install_encryption content")
+        with open(os.path.join(self.embedded_dir, "progress_report.py"), "w") as f:
+            f.write("# NEW progress_report content")
         os.makedirs(os.path.join(self.embedded_dir, "ui"))
         with open(os.path.join(self.embedded_dir, "ui", "index.html"), "w") as f:
             f.write("<!-- NEW index.html -->")
