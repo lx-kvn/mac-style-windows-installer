@@ -17,7 +17,7 @@ JSON 設定檔 + 命令列參數，不是表單）跟「進度怎麼呈現」（
 跟圖形介面版本一樣：
 
 ```
-pip install pyinstaller pywebview pywin32
+pip install pyinstaller pywebview pywin32 cryptography
 ```
 
 `pyinstaller`、`pywebview` 是硬性需求（`pack` 子指令執行前會自動檢查，

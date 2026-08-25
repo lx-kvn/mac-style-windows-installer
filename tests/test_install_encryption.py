@@ -1,3 +1,4 @@
+import ast
 import os
 import sys
 import tempfile
@@ -7,6 +8,40 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import install_encryption
+
+
+class TestCryptographyImportIsLazy(unittest.TestCase):
+    """真實踩到的問題：v0.14.0 發布後 CI 直接爆掉——`cryptography` 只被
+    加進 CI 的 pip install 清單漏掉，但更根本的問題是這個模組原本在
+    檔案最上層 `from cryptography...import ...`，導致任何 import
+    `install_encryption` 的模組（`builder.py`/`installer_core.py`/
+    `gui_config.py` 都會遞移 import 到它）都變成硬性依賴 `cryptography`
+    才能載入。這違反 `packaging_core.check_build_environment()` docstring
+    明講的設計原則：「不管這裡檢查的外部環境齊不齊全，工具本身（GUI 或
+    CLI）一定跑得起來」——`cryptography` 只有真的呼叫
+    `encrypt_directory()`/`decrypt_to_directory()`（也就是使用者真的
+    設定了 install_password_env）才應該是必要的，不該在完全沒用到密碼
+    保護功能的情境下，變成連工具本身都開不起來的硬性依賴。這裡用 ast
+    解析原始碼，確認檔案最上層（module-level）沒有任何一行
+    import/from-import 是在 import `cryptography` 底下的東西——全部都
+    應該收在函式內部，只有真的呼叫到才會觸發 import。"""
+
+    def test_no_module_level_cryptography_import(self):
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "install_encryption.py")
+        with open(path, encoding="utf-8") as f:
+            source = f.read()
+        tree = ast.parse(source)
+        for node in tree.body:  # 只看最上層陳述式，不遞迴進函式/class 內部
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            else:
+                continue
+            self.assertFalse(
+                any(name == "cryptography" or name.startswith("cryptography.") for name in names),
+                f"install_encryption.py 頂層不應該 import cryptography 相關模組，找到：{names}",
+            )
 
 
 class TestEncryptDecryptRoundTrip(unittest.TestCase):

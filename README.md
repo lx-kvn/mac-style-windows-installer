@@ -69,7 +69,7 @@ What your users actually experience:
 To **run or build the Builder Tool** (`gui_config.py`, or a compiled `InstallerBuilder.exe`), the machine needs:
 
 ```
-pip install pyinstaller pywebview pywin32
+pip install pyinstaller pywebview pywin32 cryptography
 ```
 
 - `pyinstaller` and `pywebview` are required — the Builder Tool checks for both on launch and tells you if either is missing.
@@ -171,7 +171,7 @@ MIT — see [`LICENSE`](LICENSE).
 **執行或打包「打包工具」**（`gui_config.py`，或編譯好的 `InstallerBuilder.exe`）的這台電腦需要：
 
 ```
-pip install pyinstaller pywebview pywin32
+pip install pyinstaller pywebview pywin32 cryptography
 ```
 
 - `pyinstaller` 跟 `pywebview` 是必要的——打包工具開啟時會檢查兩者，缺了會告訴你。

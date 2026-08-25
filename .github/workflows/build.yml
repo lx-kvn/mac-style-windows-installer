@@ -54,7 +54,7 @@ jobs:
           # mock.patch("win32com.client.Dispatch", ...)，這個 patch
           # 本身就需要 win32com 這個模組存在才能被解析到，缺少的話
           # 不是測試失敗，是直接 ModuleNotFoundError。
-          pip install pyinstaller pywebview pywin32
+          pip install pyinstaller pywebview pywin32 cryptography
 
       - name: 決定版本號
         id: version

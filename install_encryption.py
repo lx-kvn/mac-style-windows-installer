@@ -13,15 +13,21 @@ salt/nonce 都不是秘密，明文存在檔案開頭即可——AES-GCM 的機�
 保證不依賴它們保密，只依賴每次加密都用新的隨機值（重複使用 nonce 會
 直接破壞 GCM 的機密性保證，這裡每次呼叫 `encrypt_directory()` 都重新
 產生一組隨機 salt/nonce，不共用）。
+
+真實抓到的問題：`cryptography` 這個第三方套件的 import 刻意不放在檔案
+最上層，改成延遲到 `encrypt_directory()`/`decrypt_to_directory()` 內部
+才 import——這個模組會被 `builder.py`/`installer_core.py` 兩個 entry
+point 匯入，兩者又會被 `gui_config.py`/`builder_cli.py` 匯入，如果放在
+最上層，等於讓 `cryptography` 從「安裝密碼保護這個選填功能的相依套件」
+變成「整個打包工具開不開得起來的硬性依賴」，違反
+`packaging_core.check_build_environment()` docstring 明講的設計原則：
+不管外部建置環境（pyinstaller/pywebview）齊不齊全，工具本身一定要跑
+得起來。沒有真的用到 `install_password_env` 這個功能的使用者，不應該
+因為沒裝 `cryptography` 就連 GUI/CLI 都開不了。
 """
 import io
 import os
 import zipfile
-
-from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.hazmat.primitives import hashes
 
 _SALT_SIZE = 16
 _NONCE_SIZE = 12
@@ -34,6 +40,8 @@ class WrongPasswordError(Exception):
 
 
 def _derive_key(password, salt):
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    from cryptography.hazmat.primitives import hashes
     kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=_PBKDF2_ITERATIONS)
     return kdf.derive(password.encode("utf-8"))
 
@@ -51,6 +59,7 @@ def _zip_directory(source_dir):
 
 def encrypt_directory(source_dir, dest_file, password):
     """把 source_dir 整包壓成 zip、加密，寫到 dest_file。"""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     salt = os.urandom(_SALT_SIZE)
     nonce = os.urandom(_NONCE_SIZE)
     key = _derive_key(password, salt)
@@ -65,6 +74,8 @@ def encrypt_directory(source_dir, dest_file, password):
 def decrypt_to_directory(encrypted_file, dest_dir, password):
     """驗證密碼並解密回 dest_dir。密碼錯誤（或密文損毀）拋
     WrongPasswordError；dest_dir 必須已存在。"""
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     with open(encrypted_file, "rb") as f:
         data = f.read()
     salt, nonce, ciphertext = data[:_SALT_SIZE], data[_SALT_SIZE:_SALT_SIZE + _NONCE_SIZE], data[_SALT_SIZE + _NONCE_SIZE:]

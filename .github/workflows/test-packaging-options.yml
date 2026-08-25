@@ -36,7 +36,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller pywebview pywin32
+          pip install pyinstaller pywebview pywin32 cryptography
 
       - name: 準備測試用的 app_dir 與前置/後置腳本
         shell: pwsh
