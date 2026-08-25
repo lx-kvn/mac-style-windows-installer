@@ -2354,9 +2354,18 @@ class TestCheckDotnetDesktopVersionAware(unittest.TestCase):
         self.patcher = mock.patch.dict(sys.modules, {"winreg": self.fake_reg})
         self.patcher.start()
         self.path = "SOFTWARE\\WOW6432Node\\dotnet\\Setup\\InstalledVersions\\x64\\sharedfx\\Microsoft.WindowsDesktop.App"
+        # _check_dotnet_desktop() 登錄表查不到時會 fallback 掃實際安裝目錄
+        # （見 TestCheckDotnetDesktopFilesystemFallback）——這裡純粹測登錄表
+        # 這條路徑本身，指到不存在的目錄，避免撈到開發機真實裝的 .NET 汙染
+        # 這幾個測試案例的預期結果。
+        self.env_patcher = mock.patch.dict(
+            os.environ, {"ProgramFiles": "", "ProgramW6432": "", "ProgramFiles(x86)": ""},
+        )
+        self.env_patcher.start()
 
     def tearDown(self):
         self.patcher.stop()
+        self.env_patcher.stop()
 
     def test_no_min_version_true_when_any_version_subkey_present(self):
         self.fake_reg.set_hklm(self.path, {})
@@ -2371,6 +2380,49 @@ class TestCheckDotnetDesktopVersionAware(unittest.TestCase):
     def test_min_version_not_met(self):
         self.fake_reg.set_hklm(self.path, {})
         self.fake_reg.set_hklm(self.path + "\\6.0.0", {})
+        self.assertFalse(ic._check_dotnet_desktop(min_version="8.0.0"))
+
+
+class TestCheckDotnetDesktopFilesystemFallback(unittest.TestCase):
+    """真實抓到的 bug：_check_dotnet_desktop() 原本只信登錄表
+    HKLM\\SOFTWARE\\WOW6432Node\\dotnet\\Setup\\InstalledVersions\\...，
+    但這把機碼只有透過官方 MSI 版安裝程式裝的才會寫入——實測發現透過
+    winget/Visual Studio Installer/dotnet-install.ps1 裝的完全不會寫這把
+    機碼，即使 `dotnet --list-runtimes` 能正常列出已安裝版本，登錄表判斷
+    還是會誤判成沒裝，導致使用者明明裝好了還被要求「自動安裝」，裝完一樣
+    偵測不到。改成登錄表查不到時，改掃 dotnet CLI 本身也是靠掃描判斷的
+    實際安裝目錄（%ProgramFiles%\\dotnet\\shared\\Microsoft.WindowsDesktop.App）
+    當備援。"""
+
+    def setUp(self):
+        self.fake_reg = FakeWinReg()
+        self.patcher = mock.patch.dict(sys.modules, {"winreg": self.fake_reg})
+        self.patcher.start()
+        self.tmp_dir = tempfile.mkdtemp()
+        self.shared_dir = os.path.join(self.tmp_dir, "dotnet", "shared", "Microsoft.WindowsDesktop.App")
+        self.env_patcher = mock.patch.dict(
+            os.environ, {"ProgramFiles": self.tmp_dir, "ProgramW6432": "", "ProgramFiles(x86)": ""},
+        )
+        self.env_patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+        self.env_patcher.stop()
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_registry_empty_but_shared_fx_dir_present_is_detected(self):
+        os.makedirs(os.path.join(self.shared_dir, "10.0.11"))
+        self.assertTrue(ic._check_dotnet_desktop())
+
+    def test_registry_empty_and_no_shared_fx_dir_is_false(self):
+        self.assertFalse(ic._check_dotnet_desktop())
+
+    def test_registry_empty_min_version_met_via_filesystem(self):
+        os.makedirs(os.path.join(self.shared_dir, "10.0.11"))
+        self.assertTrue(ic._check_dotnet_desktop(min_version="9.0.0"))
+
+    def test_registry_empty_min_version_not_met_via_filesystem(self):
+        os.makedirs(os.path.join(self.shared_dir, "6.0.36"))
         self.assertFalse(ic._check_dotnet_desktop(min_version="8.0.0"))
 
 

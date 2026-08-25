@@ -190,11 +190,48 @@ def _check_vcredist_x64(min_version=None):
     return _generic_registry_version_check("HKLM", path, value_name="Version", min_version=min_version)
 
 
+def _dotnet_shared_fx_versions(fx_name):
+    """掃 .NET 執行環境常見安裝目錄下 shared\\<fx_name>\\ 底下的版本子資料夾
+    名稱——這就是 `dotnet --list-runtimes` 內部實際在做的事。
+
+    真實抓到的問題：_check_dotnet_desktop() 只查登錄表
+    HKLM\\SOFTWARE\\WOW6432Node\\dotnet\\Setup\\InstalledVersions\\...，但
+    這把機碼只有透過官方 MSI 版安裝程式裝的才會寫入——實測發現透過
+    winget／Visual Studio Installer／dotnet-install.ps1 裝的完全不會寫這把
+    機碼，即使 `dotnet --list-runtimes` 能正常列出已安裝版本，登錄表判斷
+    還是會誤判成沒裝，使用者明明已經裝好、版本也符合，還是被要求「自動
+    安裝」，裝完一樣偵測不到。改成登錄表查不到時，直接掃實際安裝目錄
+    當備援，不依賴「用哪一種安裝程式裝的」這個實作細節。
+    """
+    candidates = []
+    for env_var in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
+        root = os.environ.get(env_var)
+        if root and root not in candidates:
+            candidates.append(root)
+    versions = []
+    for root in candidates:
+        shared_dir = os.path.join(root, "dotnet", "shared", fx_name)
+        try:
+            for entry in os.listdir(shared_dir):
+                if os.path.isdir(os.path.join(shared_dir, entry)):
+                    versions.append(entry)
+        except OSError:
+            continue
+    return versions
+
+
 def _check_dotnet_desktop(min_version=None):
-    return _generic_registry_version_check(
+    if _generic_registry_version_check(
         "HKLM", r"SOFTWARE\WOW6432Node\dotnet\Setup\InstalledVersions\x64\sharedfx\Microsoft.WindowsDesktop.App",
         enum_subkeys=True, min_version=min_version,
-    )
+    ):
+        return True
+    versions = _dotnet_shared_fx_versions("Microsoft.WindowsDesktop.App")
+    if not versions:
+        return False
+    if min_version is None:
+        return True
+    return _compare_versions(max(versions, key=_parse_version), min_version) >= 0
 
 
 def _make_custom_dependency_checker(reg_check):
