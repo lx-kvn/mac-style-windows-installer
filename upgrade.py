@@ -202,7 +202,7 @@ class UpgradeCoordinator:
         except Exception:
             return False
 
-    def run_uninstall_exe_elevated(self, uninstall_exe, args, timeout_ms=30000):
+    def run_uninstall_exe_elevated(self, uninstall_exe, args, timeout_ms=30000, shell32=None, kernel32=None):
         """透過 ShellExecuteExW + "runas" 動詞啟動舊版 uninstall.exe 並等待
         完成，取代 subprocess.run() 在需要跨 UAC 情境下的角色。
 
@@ -213,7 +213,19 @@ class UpgradeCoordinator:
         裝在 Program Files、登錄表寫在 HKLM），子行程會在寫入/刪除這些
         受保護的位置時默默失敗，卻不會拋出任何例外，看起來像是「正常
         執行完了」，實際上舊版本根本沒清乾淨。
+
+        `shell32`/`kernel32` 選填注入點：預設用真正的
+        `ctypes.windll.shell32`/`ctypes.windll.kernel32`，跟
+        file_assoc.py/system_entries.py 的 `registry=` 是同一種 seam
+        模式，只是這裡注入的是 shell32/kernel32 形狀的物件——測試可以
+        換成假的「提權後行程」adapter，不需要透過 mock.patch 改寫
+        `ctypes.windll` 這個行程全域共用物件的屬性。真實 UAC 互動本身
+        仍然沒辦法在開發環境重現，這個 seam 只讓「成功／逾時／非 0
+        回傳」這幾條分支變得可測。
         """
+        shell32 = shell32 if shell32 is not None else ctypes.windll.shell32
+        kernel32 = kernel32 if kernel32 is not None else ctypes.windll.kernel32
+
         class SHELLEXECUTEINFOW(ctypes.Structure):
             _fields_ = [
                 ("cbSize", ctypes.c_ulong),
@@ -248,7 +260,7 @@ class UpgradeCoordinator:
         sei.lpDirectory = None
         sei.nShow = SW_HIDE
 
-        ok = ctypes.windll.shell32.ShellExecuteExW(ctypes.pointer(sei))
+        ok = shell32.ShellExecuteExW(ctypes.pointer(sei))
         if not ok:
             raise OSError("無法以系統管理員權限啟動舊版解除安裝程式（使用者可能取消了 UAC 提示）。")
 
@@ -260,18 +272,18 @@ class UpgradeCoordinator:
             raise OSError("啟動舊版解除安裝程式失敗：沒有取得有效的行程控制代碼。")
 
         try:
-            wait_result = ctypes.windll.kernel32.WaitForSingleObject(sei.hProcess, timeout_ms)
+            wait_result = kernel32.WaitForSingleObject(sei.hProcess, timeout_ms)
             if wait_result == WAIT_TIMEOUT:
                 raise TimeoutError("舊版解除安裝程式執行逾時。")
             # 真實抓到的問題（B6）：結束碼原本完全沒有被檢查——等到行程
             # 結束就直接視為成功，不管它實際上是不是真的執行成功。跟
             # uninstall.py 自己的慣例一致：0=成功、非 0=失敗。
             exit_code = ctypes.c_ulong(0)
-            ctypes.windll.kernel32.GetExitCodeProcess(sei.hProcess, ctypes.pointer(exit_code))
+            kernel32.GetExitCodeProcess(sei.hProcess, ctypes.pointer(exit_code))
             if exit_code.value != 0:
                 raise RuntimeError(f"舊版解除安裝程式回報失敗（結束碼 {exit_code.value}）。")
         finally:
-            ctypes.windll.kernel32.CloseHandle(sei.hProcess)
+            kernel32.CloseHandle(sei.hProcess)
 
     def run(self, app_name, version, scope, selected_path, restart_explorer_on_update):
         """更新覆蓋安裝流程：先備份舊安裝資料夾，再靜默呼叫舊版本的解除安裝

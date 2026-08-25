@@ -424,6 +424,61 @@ class TestUpgradeCoordinatorRunElevation(unittest.TestCase):
         mock_elevated.assert_not_called()
 
 
+class TestRunUninstallExeElevatedSeam(unittest.TestCase):
+    """run_uninstall_exe_elevated() 的 shell32=/kernel32= 選填注入點：跟
+    file_assoc.py/system_entries.py 的 registry= 是同一種 seam 模式——
+    預設用真正的 ctypes.windll.shell32/kernel32，測試可以換成假的
+    「提權後行程」adapter，不用透過 mock.patch 改寫 ctypes.windll 這個
+    行程全域共用物件的屬性。真實 UAC 互動本身仍然沒辦法在開發環境重現，
+    這個 seam 只讓「成功／逾時／非 0 回傳」這幾條分支變得可測。"""
+
+    def setUp(self):
+        self.coord = upgrade.UpgradeCoordinator()
+
+    def _fake_shell32(self, ok=1, hprocess=12345):
+        shell32 = mock.Mock()
+
+        def fake_shell_execute(sei_ptr):
+            sei_ptr.contents.hProcess = hprocess
+            return ok
+        shell32.ShellExecuteExW.side_effect = fake_shell_execute
+        return shell32
+
+    def _fake_kernel32(self, wait_result=0, exit_code=0):
+        kernel32 = mock.Mock()
+        kernel32.WaitForSingleObject.return_value = wait_result
+
+        def fake_get_exit_code(handle, exit_code_ptr):
+            exit_code_ptr.contents.value = exit_code
+            return 1
+        kernel32.GetExitCodeProcess.side_effect = fake_get_exit_code
+        return kernel32
+
+    def test_success_via_injected_fake_adapters_without_touching_ctypes_windll(self):
+        shell32 = self._fake_shell32()
+        kernel32 = self._fake_kernel32()
+        self.coord.run_uninstall_exe_elevated(
+            "C:\\App\\uninstall.exe", ["--silent"], shell32=shell32, kernel32=kernel32,
+        )
+        shell32.ShellExecuteExW.assert_called_once()
+        kernel32.CloseHandle.assert_called_once_with(12345)
+
+    def test_injected_fake_reporting_nonzero_exit_code_still_raises(self):
+        shell32 = self._fake_shell32()
+        kernel32 = self._fake_kernel32(exit_code=1)
+        with self.assertRaises(Exception):
+            self.coord.run_uninstall_exe_elevated(
+                "C:\\App\\uninstall.exe", ["--silent"], shell32=shell32, kernel32=kernel32,
+            )
+
+    def test_omitting_shell32_kernel32_falls_back_to_real_ctypes_windll(self):
+        """沒有注入時，行為要跟原本一樣去打真正的 ctypes.windll——保留
+        既有 mock.patch("upgrade.ctypes.windll...") 那條測試路徑的相容性。"""
+        with mock.patch("upgrade.ctypes.windll.shell32.ShellExecuteExW", return_value=0):
+            with self.assertRaises(Exception):
+                self.coord.run_uninstall_exe_elevated("C:\\App\\uninstall.exe", ["--silent"])
+
+
 class TestRunUninstallExeElevated(unittest.TestCase):
     """run_uninstall_exe_elevated()：透過 ShellExecuteExW + "runas" 動詞
     啟動舊版 uninstall.exe 並等待完成，取代 subprocess.run() 在需要跨 UAC
