@@ -250,3 +250,54 @@ task）。選填功能：打包時可以設定一組密碼，安裝時使用者�
 卡住等輸入**，直接中止並回傳非 0 exit code，原因寫進既有的靜默安裝
 log 機制（`%TEMP%\<app_name>_silent_install_log.txt` 或 `/LOG=` 指定
 路徑）。
+
+## 深模組拆分（第二輪：架構稽核 `/improve-codebase-architecture`）
+
+繼「深模組拆分（installer_core.py 瘦身）」那一輪之後，這輪又拆出三個
+深模組，動機都是同一個：`installer_core.py` 仍是全 repo 異動最頻繁、
+體積最大的檔案，這幾個關注點各自有獨立、可以脫離 `InstallerAPI` 單獨
+驗證的複雜度，卻只因為都掛在 `InstallerAPI` 上而被迫互相靠實例屬性
+傳遞狀態。
+
+- **`progress_report.py`** — `report_progress(window, js_callback_name,
+  percent, message)`。原本 `installer_core.py`（安裝主流程/相依元件
+  安裝，各自對應前端不同進度條）跟 `uninstall.py` 各有一份逐位元組幾乎
+  相同的 `_report_progress()`，只差前端 callback 名稱。收斂成一份後
+  意外暴露一個真實 bug：`window` 這個模組層級全域變數原本從未被顯式
+  初始化，只有 `main()` 真正建立 pywebview 視窗時才會賦值——之所以
+  沒出過事，是因為原本的重複程式碼各自包在自己的 `try/except
+  Exception` 裡，讀取未賦值全域變數的 `NameError` 被原地吞掉，效果
+  剛好等於「還沒建立好視窗就不做事」。收斂之後這個巧合消失，兩個模組
+  現在都顯式 `window = None`。`system_entries.py` 也同時多了
+  `cleanup_empty_dirs()`/`kill_process_by_name()` 兩個跟登錄表無關的
+  移除原語，理由相同（原本兩邊各自一份重複實作）。
+
+- **`version_compare.py`**（`parse_version()`/`compare_versions()`）
+  跟 **`dependency_install.py`**（登錄表偵測 checker 群 +
+  `build_checkers()`/`get_warnings()`/`install()` 下載驗證安裝協定）
+  ——原本 `dependency_defs.py` 的說明文字宣稱「checker/URL/靜默參數
+  本體定義在這」，但那個檔案一直只有一個沒有行為的 metadata dict，
+  真正的行為全部散落在 `installer_core.py`，去 `dependency_defs.py`
+  找行為的人只會撲空（診斷 .NET Desktop Runtime 誤判那次真的踩到
+  這個落差）。`version_compare.py` 拆成獨立模組是因為
+  `parse_version()`/`compare_versions()` 同時被 `upgrade.py` 的覆蓋
+  安裝版本偵測跟 `dependency_install.py` 的相依元件版本門檻共用，兩邊
+  誰都不該匯入對方換取這兩個純函式。`dependency_install.py` 的介面吃
+  明確參數（`custom_dependencies`/`bundle_dependencies`/`checkers`），
+  不吃 `InstallerAPI` 實例狀態。
+
+- **`upgrade.py`**（`check_existing()` 模組函式 +
+  `UpgradeCoordinator` class）——覆蓋安裝（偵測已安裝舊版本、備份、
+  靜默呼叫舊版 `uninstall.exe`、必要時跨 UAC、失敗復原）原本是
+  `InstallerAPI` 上 8 個各自獨立的方法，靠 `selected_path`/`_scope`/
+  `_upgrade_backup_path`/`_upgrade_backup_original_path` 這幾個共享
+  實例屬性互相傳遞狀態——內部複雜度是真的（踩過三輪真實 bug：
+  dual-hive 版本偵測、`CreateProcess` 不會觸發 UAC、pending-delete
+  競態），但沒有窄介面隔開，`InstallerAPI` 其他方法可以隨意伸手進備份
+  路徑狀態。收斂後備份路徑收進 `UpgradeCoordinator` 物件內部
+  （`backup_path`/`backup_original_path` 兩個屬性），`InstallerAPI`
+  只保留 `check_existing_install()`/`run_upgrade_uninstall()`/
+  `_restore_upgrade_backup()`/`_discard_upgrade_backup()` 四個薄委派
+  方法（後兩個因為 `trigger_installation()`/`close_window()` 有多處
+  各自獨立呼叫，保留成方法而非直接呼叫 `self._upgrade.xxx()`，維持
+  既有呼叫點不動）。

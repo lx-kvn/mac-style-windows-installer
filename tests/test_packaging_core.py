@@ -122,6 +122,8 @@ class TestEnsureWorkspaceFiles(unittest.TestCase):
             f.write("# NEW dependency_install content")
         with open(os.path.join(self.embedded_dir, "version_compare.py"), "w") as f:
             f.write("# NEW version_compare content")
+        with open(os.path.join(self.embedded_dir, "upgrade.py"), "w") as f:
+            f.write("# NEW upgrade content")
         os.makedirs(os.path.join(self.embedded_dir, "ui"))
         with open(os.path.join(self.embedded_dir, "ui", "index.html"), "w") as f:
             f.write("<!-- NEW index.html -->")
