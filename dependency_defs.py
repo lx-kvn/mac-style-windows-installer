@@ -4,10 +4,11 @@ dependency_defs.py
 內建相依元件（VC++ Redistributable / .NET Desktop Runtime）的靜態中繼
 資料：顯示名稱、官方下載連結、靜默安裝參數。
 
-installer_core.py（安裝端，決定缺少時要不要自動下載安裝）跟 builder.py
-（打包端，bundle_dependencies 選項要在打包當下把相依元件安裝檔下載下來
-內嵌進 Setup.exe 時，需要知道去哪裡下載）共用同一份，避免兩邊各自維護
-一份 URL，哪天只改了一邊、悄悄不同步。
+dependency_install.py（安裝端，決定缺少時要不要自動下載安裝——登錄表偵測/
+下載/驗證/靜默執行的完整協定都在那個模組，這裡只有沒有行為的 metadata
+dict）跟 builder.py（打包端，bundle_dependencies 選項要在打包當下把相依
+元件安裝檔下載下來內嵌進 Setup.exe 時，需要知道去哪裡下載）共用同一份，
+避免兩邊各自維護一份 URL，哪天只改了一邊、悄悄不同步。
 
 vcredist_x64 的連結是 Microsoft 官方文件明講的永久 permalink
 （https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist

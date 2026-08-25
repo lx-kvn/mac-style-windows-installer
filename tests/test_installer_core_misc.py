@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import installer_core as ic
 import install_journal
 import install_encryption
+import dependency_install
 from _fakes import FakeWinReg
 
 
@@ -1971,7 +1972,7 @@ class TestGetDependencyWarnings(unittest.TestCase):
     def test_missing_dependency_includes_key_name_and_url(self):
         api = make_installer_api(dependencies=["vcredist_x64"])
         with mock.patch.dict(
-            ic.DEPENDENCY_CHECKERS,
+            dependency_install.DEPENDENCY_CHECKERS,
             {"vcredist_x64": (lambda: False, "Visual C++ Redistributable (x64)", "https://example.test/vc.exe", ["/quiet"])},
         ):
             warnings = api.get_dependency_warnings()
@@ -1984,7 +1985,7 @@ class TestGetDependencyWarnings(unittest.TestCase):
     def test_installed_dependency_produces_no_warning(self):
         api = make_installer_api(dependencies=["vcredist_x64"])
         with mock.patch.dict(
-            ic.DEPENDENCY_CHECKERS,
+            dependency_install.DEPENDENCY_CHECKERS,
             {"vcredist_x64": (lambda: True, "Visual C++ Redistributable (x64)", "https://example.test/vc.exe", ["/quiet"])},
         ):
             warnings = api.get_dependency_warnings()
@@ -2030,7 +2031,7 @@ class TestInstallDependency(unittest.TestCase):
 
     def _register_fake_checker(self, check_fn):
         return mock.patch.dict(
-            ic.DEPENDENCY_CHECKERS,
+            dependency_install.DEPENDENCY_CHECKERS,
             {self.fake_key: (check_fn, "Fake Dependency", "https://example.test/fake.exe", ["/quiet"])},
         )
 
@@ -2045,7 +2046,7 @@ class TestInstallDependency(unittest.TestCase):
 
     def test_unknown_key_returns_error_without_downloading(self):
         api = make_installer_api()
-        with mock.patch("installer_core.urllib.request.urlopen") as mock_urlopen:
+        with mock.patch("dependency_install.urllib.request.urlopen") as mock_urlopen:
             result = api.install_dependency("not_a_real_key")
         self.assertEqual(result["status"], "error")
         mock_urlopen.assert_not_called()
@@ -2053,9 +2054,9 @@ class TestInstallDependency(unittest.TestCase):
     def test_success_when_recheck_confirms_installed(self):
         api = make_installer_api()
         with self._register_fake_checker(lambda: True), \
-             mock.patch("installer_core.bits_download.download_via_bits", return_value=False), \
-             mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response()), \
-             mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=0)):
+             mock.patch("dependency_install.bits_download.download_via_bits", return_value=False), \
+             mock.patch("dependency_install.urllib.request.urlopen", return_value=self._fake_url_response()), \
+             mock.patch("dependency_install.subprocess.run", return_value=mock.Mock(returncode=0)):
             result = api.install_dependency(self.fake_key)
         self.assertEqual(result, {"status": "success", "name": "Fake Dependency"})
 
@@ -2064,18 +2065,18 @@ class TestInstallDependency(unittest.TestCase):
         非 0 結束碼，但這其實不是失敗——不能只看結束碼判斷。"""
         api = make_installer_api()
         with self._register_fake_checker(lambda: True), \
-             mock.patch("installer_core.bits_download.download_via_bits", return_value=False), \
-             mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response()), \
-             mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=1638)):
+             mock.patch("dependency_install.bits_download.download_via_bits", return_value=False), \
+             mock.patch("dependency_install.urllib.request.urlopen", return_value=self._fake_url_response()), \
+             mock.patch("dependency_install.subprocess.run", return_value=mock.Mock(returncode=1638)):
             result = api.install_dependency(self.fake_key)
         self.assertEqual(result["status"], "success")
 
     def test_download_failure_returns_error_without_running_installer(self):
         api = make_installer_api()
         with self._register_fake_checker(lambda: False), \
-             mock.patch("installer_core.bits_download.download_via_bits", return_value=False), \
-             mock.patch("installer_core.urllib.request.urlopen", side_effect=OSError("模擬連線失敗")), \
-             mock.patch("installer_core.subprocess.run") as mock_run:
+             mock.patch("dependency_install.bits_download.download_via_bits", return_value=False), \
+             mock.patch("dependency_install.urllib.request.urlopen", side_effect=OSError("模擬連線失敗")), \
+             mock.patch("dependency_install.subprocess.run") as mock_run:
             result = api.install_dependency(self.fake_key)
         self.assertEqual(result["status"], "error")
         self.assertIn("下載", result["message"])
@@ -2084,9 +2085,9 @@ class TestInstallDependency(unittest.TestCase):
     def test_installer_process_failure_returns_error(self):
         api = make_installer_api()
         with self._register_fake_checker(lambda: False), \
-             mock.patch("installer_core.bits_download.download_via_bits", return_value=False), \
-             mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response()), \
-             mock.patch("installer_core.subprocess.run", side_effect=OSError("模擬子程序啟動失敗")):
+             mock.patch("dependency_install.bits_download.download_via_bits", return_value=False), \
+             mock.patch("dependency_install.urllib.request.urlopen", return_value=self._fake_url_response()), \
+             mock.patch("dependency_install.subprocess.run", side_effect=OSError("模擬子程序啟動失敗")):
             result = api.install_dependency(self.fake_key)
         self.assertEqual(result["status"], "error")
         self.assertIn("執行", result["message"])
@@ -2094,9 +2095,9 @@ class TestInstallDependency(unittest.TestCase):
     def test_recheck_still_missing_after_install_returns_error(self):
         api = make_installer_api()
         with self._register_fake_checker(lambda: False), \
-             mock.patch("installer_core.bits_download.download_via_bits", return_value=False), \
-             mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response()), \
-             mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=0)):
+             mock.patch("dependency_install.bits_download.download_via_bits", return_value=False), \
+             mock.patch("dependency_install.urllib.request.urlopen", return_value=self._fake_url_response()), \
+             mock.patch("dependency_install.subprocess.run", return_value=mock.Mock(returncode=0)):
             result = api.install_dependency(self.fake_key)
         self.assertEqual(result["status"], "error")
         self.assertIn("Fake Dependency", result["message"])
@@ -2115,9 +2116,9 @@ class TestInstallDependency(unittest.TestCase):
             return mock.Mock(returncode=0)
 
         with self._register_fake_checker(lambda: True), \
-             mock.patch("installer_core.bits_download.download_via_bits", return_value=False), \
-             mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response()), \
-             mock.patch("installer_core.subprocess.run", side_effect=fake_subprocess_run):
+             mock.patch("dependency_install.bits_download.download_via_bits", return_value=False), \
+             mock.patch("dependency_install.urllib.request.urlopen", return_value=self._fake_url_response()), \
+             mock.patch("dependency_install.subprocess.run", side_effect=fake_subprocess_run):
             api.install_dependency(self.fake_key)
 
         self.assertFalse(os.path.exists(captured["run_path"]))
@@ -2132,9 +2133,9 @@ class TestInstallDependency(unittest.TestCase):
             raise OSError("模擬子程序啟動失敗")
 
         with self._register_fake_checker(lambda: False), \
-             mock.patch("installer_core.bits_download.download_via_bits", return_value=False), \
-             mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response()), \
-             mock.patch("installer_core.subprocess.run", side_effect=fake_subprocess_run):
+             mock.patch("dependency_install.bits_download.download_via_bits", return_value=False), \
+             mock.patch("dependency_install.urllib.request.urlopen", return_value=self._fake_url_response()), \
+             mock.patch("dependency_install.subprocess.run", side_effect=fake_subprocess_run):
             api.install_dependency(self.fake_key)
 
         self.assertFalse(os.path.exists(captured["run_path"]))
@@ -2143,9 +2144,9 @@ class TestInstallDependency(unittest.TestCase):
     def test_bits_success_skips_urllib_entirely(self):
         api = make_installer_api()
         with self._register_fake_checker(lambda: True), \
-             mock.patch("installer_core.bits_download.download_via_bits", return_value=True) as mock_bits, \
-             mock.patch("installer_core.urllib.request.urlopen") as mock_urlopen, \
-             mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=0)), \
+             mock.patch("dependency_install.bits_download.download_via_bits", return_value=True) as mock_bits, \
+             mock.patch("dependency_install.urllib.request.urlopen") as mock_urlopen, \
+             mock.patch("dependency_install.subprocess.run", return_value=mock.Mock(returncode=0)), \
              mock.patch("os.path.exists", return_value=True), \
              mock.patch("os.remove"):
             result = api.install_dependency(self.fake_key)
@@ -2156,9 +2157,9 @@ class TestInstallDependency(unittest.TestCase):
     def test_bits_failure_falls_back_to_urllib(self):
         api = make_installer_api()
         with self._register_fake_checker(lambda: True), \
-             mock.patch("installer_core.bits_download.download_via_bits", return_value=False) as mock_bits, \
-             mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response()) as mock_urlopen, \
-             mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=0)):
+             mock.patch("dependency_install.bits_download.download_via_bits", return_value=False) as mock_bits, \
+             mock.patch("dependency_install.urllib.request.urlopen", return_value=self._fake_url_response()) as mock_urlopen, \
+             mock.patch("dependency_install.subprocess.run", return_value=mock.Mock(returncode=0)):
             result = api.install_dependency(self.fake_key)
         self.assertEqual(result["status"], "success")
         mock_bits.assert_called_once()
@@ -2175,9 +2176,9 @@ class TestInstallDependency(unittest.TestCase):
         response.read.side_effect = [b"only-13-bytes", b""]  # 實際只給 13 bytes 就斷了
         api = make_installer_api()
         with self._register_fake_checker(lambda: True), \
-             mock.patch("installer_core.bits_download.download_via_bits", return_value=False), \
-             mock.patch("installer_core.urllib.request.urlopen", return_value=response), \
-             mock.patch("installer_core.subprocess.run") as mock_run:
+             mock.patch("dependency_install.bits_download.download_via_bits", return_value=False), \
+             mock.patch("dependency_install.urllib.request.urlopen", return_value=response), \
+             mock.patch("dependency_install.subprocess.run") as mock_run:
             result = api.install_dependency(self.fake_key)
         self.assertEqual(result["status"], "error")
         mock_run.assert_not_called()
@@ -2213,9 +2214,9 @@ class TestInstallDependency(unittest.TestCase):
         check_fn() 複查之前，所以這裡不需要佈置真的能通過的登錄表機碼。
         """
         api = make_installer_api(custom_dependencies=[self._custom_dependency_entry("0" * 64)])
-        with mock.patch("installer_core.bits_download.download_via_bits", return_value=False), \
-             mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response(b"fake-exe-bytes")), \
-             mock.patch("installer_core.subprocess.run") as mock_run:
+        with mock.patch("dependency_install.bits_download.download_via_bits", return_value=False), \
+             mock.patch("dependency_install.urllib.request.urlopen", return_value=self._fake_url_response(b"fake-exe-bytes")), \
+             mock.patch("dependency_install.subprocess.run") as mock_run:
             result = api.install_dependency(self.fake_key)
         self.assertEqual(result["status"], "error")
         mock_run.assert_not_called()
@@ -2228,9 +2229,9 @@ class TestInstallDependency(unittest.TestCase):
         fake_reg.set_hklm("SOFTWARE\\Fake", {})
         api = make_installer_api(custom_dependencies=[self._custom_dependency_entry(expected)])
         with mock.patch.dict(sys.modules, {"winreg": fake_reg}), \
-             mock.patch("installer_core.bits_download.download_via_bits", return_value=False), \
-             mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response(body)), \
-             mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=0)):
+             mock.patch("dependency_install.bits_download.download_via_bits", return_value=False), \
+             mock.patch("dependency_install.urllib.request.urlopen", return_value=self._fake_url_response(body)), \
+             mock.patch("dependency_install.subprocess.run", return_value=mock.Mock(returncode=0)):
             result = api.install_dependency(self.fake_key)
         self.assertEqual(result["status"], "success")
 
@@ -2246,206 +2247,11 @@ class TestInstallDependency(unittest.TestCase):
         fake_reg.set_hklm("SOFTWARE\\Fake", {})
         api = make_installer_api(custom_dependencies=[self._custom_dependency_entry(expected)])
         with mock.patch.dict(sys.modules, {"winreg": fake_reg}), \
-             mock.patch("installer_core.bits_download.download_via_bits", return_value=False), \
-             mock.patch("installer_core.urllib.request.urlopen", return_value=self._fake_url_response(body)), \
-             mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=0)):
+             mock.patch("dependency_install.bits_download.download_via_bits", return_value=False), \
+             mock.patch("dependency_install.urllib.request.urlopen", return_value=self._fake_url_response(body)), \
+             mock.patch("dependency_install.subprocess.run", return_value=mock.Mock(returncode=0)):
             result = api.install_dependency(self.fake_key)
         self.assertEqual(result["status"], "success")
-
-
-class TestGenericRegistryCheck(unittest.TestCase):
-    """_generic_registry_check()：泛用登錄表偵測，取代原本每個相依元件各自
-    寫一個檢查函式的做法，custom_dependencies 的自訂相依元件也靠它。"""
-
-    def setUp(self):
-        self.fake_reg = FakeWinReg()
-        self.patcher = mock.patch.dict(sys.modules, {"winreg": self.fake_reg})
-        self.patcher.start()
-
-    def tearDown(self):
-        self.patcher.stop()
-
-    def test_key_missing_returns_false(self):
-        self.assertFalse(ic._generic_registry_check("HKLM", "Software\\NotThere"))
-
-    def test_value_name_none_only_checks_key_exists(self):
-        self.fake_reg.set_hklm("Software\\SomeApp", {})
-        self.assertTrue(ic._generic_registry_check("HKLM", "Software\\SomeApp"))
-
-    def test_value_matches_expected(self):
-        self.fake_reg.set_hklm("Software\\SomeApp", {"Installed": 1})
-        self.assertTrue(ic._generic_registry_check("HKLM", "Software\\SomeApp", "Installed", 1))
-
-    def test_value_mismatch_returns_false(self):
-        self.fake_reg.set_hklm("Software\\SomeApp", {"Installed": 0})
-        self.assertFalse(ic._generic_registry_check("HKLM", "Software\\SomeApp", "Installed", 1))
-
-    def test_hkcu_hive_is_respected(self):
-        self.fake_reg.set_hkcu("Software\\SomeApp", {"Installed": 1})
-        self.assertTrue(ic._generic_registry_check("HKCU", "Software\\SomeApp", "Installed", 1))
-        self.assertFalse(ic._generic_registry_check("HKLM", "Software\\SomeApp", "Installed", 1))
-
-
-class TestGenericRegistryVersionCheck(unittest.TestCase):
-    """_generic_registry_version_check()：相依元件版本檢查可以指定最低
-    需求版本，min_version 是 None 時退化成純粹的存在性判斷。
-
-    enum_subkeys=True 對應 .NET Desktop Runtime 那種「子機碼名稱本身就是
-    版本號」的登錄表佈局（InstalledVersions\\...\\sharedfx\\...\\8.0.10）；
-    enum_subkeys=False 對應 vcredist 那種「某個值本身存的就是版本字串」
-    的佈局。"""
-
-    def setUp(self):
-        self.fake_reg = FakeWinReg()
-        self.patcher = mock.patch.dict(sys.modules, {"winreg": self.fake_reg})
-        self.patcher.start()
-
-    def tearDown(self):
-        self.patcher.stop()
-
-    def test_key_missing_returns_false_regardless_of_min_version(self):
-        self.assertFalse(ic._generic_registry_version_check("HKLM", "Software\\NotThere", min_version="1.0"))
-
-    def test_no_min_version_is_pure_existence_check(self):
-        self.fake_reg.set_hklm("Software\\SomeApp", {"Version": "1.0.0"})
-        self.assertTrue(ic._generic_registry_version_check("HKLM", "Software\\SomeApp", value_name="Version"))
-
-    def test_value_name_mode_meets_min_version(self):
-        self.fake_reg.set_hklm("Software\\SomeApp", {"Version": "14.38.33135"})
-        self.assertTrue(ic._generic_registry_version_check(
-            "HKLM", "Software\\SomeApp", value_name="Version", min_version="14.30",
-        ))
-
-    def test_value_name_mode_below_min_version(self):
-        self.fake_reg.set_hklm("Software\\SomeApp", {"Version": "14.20.0"})
-        self.assertFalse(ic._generic_registry_version_check(
-            "HKLM", "Software\\SomeApp", value_name="Version", min_version="14.30",
-        ))
-
-    def test_enum_subkeys_mode_uses_highest_subkey_version(self):
-        self.fake_reg.set_hklm("Software\\SomeApp", {})
-        self.fake_reg.set_hklm("Software\\SomeApp\\8.0.1", {})
-        self.fake_reg.set_hklm("Software\\SomeApp\\8.0.10", {})
-        self.assertTrue(ic._generic_registry_version_check(
-            "HKLM", "Software\\SomeApp", enum_subkeys=True, min_version="8.0.5",
-        ))
-
-    def test_enum_subkeys_mode_below_min_version(self):
-        self.fake_reg.set_hklm("Software\\SomeApp", {})
-        self.fake_reg.set_hklm("Software\\SomeApp\\7.0.0", {})
-        self.assertFalse(ic._generic_registry_version_check(
-            "HKLM", "Software\\SomeApp", enum_subkeys=True, min_version="8.0.0",
-        ))
-
-    def test_enum_subkeys_mode_no_subkeys_returns_false(self):
-        self.fake_reg.set_hklm("Software\\SomeApp", {})
-        self.assertFalse(ic._generic_registry_version_check(
-            "HKLM", "Software\\SomeApp", enum_subkeys=True, min_version="1.0",
-        ))
-
-
-class TestCheckVcredistX64VersionAware(unittest.TestCase):
-    def setUp(self):
-        self.fake_reg = FakeWinReg()
-        self.patcher = mock.patch.dict(sys.modules, {"winreg": self.fake_reg})
-        self.patcher.start()
-        self.path = "SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\x64"
-
-    def tearDown(self):
-        self.patcher.stop()
-
-    def test_installed_flag_missing_is_false_even_without_min_version(self):
-        self.assertFalse(ic._check_vcredist_x64())
-
-    def test_no_min_version_only_checks_installed_flag(self):
-        self.fake_reg.set_hklm(self.path, {"Installed": 1})
-        self.assertTrue(ic._check_vcredist_x64())
-
-    def test_min_version_met(self):
-        self.fake_reg.set_hklm(self.path, {"Installed": 1, "Version": "14.38.33135"})
-        self.assertTrue(ic._check_vcredist_x64(min_version="14.30"))
-
-    def test_min_version_not_met(self):
-        self.fake_reg.set_hklm(self.path, {"Installed": 1, "Version": "14.20.0"})
-        self.assertFalse(ic._check_vcredist_x64(min_version="14.30"))
-
-
-class TestCheckDotnetDesktopVersionAware(unittest.TestCase):
-    def setUp(self):
-        self.fake_reg = FakeWinReg()
-        self.patcher = mock.patch.dict(sys.modules, {"winreg": self.fake_reg})
-        self.patcher.start()
-        self.path = "SOFTWARE\\WOW6432Node\\dotnet\\Setup\\InstalledVersions\\x64\\sharedfx\\Microsoft.WindowsDesktop.App"
-        # _check_dotnet_desktop() 登錄表查不到時會 fallback 掃實際安裝目錄
-        # （見 TestCheckDotnetDesktopFilesystemFallback）——這裡純粹測登錄表
-        # 這條路徑本身，指到不存在的目錄，避免撈到開發機真實裝的 .NET 汙染
-        # 這幾個測試案例的預期結果。
-        self.env_patcher = mock.patch.dict(
-            os.environ, {"ProgramFiles": "", "ProgramW6432": "", "ProgramFiles(x86)": ""},
-        )
-        self.env_patcher.start()
-
-    def tearDown(self):
-        self.patcher.stop()
-        self.env_patcher.stop()
-
-    def test_no_min_version_true_when_any_version_subkey_present(self):
-        self.fake_reg.set_hklm(self.path, {})
-        self.fake_reg.set_hklm(self.path + "\\8.0.10", {})
-        self.assertTrue(ic._check_dotnet_desktop())
-
-    def test_min_version_met(self):
-        self.fake_reg.set_hklm(self.path, {})
-        self.fake_reg.set_hklm(self.path + "\\8.0.10", {})
-        self.assertTrue(ic._check_dotnet_desktop(min_version="8.0.0"))
-
-    def test_min_version_not_met(self):
-        self.fake_reg.set_hklm(self.path, {})
-        self.fake_reg.set_hklm(self.path + "\\6.0.0", {})
-        self.assertFalse(ic._check_dotnet_desktop(min_version="8.0.0"))
-
-
-class TestCheckDotnetDesktopFilesystemFallback(unittest.TestCase):
-    """真實抓到的 bug：_check_dotnet_desktop() 原本只信登錄表
-    HKLM\\SOFTWARE\\WOW6432Node\\dotnet\\Setup\\InstalledVersions\\...，
-    但這把機碼只有透過官方 MSI 版安裝程式裝的才會寫入——實測發現透過
-    winget/Visual Studio Installer/dotnet-install.ps1 裝的完全不會寫這把
-    機碼，即使 `dotnet --list-runtimes` 能正常列出已安裝版本，登錄表判斷
-    還是會誤判成沒裝，導致使用者明明裝好了還被要求「自動安裝」，裝完一樣
-    偵測不到。改成登錄表查不到時，改掃 dotnet CLI 本身也是靠掃描判斷的
-    實際安裝目錄（%ProgramFiles%\\dotnet\\shared\\Microsoft.WindowsDesktop.App）
-    當備援。"""
-
-    def setUp(self):
-        self.fake_reg = FakeWinReg()
-        self.patcher = mock.patch.dict(sys.modules, {"winreg": self.fake_reg})
-        self.patcher.start()
-        self.tmp_dir = tempfile.mkdtemp()
-        self.shared_dir = os.path.join(self.tmp_dir, "dotnet", "shared", "Microsoft.WindowsDesktop.App")
-        self.env_patcher = mock.patch.dict(
-            os.environ, {"ProgramFiles": self.tmp_dir, "ProgramW6432": "", "ProgramFiles(x86)": ""},
-        )
-        self.env_patcher.start()
-
-    def tearDown(self):
-        self.patcher.stop()
-        self.env_patcher.stop()
-        shutil.rmtree(self.tmp_dir, ignore_errors=True)
-
-    def test_registry_empty_but_shared_fx_dir_present_is_detected(self):
-        os.makedirs(os.path.join(self.shared_dir, "10.0.11"))
-        self.assertTrue(ic._check_dotnet_desktop())
-
-    def test_registry_empty_and_no_shared_fx_dir_is_false(self):
-        self.assertFalse(ic._check_dotnet_desktop())
-
-    def test_registry_empty_min_version_met_via_filesystem(self):
-        os.makedirs(os.path.join(self.shared_dir, "10.0.11"))
-        self.assertTrue(ic._check_dotnet_desktop(min_version="9.0.0"))
-
-    def test_registry_empty_min_version_not_met_via_filesystem(self):
-        os.makedirs(os.path.join(self.shared_dir, "6.0.36"))
-        self.assertFalse(ic._check_dotnet_desktop(min_version="8.0.0"))
 
 
 class TestBuildDependencyCheckersMinVersion(unittest.TestCase):
@@ -2465,7 +2271,7 @@ class TestBuildDependencyCheckersMinVersion(unittest.TestCase):
     def test_no_min_version_configured_calls_checker_with_no_args(self):
         api = make_installer_api(dependencies=["vcredist_x64"])
         with mock.patch.dict(
-            ic.DEPENDENCY_CHECKERS,
+            dependency_install.DEPENDENCY_CHECKERS,
             {"vcredist_x64": (lambda: True, "VC++", "https://example.test/vc.exe", ["/quiet"])},
         ):
             checkers = api._build_dependency_checkers()
@@ -2535,7 +2341,7 @@ class TestCustomDependencies(unittest.TestCase):
             }],
         )
         with mock.patch.dict(
-            ic.DEPENDENCY_CHECKERS,
+            dependency_install.DEPENDENCY_CHECKERS,
             {"vcredist_x64": (lambda: False, "Visual C++ Redistributable (x64)", "https://example.test/vc.exe", ["/quiet"])},
         ):
             warnings = api.get_dependency_warnings()
@@ -2596,9 +2402,9 @@ class TestBundleDependencies(unittest.TestCase):
 
         api = make_installer_api(bundle_dependencies=["fake_dep"])
         with mock.patch("installer_core.get_resource_path", side_effect=lambda rel: os.path.join(self.tmp_dir, rel)), \
-             mock.patch.dict(ic.DEPENDENCY_CHECKERS, {"fake_dep": (lambda: True, "Fake Dep", "https://example.test/fake.exe", ["/quiet"])}), \
-             mock.patch("installer_core.urllib.request.urlopen") as mock_urlopen, \
-             mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=0)) as mock_run:
+             mock.patch.dict(dependency_install.DEPENDENCY_CHECKERS, {"fake_dep": (lambda: True, "Fake Dep", "https://example.test/fake.exe", ["/quiet"])}), \
+             mock.patch("dependency_install.urllib.request.urlopen") as mock_urlopen, \
+             mock.patch("dependency_install.subprocess.run", return_value=mock.Mock(returncode=0)) as mock_run:
             result = api.install_dependency("fake_dep")
         mock_urlopen.assert_not_called()
         mock_run.assert_called_once_with(
@@ -2615,9 +2421,9 @@ class TestBundleDependencies(unittest.TestCase):
         response.getheader.return_value = None
         response.read.side_effect = [b"data", b""]
         with mock.patch("installer_core.get_resource_path", side_effect=lambda rel: os.path.join(self.tmp_dir, rel)), \
-             mock.patch.dict(ic.DEPENDENCY_CHECKERS, {"fake_dep": (lambda: True, "Fake Dep", "https://example.test/fake.exe", ["/quiet"])}), \
-             mock.patch("installer_core.urllib.request.urlopen", return_value=response) as mock_urlopen, \
-             mock.patch("installer_core.subprocess.run", return_value=mock.Mock(returncode=0)):
+             mock.patch.dict(dependency_install.DEPENDENCY_CHECKERS, {"fake_dep": (lambda: True, "Fake Dep", "https://example.test/fake.exe", ["/quiet"])}), \
+             mock.patch("dependency_install.urllib.request.urlopen", return_value=response) as mock_urlopen, \
+             mock.patch("dependency_install.subprocess.run", return_value=mock.Mock(returncode=0)):
             result = api.install_dependency("fake_dep")
         mock_urlopen.assert_called_once()
         self.assertEqual(result["status"], "success")
