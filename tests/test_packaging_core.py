@@ -268,7 +268,11 @@ class TestListAppDirFiles(unittest.TestCase):
         self.assertEqual(packaging_core.list_app_dir_files(""), [])
 
 
-class TestValidateAndBuildPackData(unittest.TestCase):
+class PackDataValidationTestBase(unittest.TestCase):
+    """`validate_and_build_pack_data()` 的共用測試骨架：一個含 main.exe 的
+    暫時 app_dir，加上「其他欄位都填好、只有這個測試關心的欄位不同」的
+    `_base_data()`。下面幾個測試類別都從這裡繼承，不各自複製一份。"""
+
     def setUp(self):
         self.app_dir = tempfile.mkdtemp()
         with open(os.path.join(self.app_dir, "main.exe"), "wb") as f:
@@ -301,6 +305,8 @@ class TestValidateAndBuildPackData(unittest.TestCase):
     def _validate(self, data, png_path="fake.png", ico_path="fake.ico", doc_icon_path_selected=""):
         return packaging_core.validate_and_build_pack_data(data, self.app_dir, png_path, ico_path, doc_icon_path_selected)
 
+
+class TestValidateAndBuildPackData(PackDataValidationTestBase):
     def test_success_path_returns_pack_data_with_no_error(self):
         pack_data, error = self._validate(self._base_data())
         self.assertIsNone(error)
@@ -699,6 +705,155 @@ class TestValidateAndBuildPackData(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(pack_data["signing"]["cert_path"], cert_path)
         self.assertEqual(pack_data["signing"]["timestamp_url"], "http://timestamp.digicert.com")
+
+
+class TestNoAdminInstallConflicts(PackDataValidationTestBase):
+    """F09：「免管理員權限安裝」與「建立 Windows 服務／系統還原點」可以
+    同時設定，但兩者在一般權限下必定失敗。
+
+    `no_admin_install` 開啟時 builder.py 不加入提權設定，整個安裝流程在
+    一般權限下執行；`sc.exe create` 與系統還原點建立都需要管理員權限。
+    這個組合原本沒有任何驗證，失敗只會變成安裝完成畫面上的警告——使用者
+    要等到裝到終端機器上、發現服務不存在才知道設定從一開始就不可能成立。
+
+    `validate_and_build_pack_data()` 對欄位之間的矛盾本來就有在驗證
+    （`dependencies_min_version` 與 `dependencies` 交叉比對、`doc_icons` 與
+    `file_associations` 交叉比對），這是少數會在終端使用者機器上實際失敗、
+    卻沒有對應驗證的組合。
+    """
+
+    def _service(self):
+        return {"service_name": "MySvc", "exe_relative_path": "main.exe", "start_type": "auto"}
+
+    def test_no_admin_install_with_windows_service_is_rejected(self):
+        _pack_data, error = self._validate(self._base_data(
+            no_admin_install=True, windows_service=self._service(),
+        ))
+        self.assertIsNotNone(error, "免權限安裝 + Windows 服務必定失敗，應該在打包階段就攔下來")
+        self.assertIn("Windows 服務", error)
+        self.assertIn("管理員權限", error)
+
+    def test_no_admin_install_with_restore_point_is_rejected(self):
+        _pack_data, error = self._validate(self._base_data(
+            no_admin_install=True, create_restore_point_before_install=True,
+        ))
+        self.assertIsNotNone(error)
+        self.assertIn("還原點", error)
+        self.assertIn("管理員權限", error)
+
+    def test_windows_service_alone_is_fine(self):
+        _pack_data, error = self._validate(self._base_data(windows_service=self._service()))
+        self.assertIsNone(error)
+
+    def test_restore_point_alone_is_fine(self):
+        _pack_data, error = self._validate(self._base_data(create_restore_point_before_install=True))
+        self.assertIsNone(error)
+
+    def test_no_admin_install_alone_is_fine(self):
+        _pack_data, error = self._validate(self._base_data(no_admin_install=True))
+        self.assertIsNone(error)
+
+    def test_no_admin_install_with_scheduled_task_is_still_allowed(self):
+        """排程工作不在互斥清單裡：schtasks.exe 以目前使用者身分建立
+        onlogon 觸發的工作不需要管理員權限，跟 sc.exe／還原點不同。"""
+        _pack_data, error = self._validate(self._base_data(
+            no_admin_install=True,
+            scheduled_task={"task_name": "MyTask", "exe_relative_path": "main.exe"},
+        ))
+        self.assertIsNone(error)
+
+
+class TestVersionStringValidation(PackDataValidationTestBase):
+    """F10：版本號的合法定義，打包端與安裝端互相矛盾。
+
+    `version_compare.py` 完整處理帶預發布後綴的版本（`1.0.0-rc2` 比
+    `1.0.0` 舊），但 `version_info._parse_version_tuple()` 要求每一段都是
+    純整數，`1.0.0-rc1` 會拋 ValueError 中止建置——這種版本號根本無法打包
+    產出，安裝端的預發布比較邏輯永遠不會被執行到。
+
+    附帶問題：這裡原本對版本號只檢查非空字串，真正的格式檢查發生在
+    `builder.py` 中段，此時 `dist/`／`build/` 已於流程開頭被清空。純函式
+    `validate_and_build_pack_data()` 的設計目的正是在產生任何副作用之前
+    攔截設定錯誤。
+
+    決定與理由見 docs/adr/0003-allow-prerelease-suffix-in-version-string.md。
+    """
+
+    def test_accepts_a_prerelease_suffix(self):
+        _pack_data, error = self._validate(self._base_data(version="1.0.0-rc1"))
+        self.assertIsNone(error, "帶預發布後綴的版本號應該可以打包")
+
+    def test_accepts_plain_numeric_versions(self):
+        for version in ("1", "1.0", "1.0.0", "1.0.0.0"):
+            with self.subTest(version=version):
+                _pack_data, error = self._validate(self._base_data(version=version))
+                self.assertIsNone(error)
+
+    def test_rejects_more_than_four_numeric_segments(self):
+        """Win32 VERSIONINFO 的 filevers/prodvers 依規格固定是 4 個 16 位元
+        整數，第 5 段無處可放。"""
+        _pack_data, error = self._validate(self._base_data(version="1.0.0.0.1"))
+        self.assertIsNotNone(error)
+        self.assertIn("版本", error)
+
+    def test_rejects_non_numeric_segments(self):
+        _pack_data, error = self._validate(self._base_data(version="1.x.0"))
+        self.assertIsNotNone(error)
+        self.assertIn("版本", error)
+
+    def test_rejects_an_empty_suffix(self):
+        _pack_data, error = self._validate(self._base_data(version="1.0.0-"))
+        self.assertIsNotNone(error)
+        self.assertIn("版本", error)
+
+    def test_rejects_a_negative_segment(self):
+        _pack_data, error = self._validate(self._base_data(version="1.-2.0"))
+        self.assertIsNotNone(error)
+        self.assertIn("版本", error)
+
+
+class TestServiceAndTaskFieldsAreNormalized(PackDataValidationTestBase):
+    """F11：部分設定欄位以未正規化的原始值進入設定檔。
+
+    `windows_service`／`scheduled_task` 的驗證會先 `.strip()` 再檢查，但
+    `pack_data` 是由 `dict(data)` 整包複製而來，這幾個欄位沒有像其他欄位
+    那樣把正規化後的值寫回。結果是 `start_type` 填成 `"auto "` 能通過驗證，
+    實際傳給 `sc.exe` 時失敗——驗證看的值跟實際使用的值是兩個不同的東西。
+    """
+
+    def test_windows_service_fields_are_stripped_in_pack_data(self):
+        pack_data, error = self._validate(self._base_data(windows_service={
+            "service_name": "  MySvc  ", "exe_relative_path": " main.exe ",
+            "display_name": "  My Service  ", "start_type": "auto ",
+        }))
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["windows_service"]["service_name"], "MySvc")
+        self.assertEqual(pack_data["windows_service"]["exe_relative_path"], "main.exe")
+        self.assertEqual(pack_data["windows_service"]["display_name"], "My Service")
+        self.assertEqual(pack_data["windows_service"]["start_type"], "auto")
+
+    def test_scheduled_task_fields_are_stripped_in_pack_data(self):
+        pack_data, error = self._validate(self._base_data(scheduled_task={
+            "task_name": "  MyTask  ", "exe_relative_path": " main.exe ",
+            "trigger": " onlogon ",
+        }))
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["scheduled_task"]["task_name"], "MyTask")
+        self.assertEqual(pack_data["scheduled_task"]["exe_relative_path"], "main.exe")
+        self.assertEqual(pack_data["scheduled_task"]["trigger"], "onlogon")
+
+    def test_start_type_defaults_to_auto_when_omitted(self):
+        pack_data, error = self._validate(self._base_data(windows_service={
+            "service_name": "MySvc", "exe_relative_path": "main.exe",
+        }))
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["windows_service"]["start_type"], "auto")
+
+    def test_unused_service_and_task_stay_empty(self):
+        pack_data, error = self._validate(self._base_data())
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["windows_service"], {})
+        self.assertEqual(pack_data["scheduled_task"], {})
 
 
 class TestValidateSigningConfig(unittest.TestCase):

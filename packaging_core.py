@@ -350,6 +350,46 @@ def _validate_dependency_policy(dependencies, custom_dependencies_raw, bundle_de
     return custom_dependencies, bundle_dependencies, None
 
 
+def _validate_version_string(version):
+    """驗證版本號格式，通過回傳 None，不通過回傳錯誤訊息字串。
+
+    F10：這個檢查原本不在這裡——`validate_and_build_pack_data()` 對版本號
+    只確認是非空字串，真正的格式檢查發生在 `builder.py` 中段呼叫
+    `version_info.write_version_file()` 的時候，此時 `dist/`／`build/` 已於
+    流程開頭被清空。這個純函式的設計目的正是在產生任何副作用之前攔截設定
+    錯誤，版本號格式沒有走這條路徑。
+
+    格式：`<主>.<次>.<修>[-<後綴>]`。數字段 1 至 4 段（Win32 VERSIONINFO 的
+    filevers/prodvers 依規格固定是 4 個 16 位元整數，第 5 段無處可放），
+    每段皆為非負整數；後綴為連字號之後的任意非空文字，不強制符合 semantic
+    versioning 的完整規範——`version_compare.py` 既有的預發布判定以「有無
+    連字號」為準，維持同一套慣例。決定與理由見
+    docs/adr/0003-allow-prerelease-suffix-in-version-string.md。
+
+    數字段用 `isascii() and isdigit()` 判斷，不只用 `isdigit()`：後者對全形
+    數字與上標字元也回傳 True，但那些字元不見得能被 `int()` 接受，會讓一個
+    「通過驗證」的值在後面才炸開。
+    """
+    numeric_part, hyphen, suffix = version.partition("-")
+    if hyphen and not suffix.strip():
+        return f"欄位驗證失敗：<br>版本號「{version}」的連字號後面是空的，預發布後綴不能留空（例如 1.0.0-rc1）。"
+
+    segments = numeric_part.split(".")
+    if len(segments) > 4:
+        return (
+            f"欄位驗證失敗：<br>版本號「{version}」的數字段超過 4 段。"
+            "<br>Windows 的版本資源固定只有 4 個數字欄位，放不下第 5 段。"
+        )
+    for segment in segments:
+        if not (segment.isascii() and segment.isdigit()):
+            return (
+                f"欄位驗證失敗：<br>版本號「{version}」格式不正確。"
+                "<br>格式為 1 到 4 段非負整數，可選擇在後面加上連字號與預發布後綴，"
+                "例如 1.0.0、1.2.3.4、1.0.0-rc1。"
+            )
+    return None
+
+
 def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_path_selected):
     """驗證表單/JSON 資料，並組出要交給 builder.build_all() 的 pack_data。
 
@@ -401,6 +441,10 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
 
     if not app_name or not version or not publisher or not exe_name:
         return None, "欄位驗證失敗：<br>所有文字欄位（名稱、版本、發行者、安裝檔名）皆為必填項目，請檢查是否有欄位遺漏。"
+
+    version_error = _validate_version_string(version)
+    if version_error:
+        return None, version_error
 
     if need_file_assoc and not file_assoc_raw:
         return None, "欄位驗證失敗：<br>已勾選「需要註冊檔案關聯」，請填入至少一個副檔名，或取消勾選。"
@@ -490,6 +534,13 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     # 一個永久壞掉的服務/排程工作。有填其中一個欄位（代表使用者是真的
     # 想用這個功能，不是完全沒填的情境）就要求兩者都齊全、且執行檔真的
     # 存在於 app_dir。
+    # F11：驗證讀的是 .strip() 過的值，但 pack_data 是 dict(data) 整包複製
+    # 而來，這幾個欄位原本沒有像其他欄位那樣把正規化後的值寫回——start_type
+    # 填成 "auto " 能通過驗證，實際傳給 sc.exe 的卻是那個帶空白的原始值，
+    # 註冊必定失敗。驗證看的值跟實際使用的值必須是同一個。
+    windows_service_normalized = {}
+    scheduled_task_normalized = {}
+
     if windows_service_raw.get("service_name") or windows_service_raw.get("exe_relative_path"):
         service_name = str(windows_service_raw.get("service_name", "")).strip()
         exe_rel = str(windows_service_raw.get("exe_relative_path", "")).strip()
@@ -504,6 +555,12 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
         if start_type not in windows_service.VALID_START_TYPES:
             valid_list = "/".join(sorted(windows_service.VALID_START_TYPES))
             return None, f"欄位驗證失敗：<br>windows_service 的 start_type「{start_type}」不是有效值，必須是 {valid_list} 其中之一。"
+        windows_service_normalized = {
+            "service_name": service_name,
+            "exe_relative_path": exe_rel,
+            "display_name": str(windows_service_raw.get("display_name", "")).strip(),
+            "start_type": start_type,
+        }
 
     if scheduled_task_raw.get("task_name") or scheduled_task_raw.get("exe_relative_path"):
         task_name = str(scheduled_task_raw.get("task_name", "")).strip()
@@ -512,6 +569,34 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
             return None, "欄位驗證失敗：<br>scheduled_task 的 task_name 跟 exe_relative_path 必須同時填寫，或都留空不使用這個功能。"
         if not os.path.exists(os.path.join(app_dir, exe_rel)):
             return None, f"欄位驗證失敗：<br>scheduled_task 指定的執行檔「{exe_rel}」不存在於應用程式資料夾中，請重新選擇。"
+        scheduled_task_normalized = {
+            "task_name": task_name,
+            "exe_relative_path": exe_rel,
+            # 預設值跟 installer_core.py 讀取時的 .get("trigger", "onlogon")
+            # 一致，明確寫進設定檔而不是留給讀取端補。
+            "trigger": str(scheduled_task_raw.get("trigger", "onlogon")).strip() or "onlogon",
+        }
+
+    # F09：「免管理員權限安裝」開啟時 builder.py 不加入提權設定，整個安裝
+    # 流程在一般權限下執行；但 sc.exe create 與系統還原點建立都需要管理員
+    # 權限，這兩個組合在終端使用者機器上必定失敗。失敗只會變成安裝完成
+    # 畫面上的警告，使用者要等到裝上去、發現服務不存在才知道這個設定從
+    # 一開始就不可能成立——這種矛盾應該在打包階段就攔下來。
+    #
+    # 排程工作不在互斥清單裡：schtasks.exe 以目前使用者身分建立 onlogon
+    # 觸發的工作不需要管理員權限。
+    if no_admin_install and windows_service_normalized:
+        return None, (
+            "欄位驗證失敗：<br>「免管理員權限安裝」與「建立 Windows 服務」不能同時使用。"
+            "<br>建立 Windows 服務（sc.exe）需要系統管理員權限，但免權限安裝的整個流程都在"
+            "一般權限下執行，服務必定建立失敗。請擇一取消。"
+        )
+    if no_admin_install and create_restore_point_before_install:
+        return None, (
+            "欄位驗證失敗：<br>「免管理員權限安裝」與「安裝前建立系統還原點」不能同時使用。"
+            "<br>建立系統還原點需要系統管理員權限，但免權限安裝的整個流程都在一般權限下執行，"
+            "還原點必定建立失敗。請擇一取消。"
+        )
 
     # dependencies_min_version：真實抓到的問題——key 完全沒有跟 dependencies
     # 清單交叉比對過。installer_core._build_dependency_checkers() 只有對
@@ -565,4 +650,6 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     pack_data["bundle_dependencies"] = bundle_dependencies
     pack_data["signing"] = signing
     pack_data["install_password_env"] = install_password_env
+    pack_data["windows_service"] = windows_service_normalized
+    pack_data["scheduled_task"] = scheduled_task_normalized
     return pack_data, None

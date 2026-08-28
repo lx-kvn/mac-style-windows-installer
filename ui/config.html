@@ -250,7 +250,7 @@
             <div class="checkbox-row"><input type="radio" name="install_location" id="install_loc_custom" value="custom" onchange="onInstallLocationChange()"><label for="install_loc_custom" data-i18n="label_loc_custom">自訂路徑</label></div>
             <div id="custom_install_dir_section" style="display: none; margin-top: 6px; margin-left: 24px;">
                 <input type="text" id="custom_install_dir" placeholder="%APPDATA%\MyApp" data-i18n-placeholder="ph_custom_install_dir">
-                <div class="checkbox-row" style="margin-top: 6px;"><input type="checkbox" id="custom_install_requires_admin"><label for="custom_install_requires_admin" data-i18n="label_custom_requires_admin">這個路徑需要系統管理員權限</label></div>
+                <div class="checkbox-row" style="margin-top: 6px;"><input type="checkbox" id="custom_install_requires_admin" onchange="updateAdminOnlyOptions()"><label for="custom_install_requires_admin" data-i18n="label_custom_requires_admin">這個路徑需要系統管理員權限</label></div>
             </div>
             <span class="note" data-i18n="note_install_location">預設會安裝到 Program Files，需要系統管理員權限（雙擊安裝檔會跳出 UAC 提示）。選「使用者目錄」會改裝到 %LOCALAPPDATA%\Programs\&lt;安裝資料夾名稱&gt;，整個安裝檔（含解除安裝）完全不要求提權。選「自訂路徑」可以自行填寫任意安裝目錄（支援 %APPDATA% 這類環境變數，會依使用者電腦當下的實際值展開），預設視為使用者自己有寫入權限的位置、不要求提權，如果你確定這個路徑需要系統管理員權限才能寫入，請另外勾選下面的選項。</span>
         </div>
@@ -272,6 +272,12 @@
             <div id="custom_deps_rows"></div>
             <button class="btn-browse" type="button" onclick="addCustomDependencyRow()" data-i18n="btn_add_custom_dependency">+ 新增自訂相依元件</button>
             <span class="note" data-i18n="note_custom_dependencies">除了上面內建的 Visual C++ Redistributable / .NET Desktop Runtime，也可以自訂任意相依元件：安裝時用登錄表偵測是否已安裝，缺少的話比照內建元件提示自動下載＋靜默安裝。</span>
+        </div>
+
+        <!-- F09：免管理員權限安裝時，下面兩個需要管理員權限的選項會被停用，
+             這條說明解釋原因，不讓使用者以為畫面壞掉。 -->
+        <div class="form-group" id="adminOnlyDisabledNote" style="display: none;">
+            <span class="note" data-i18n="note_admin_only_disabled">目前的「安裝位置」設定不要求系統管理員權限，因此「安裝前建立系統還原點」與「安裝為 Windows 服務」已停用——這兩項都必須有系統管理員權限才能執行，在免權限安裝的流程裡必定失敗。需要這兩項功能的話，請把安裝位置改成 Program Files，或在自訂路徑底下勾選「這個路徑需要系統管理員權限」。</span>
         </div>
 
         <div class="form-group">
@@ -631,6 +637,7 @@
                 ph_cd_value_name: "登錄表值名稱（選填，留空只檢查機碼是否存在）",
                 ph_cd_expected: "期望值（選填）",
                 ph_cd_min_version: "最低版本（選填，有填的話會忽略上面的期望值，改用版本比較）",
+                note_admin_only_disabled: "目前的「安裝位置」設定不要求系統管理員權限，因此「安裝前建立系統還原點」與「安裝為 Windows 服務」已停用——這兩項都必須有系統管理員權限才能執行，在免權限安裝的流程裡必定失敗。需要這兩項功能的話，請把安裝位置改成 Program Files，或在自訂路徑底下勾選「這個路徑需要系統管理員權限」。",
                 label_restore_point: "安裝前建立系統還原點（選填）",
                 note_restore_point: "複製檔案之前呼叫 Windows 系統還原功能建立一個還原點，方便使用者在安裝出問題時自行還原系統。部分系統（例如關閉了系統還原功能，或 Windows Server）可能無法建立，失敗只記錄警告，不會阻擋安裝。",
                 label_windows_service: "安裝為 Windows 服務（選填）",
@@ -763,6 +770,7 @@
                 ph_cd_value_name: "Registry value name (optional; leave empty to just check the key exists)",
                 ph_cd_expected: "Expected value (optional)",
                 ph_cd_min_version: "Minimum version (optional; if set, overrides the expected value above with a version comparison instead)",
+                note_admin_only_disabled: "The current \"Install Location\" setting does not require administrator rights, so \"Create a system restore point before install\" and \"Install as a Windows service\" are disabled — both need administrator rights and would always fail in an elevation-free install. To use them, switch the install location to Program Files, or tick \"This path requires administrator rights\" under the custom path.",
                 label_restore_point: "Create a system restore point before install (optional)",
                 note_restore_point: "Calls Windows System Restore right before files are copied, so the user can roll back their system if something goes wrong. Some systems (e.g. System Restore disabled, or Windows Server) may not support it — failure is only logged as a warning and won't block installation.",
                 label_windows_service: "Install as a Windows service (optional)",
@@ -1003,7 +1011,7 @@
                 submitBtn.title = '缺少必要的編譯環境，請先安裝後重新開啟本工具';
             }
         }
-        window.addEventListener('pywebviewready', async () => { await initLanguage(); await checkEnvironmentOnLoad(); await initWorkspaceDir(); });
+        window.addEventListener('pywebviewready', async () => { await initLanguage(); await checkEnvironmentOnLoad(); await initWorkspaceDir(); updateAdminOnlyOptions(); });
 
         // ---------------- 編譯工作目錄 ----------------
         async function initWorkspaceDir() {
@@ -1031,9 +1039,41 @@
         function getInstallLocation() {
             return document.querySelector('input[name="install_location"]:checked').value;
         }
+        // 「這次打包出來的安裝檔要不要提權」只在這裡算一次：送出資料的
+        // no_admin_install 欄位跟畫面上的停用邏輯都呼叫它。原本這個判斷
+        // 只寫在送出資料那一段裡，畫面若另外複製一份就會變成兩份要手動
+        // 對齊的協定——這個專案已經因為這種形態漏改過好幾次。
+        function isNoAdminInstall() {
+            return getInstallLocation() === 'local_appdata' ||
+                (getInstallLocation() === 'custom' && !document.getElementById('custom_install_requires_admin').checked);
+        }
+
+        // F09：「免管理員權限安裝」開啟時，整個安裝流程都在一般權限下執行，
+        // 但 sc.exe create 與系統還原點建立都需要管理員權限，這兩個組合在
+        // 終端使用者機器上必定失敗。packaging_core 會在按下編譯時擋下來，
+        // 這裡讓使用者在選擇安裝位置的當下就看得出來，不用填完整段設定才
+        // 被拒絕。排程工作不在此列：schtasks.exe 以目前使用者身分建立
+        // onlogon 觸發的工作不需要管理員權限。
+        function updateAdminOnlyOptions() {
+            const noAdmin = isNoAdminInstall();
+            ['need_windows_service', 'create_restore_point'].forEach((id) => {
+                const box = document.getElementById(id);
+                box.disabled = noAdmin;
+                if (noAdmin && box.checked) {
+                    box.checked = false;
+                    // 取消勾選要順便把底下的設定區塊收起來，不然使用者會
+                    // 看到一個「勾選框沒勾、欄位卻還攤開著」的矛盾畫面。
+                    if (id === 'need_windows_service') toggleWindowsServiceFields(false);
+                }
+                box.closest('.checkbox-row').style.opacity = noAdmin ? '0.45' : '';
+            });
+            document.getElementById('adminOnlyDisabledNote').style.display = noAdmin ? 'block' : 'none';
+        }
+
         function onInstallLocationChange() {
             document.getElementById('custom_install_dir_section').style.display =
                 getInstallLocation() === 'custom' ? 'block' : 'none';
+            updateAdminOnlyOptions();
         }
 
         async function browseFolder() {
@@ -1451,8 +1491,7 @@
                 add_to_path: document.getElementById('add_to_path').checked,
                 path_target_exe: document.getElementById('add_to_path').checked ? document.getElementById('path_target_exe').value : '',
                 local_appdata_files: document.getElementById('need_local_appdata_files').checked ? Array.from(checkedLocalAppdataFiles) : [],
-                no_admin_install: getInstallLocation() === 'local_appdata' ||
-                    (getInstallLocation() === 'custom' && !document.getElementById('custom_install_requires_admin').checked),
+                no_admin_install: isNoAdminInstall(),
                 custom_install_dir: getInstallLocation() === 'custom' ? document.getElementById('custom_install_dir').value.trim() : '',
                 bundle_dependencies: [
                     ...(document.getElementById('dep_vcredist').checked && document.getElementById('dep_vcredist_bundle').checked ? ['vcredist_x64'] : []),

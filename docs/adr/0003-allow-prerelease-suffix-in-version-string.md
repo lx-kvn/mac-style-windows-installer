@@ -2,9 +2,9 @@
 
 ## 狀態
 
-方向已接受（2026-08-29 決定）。實作尚未開始，排入
+已接受（2026-08-29 決定）。決定一至三已於
 [`docs/proposals/跨模組一致性稽核與修正規劃.md`](../proposals/跨模組一致性稽核與修正規劃.md)
-第三輪（F10）與第四輪（F13）。
+第三輪（F10）實作完成；決定四排入第四輪（F13）。
 
 ## 背景
 
@@ -101,7 +101,15 @@ Win32 VERSIONINFO 的數值欄位（`filevers`／`prodvers`）依規格固定為
 
 ## 待辦事項
 
-- [ ] 第三輪：實作決定一至三（`version_info.py`、`packaging_core.py`）。
-- [ ] 第四輪：實作決定四（`version_compare.py` 的 F13）。
-- [ ] 更新 `version_info.py`／`version_compare.py`／`packaging_core.py`
-      三者的模組說明文字，載明版本號格式的統一定義。
+- [ ] 第四輪：實作決定四（`version_compare.py` 的 F13），並補上
+      `version_compare.py` 的模組說明文字。
+
+## 已完成之待辦
+
+- [x] 第三輪：實作決定一至三。`version_info._parse_version_tuple()` 改為
+      每段只取開頭連續數字（後綴被捨棄，字串欄位保留原始文字）；
+      `packaging_core._validate_version_string()` 新增格式驗證，在
+      `validate_and_build_pack_data()` 內於任何副作用發生前回報。
+- [x] 更新 `version_info.py`／`packaging_core.py` 的說明文字，並在
+      `CONTEXT.md` 新增「版本號格式（三個模組共用同一個定義）」一節，
+      集中記載這個定義以及三個模組各自負責的部分。

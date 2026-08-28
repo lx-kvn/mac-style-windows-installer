@@ -23,7 +23,22 @@ class TestParseVersionTuple(unittest.TestCase):
     def test_four_segments_kept_as_is(self):
         self.assertEqual(version_info._parse_version_tuple("1.2.3.4"), (1, 2, 3, 4))
 
+    def test_prerelease_suffix_is_dropped_from_the_numeric_tuple(self):
+        """F10／ADR-0003：Win32 VERSIONINFO 的 filevers/prodvers 依規格固定
+        是 4 個 16 位元整數，容不下文字，所以數值欄位只取每一段開頭連續的
+        數字段。這跟 version_compare.parse_version() 既有的解析方式一致，
+        兩個模組對版本號數字段的看法相同。
+
+        原本這裡對非純數字段一律拋 ValueError，`1.0.0-rc1` 因此根本無法
+        打包產出——而 version_compare.py 早就寫好了預發布版的比較邏輯，
+        那段邏輯在實際流程中永遠不會被執行到。這是預期的契約修正。
+        """
+        self.assertEqual(version_info._parse_version_tuple("1.0.0-rc1"), (1, 0, 0, 0))
+        self.assertEqual(version_info._parse_version_tuple("2.5-beta"), (2, 5, 0, 0))
+
     def test_non_numeric_segment_raises_value_error(self):
+        """後綴以外的位置仍然要求是數字：`1.x.0` 沒有連字號，`x` 這一段
+        取不出任何數字，是真的寫錯了。"""
         with self.assertRaises(ValueError):
             version_info._parse_version_tuple("1.x.0")
 
@@ -41,6 +56,20 @@ class TestRenderVersionFile(unittest.TestCase):
         )
         self.assertIn("filevers=(0, 12, 0, 0)", content)
         self.assertIn("prodvers=(0, 12, 0, 0)", content)
+
+    def test_prerelease_suffix_survives_in_the_string_fields(self):
+        """ADR-0003 決定二：數值欄位捨棄後綴（規格上放不下），字串欄位
+        （FileVersion／ProductVersion）保留使用者輸入的原始文字——Windows
+        檔案總管「內容 → 詳細資料」顯示的是字串欄位，終端使用者仍會看到
+        完整的預發布版本號。"""
+        content = version_info.render_version_file(
+            product_name="MyApp",
+            file_version="1.0.0-rc1",
+            file_description="MyApp",
+        )
+        self.assertIn("filevers=(1, 0, 0, 0)", content)
+        self.assertIn("StringStruct('FileVersion', '1.0.0-rc1')", content)
+        self.assertIn("StringStruct('ProductVersion', '1.0.0-rc1')", content)
 
     def test_product_version_defaults_to_file_version(self):
         content = version_info.render_version_file(

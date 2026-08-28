@@ -239,6 +239,48 @@ FileVersion/CompanyName/LegalCopyright 這些欄位嵌進 exe 資源，這個專
 欄位）。這個模組只在開發機的建置流程用到，不會被打包進最終 exe，所以
 不列進 `packaging_core.py` 的 `SHARED_DEEP_MODULES`。
 
+## 版本號格式（三個模組共用同一個定義）
+
+版本欄位的格式是 `<主>.<次>.<修>[-<後綴>]`：數字段 1 至 4 段、每段皆為
+非負整數，後綴是連字號之後的任意非空文字（`1.0.0`、`1.2.3.4`、
+`1.0.0-rc1`、`2.0.0-beta`）。決定與理由見
+[`docs/adr/0003`](docs/adr/0003-allow-prerelease-suffix-in-version-string.md)。
+
+同一個定義分佈在三個模組，各自負責一段：
+
+- `packaging_core._validate_version_string()`——**唯一的把關點**，在
+  `validate_and_build_pack_data()` 裡，於任何檔案系統副作用發生之前回報。
+  原本這裡只檢查非空字串，真正的格式檢查發生在 `builder.py` 中段，此時
+  `dist/`／`build/` 已於流程開頭被清空。
+- `version_info._parse_version_tuple()`——Win32 VERSIONINFO 的數值欄位
+  （`filevers`／`prodvers`）依規格固定是 4 個 16 位元整數，容不下文字，
+  所以每一段只取開頭連續的數字（`1.0.0-rc1` → `(1, 0, 0, 0)`）。字串
+  欄位（`FileVersion`／`ProductVersion`）保留原始文字——檔案總管「內容
+  → 詳細資料」顯示的是字串欄位，終端使用者仍看得到完整的預發布版本號。
+- `version_compare.parse_version()`／`compare_versions()`——覆蓋安裝的
+  版本比較。同樣是「每段只取開頭連續數字」，跟 `version_info.py` 對數字
+  段的看法一致；預發布的判定以「有無連字號」為準。
+
+這三者原本並不一致：`version_compare.py` 早就完整處理帶後綴的版本，
+但 `version_info._parse_version_tuple()` 要求每段都是純整數，`1.0.0-rc1`
+會拋 `ValueError` 中止建置——這種版本號根本無法打包產出，`version_compare.py`
+的預發布比較邏輯在實際流程中永遠不會被執行到。
+
+## 免管理員權限安裝與需要提權的選項互斥
+
+`no_admin_install` 開啟時 `builder.py` 不加入提權設定，整個安裝流程在一般
+權限下執行。**「安裝為 Windows 服務」與「安裝前建立系統還原點」在這個模式
+下必定失敗**（`sc.exe create` 與系統還原點建立都需要管理員權限），所以
+`packaging_core.validate_and_build_pack_data()` 直接把這兩個組合視為欄位
+驗證失敗，`ui/config.html` 也會在切換「安裝位置」時同步停用這兩個選項並
+顯示原因。
+
+**排程工作不在此列**：`schtasks.exe` 以目前使用者身分建立 `onlogon` 觸發的
+工作不需要管理員權限，免權限安裝仍然可以用。
+
+GUI 端「這次是不是免權限安裝」只在 `isNoAdminInstall()` 算一次，送出資料的
+`no_admin_install` 欄位與畫面停用邏輯共用它，不各自維護一份判斷。
+
 ## 安裝密碼保護（Install Password Protection）
 
 **設計階段，尚未實作**（2026-08-12 grilling session 定案，見對應的實作

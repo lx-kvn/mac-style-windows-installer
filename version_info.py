@@ -19,17 +19,37 @@ PyInstaller 內部模組——避免依賴一個非公開 API 的內部結構，
 
 def _parse_version_tuple(version_str):
     """把 "0.12.0" 這種版本字串解析成 4 個整數的 tuple（Win32 VERSIONINFO
-    的 filevers/prodvers 固定要 4 段）。不足 4 段補 0，正好 4 段原樣使用，
-    超過 4 段或任何一段不是純數字都拋 ValueError——讓呼叫端在建置當下就
-    發現版本字串寫錯，而不是生成一份 PyInstaller 唸不懂的檔案。
+    的 filevers/prodvers 固定要 4 個 16 位元整數）。不足 4 段補 0，正好
+    4 段原樣使用，超過 4 段或任何一段取不出數字都拋 ValueError——讓呼叫端
+    在建置當下就發現版本字串寫錯，而不是生成一份 PyInstaller 唸不懂的檔案。
+
+    預發布後綴（`1.0.0-rc1`）：每一段只取開頭連續的數字，後綴被捨棄
+    （`1.0.0-rc1` → `(1, 0, 0, 0)`）。數值欄位依規格容不下文字，字串欄位
+    （FileVersion／ProductVersion）則保留使用者輸入的原始文字，見
+    render_version_file()。這個取法跟 version_compare.parse_version()
+    既有的「每段只取開頭連續數字」一致，兩個模組對版本號數字段的解析
+    方式相同。決定與理由見
+    docs/adr/0003-allow-prerelease-suffix-in-version-string.md。
+
+    原本這裡對非純數字段一律拋 ValueError，`1.0.0-rc1` 因此根本無法打包
+    產出，而 version_compare.py 早就寫好的預發布比較邏輯在實際流程中
+    永遠不會被執行到。版本號格式的實際把關已前移到
+    packaging_core.validate_and_build_pack_data()（在任何檔案系統副作用
+    發生之前），這裡的例外保留作為最後防線。
     """
     parts = version_str.split(".")
     if len(parts) > 4:
         raise ValueError(f"版本號 {version_str!r} 不能超過 4 段（filevers/prodvers 固定是 4 個整數）")
-    try:
-        numbers = [int(p) for p in parts]
-    except ValueError:
-        raise ValueError(f"版本號 {version_str!r} 每一段都必須是整數")
+    numbers = []
+    for part in parts:
+        digits = ""
+        for ch in part:
+            if not ch.isdigit():
+                break
+            digits += ch
+        if not digits:
+            raise ValueError(f"版本號 {version_str!r} 每一段都必須以數字開頭")
+        numbers.append(int(digits))
     numbers += [0] * (4 - len(numbers))
     return tuple(numbers)
 
