@@ -98,7 +98,19 @@
         .icon-wrapper { width: 90px; height: 90px; display: flex; justify-content: center; align-items: center; cursor: grab; transition: transform 0.2s; }
         .icon-wrapper img { width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
         .icon-wrapper:active { cursor: grabbing; transform: scale(0.95); }
+        /* 真實抓到的無障礙問題：這顆要拖去資料夾上才會觸發安裝的圖示，
+           是整個安裝流程唯一的觸發點，原本只掛滑鼠拖曳事件，Tab 鍵完全
+           選不到它。補上 tabindex/role="button" 讓它進入 Tab 順序並被
+           螢幕報讀器辨識成按鈕，這裡補上鍵盤焦點框（跟 .nice-btn /
+           .custom-close-btn 同一套視覺，只在鍵盤導覽時顯示）。 */
+        #drag-item:focus-visible { outline: 2px solid #0071e3; outline-offset: 2px; }
         #drop-target .icon-wrapper { cursor: pointer; }
+        /* 安裝目的地圖示同樣原本只有滑鼠 click 事件，補上鍵盤操作後也要
+           有焦點框。外框畫在內部的 .icon-wrapper 上而不是整個 .icon-box
+           上，讓它跟 #drag-item 一樣只框住圖示本身，不會把底下的標籤與
+           長路徑文字一起框進去。 */
+        #drop-target:focus-visible { outline: none; }
+        #drop-target:focus-visible .icon-wrapper { outline: 2px solid #0071e3; outline-offset: 2px; }
 
         .arrow-box { height: 90px; display: flex; align-items: center; }
         .arrow-svg { width: 28px; height: 28px; }
@@ -264,7 +276,8 @@
     <div class="main-view" id="mainView">
         <div class="workspace">
             <div class="icon-box">
-                <div class="icon-wrapper" id="drag-item" draggable="true">
+                <div class="icon-wrapper" id="drag-item" draggable="true" tabindex="0" role="button"
+                     onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); triggerInstallFromDragItem(); }">
                     <img src="app_icon.png" alt="App">
                 </div>
                 <div class="label" id="app_name_label" data-i18n="loading">載入中...</div>
@@ -276,7 +289,8 @@
                 </svg>
             </div>
 
-            <div class="icon-box" id="drop-target">
+            <div class="icon-box" id="drop-target" tabindex="0" role="button"
+                 onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); chooseInstallFolder(); }">
                 <div class="icon-wrapper">
                     <img src="folder_icon.png" alt="Folder">
                 </div>
@@ -737,9 +751,15 @@
             }
         }
 
-        dropTarget.addEventListener('click', async () => {
+        // 點安裝目的地圖示、以及用鍵盤選到它後按 Enter/空白鍵，都走這同一個
+        // 函式，兩邊行為不會分岔。
+        async function chooseInstallFolder() {
             const newPath = await pywebview.api.select_folder();
             if (newPath) { pathPreview.innerText = newPath; pathPreview.setAttribute('title', newPath); }
+        }
+
+        dropTarget.addEventListener('click', async () => {
+            await chooseInstallFolder();
         });
 
         dragItem.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/plain', 'install-trigger'); });
@@ -841,12 +861,19 @@
             }
         }
 
+        // 把圖示拖到資料夾上放開、以及用鍵盤選到圖示後按 Enter/空白鍵，
+        // 都走這同一個函式——鍵盤操作不是另一條捷徑，而是同一個拖拽目標的
+        // 另一種操作方式，兩邊行為不會分岔。
+        async function triggerInstallFromDragItem() {
+            const createDesktopShortcut = document.getElementById('desktopShortcutCheck').checked;
+            await attemptInstall(createDesktopShortcut);
+        }
+
         dropTarget.addEventListener('drop', async (e) => {
             e.preventDefault();
             dropTarget.classList.remove('drag-over');
             if (e.dataTransfer.getData('text/plain') === 'install-trigger') {
-                const createDesktopShortcut = document.getElementById('desktopShortcutCheck').checked;
-                await attemptInstall(createDesktopShortcut);
+                await triggerInstallFromDragItem();
             }
         });
     </script>
