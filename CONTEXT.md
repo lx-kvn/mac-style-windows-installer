@@ -320,8 +320,23 @@ GUI 端「這次是不是免權限安裝」只在 `isNoAdminInstall()` 算一次
 
 ## 安裝密碼保護（Install Password Protection）
 
-**設計階段，尚未實作**（2026-08-12 grilling session 定案，見對應的實作
-task）。選填功能：打包時可以設定一組密碼，安裝時使用者要輸入正確密碼
+**已實作**（2026-08-12 grilling session 定案，之後依這份設計實作完成）。
+下面記載的每一項都對得上實際的程式碼：
+
+| 這一節提到的 | 實際位置 |
+|---|---|
+| 加密／解密本體 | `install_encryption.py`（`encrypt_directory()`／`decrypt_to_directory()`／`WrongPasswordError`） |
+| `install_password_env` 欄位驗證 | `packaging_core._validate_install_password_env()` |
+| 打包時加密 `app_dir` | `builder.build_all()` 的 `app_contents.enc` 處理 |
+| 密碼關卡（EULA 之前） | `installer_core.InstallerAPI.is_password_protected()`／`verify_install_password()`、`ui/index.html` 的 `passwordView` |
+| 解密後的複製來源 | `installer_core.InstallerAPI._app_contents_dir()` |
+| `/PASSWORD=` 靜默參數 | `installer_core._parse_cli_args()`／`run_silent_install()` |
+| CLI 使用說明 | `CLI_USAGE.md` |
+
+**唯一還沒補上的**：`ui/config.html` 沒有對應的輸入欄位，GUI 使用者目前
+無法使用這個功能，只能改走 CLI 的 JSON 設定檔。
+
+選填功能：打包時可以設定一組密碼，安裝時使用者要輸入正確密碼
 才能繼續，否則無法取得應用程式檔案。定位是**存取控制**（防止安裝檔被
 誤傳/亂用），不是防範有心人暴力破解的資安機制——這個定位決定了下面
 好幾個子決策的方向，不要事後模糊掉。

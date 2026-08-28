@@ -500,6 +500,33 @@ class TestInstallPasswordProtection(BuildAllTestBase):
         self.assertIn(f"--add-data={self.app_dir};app_contents", captured_cmd["cmd"])
 
 
+class TestConfigHasNoDeadFields(BuildAllTestBase):
+    """F15：`display_name` 這個欄位寫進 installer_config.json，但全專案沒有
+    任何讀取點——`installer_core.load_config()` 讀的是 `app_name`，兩個欄位
+    的內容永遠相同。規格文件也把它記載成「歷史包袱」。留著只會讓下一個
+    讀設定檔格式的人以為它有作用，去找誰在用它、然後撲空。
+    """
+
+    def test_display_name_is_not_written_to_the_config(self):
+        captured = {}
+
+        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+            if "uninstall.py" in cmd:
+                os.makedirs(self.dist_dir, exist_ok=True)
+                with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
+                    f.write(b"FAKE")
+            else:
+                config_path = os.path.join(self.workspace_dir, "installer_config.json")
+                with open(config_path, "r", encoding="utf-8") as f:
+                    captured.update(json.load(f))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        self._call_build_all(run_side_effect=fake_run)
+
+        self.assertIn("app_name", captured, "app_name 才是真正被讀取的欄位")
+        self.assertNotIn("display_name", captured)
+
+
 class TestTempArtifactCleanupOnFailure(BuildAllTestBase):
     """真實抓到的問題（F19）：暫存產物（doc_icon.ico、內嵌的前後置腳本、
     下載下來要內嵌的相依元件安裝檔）原本只有在函式順利跑到最後一段

@@ -425,6 +425,89 @@ class TestProcessRunningDetection(unittest.TestCase):
         self.assertNotEqual(result["status"], "process_running")
 
 
+class TestUpgradeFlowDoesNotRepeatItself(unittest.TestCase):
+    """F15：覆蓋安裝流程裡的兩處冗餘。
+
+    一、檔案複製之前有三處 `_restore_upgrade_backup()` 呼叫（找不到內建
+    資源、磁碟空間不足、主程式執行中），三處都位於「移除舊版本」步驟之前
+    ——此時備份根本還沒建立（`upgrade.backup()` 是在 `run()` 內部才呼叫的），
+    必為空操作。
+
+    二、覆蓋安裝的登錄表查詢原本做三次：前端頁面載入一次、
+    `trigger_installation()` 一次、`upgrade.run()` 內部再一次。前兩次相隔的
+    是「使用者看到彈窗到實際拖曳圖示」這段真實時間，收斂掉會讓前端沒東西
+    可以顯示，不能動；後兩次相隔只有幾微秒，卻讓同一次安裝流程可能依據
+    兩份不同的快照做事——磁碟空間需求依第一次查到的舊安裝路徑計算，備份
+    卻可能備份到第二次查到的另一個路徑。收斂成一次，整個流程用同一份快照。
+    """
+
+    def setUp(self):
+        self.resource_dir = tempfile.mkdtemp()
+        self.app_contents_dir = os.path.join(self.resource_dir, "app_contents")
+        os.makedirs(self.app_contents_dir)
+        with open(os.path.join(self.app_contents_dir, "app.exe"), "wb") as f:
+            f.write(b"fake-app")
+        self.install_dir = tempfile.mkdtemp()
+        shutil.rmtree(self.install_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.resource_dir, ignore_errors=True)
+        shutil.rmtree(self.install_dir, ignore_errors=True)
+
+    def _resource_path(self, relative_path):
+        return os.path.join(self.resource_dir, relative_path)
+
+    def _make_api(self):
+        return make_installer_api(
+            app_name="MyApp", main_exe="", selected_path=self.install_dir,
+            file_associations=[], add_to_path=False,
+        )
+
+    def test_no_restore_attempt_when_the_install_fails_before_any_backup_exists(self):
+        api = self._make_api()
+        with mock.patch("installer_core.get_resource_path", side_effect=self._resource_path), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
+             mock.patch.object(api, "_check_disk_space", return_value=(False, [
+                 {"drive": "C:", "free": 100, "required": 10 ** 9, "sufficient": False},
+             ])), \
+             mock.patch.object(api._upgrade, "restore_backup") as mock_restore:
+            result = api.trigger_installation(create_desktop_shortcut=False)
+
+        self.assertEqual(result["status"], "error")
+        mock_restore.assert_not_called()
+
+    def test_the_backup_is_still_restored_when_the_install_fails_after_it_exists(self):
+        """相對地，走到備份真的建立之後才失敗時，復原一定要照做——移除的
+        是必為空操作的那三處，不是整個復原機制。"""
+        api = self._make_api()
+        with mock.patch("installer_core.get_resource_path", side_effect=self._resource_path), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, [])), \
+             mock.patch.object(api, "_register_uninstall_entry", side_effect=RuntimeError("模擬登錄表寫入失敗")), \
+             mock.patch.object(api._upgrade, "restore_backup") as mock_restore:
+            result = api.trigger_installation(create_desktop_shortcut=False)
+
+        self.assertEqual(result["status"], "error")
+        mock_restore.assert_called_once()
+
+    def test_the_registry_is_queried_once_per_install_attempt(self):
+        api = self._make_api()
+        info = {"exists": True, "install_path": self.install_dir, "version": "0.9.0", "hive": "HKLM"}
+        with mock.patch("installer_core.get_resource_path", side_effect=self._resource_path), \
+             mock.patch.object(api._upgrade, "check_existing", return_value=info) as mock_check, \
+             mock.patch.object(api._upgrade, "backup", return_value=None), \
+             mock.patch.object(api._upgrade, "run_uninstall_exe_elevated", return_value=(True, 0)), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, [])), \
+             mock.patch.object(api, "_register_uninstall_entry"), \
+             mock.patch.object(api, "_create_shortcut", return_value=True):
+            api.trigger_installation(create_desktop_shortcut=False)
+
+        self.assertEqual(
+            mock_check.call_count, 1,
+            f"同一次安裝流程只該查一次覆蓋安裝狀態，實際查了 {mock_check.call_count} 次",
+        )
+
+
 class TestTriggerInstallationUpgradeFlow(unittest.TestCase):
     """驗證『刪除舊版本』延後到 trigger_installation() 內部才執行：使用者拖曳
     圖示、真正觸發安裝之後才會動舊版本，不是彈窗一按確認鈕就刪（見
@@ -461,7 +544,7 @@ class TestTriggerInstallationUpgradeFlow(unittest.TestCase):
             call_order.append("copy")
             return real_copy2(src, dst)
 
-        def fake_run_upgrade_uninstall():
+        def fake_run_upgrade_uninstall(existing_info=None):
             call_order.append("upgrade")
             return {"status": "success"}
 

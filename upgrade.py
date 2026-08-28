@@ -285,9 +285,17 @@ class UpgradeCoordinator:
         finally:
             kernel32.CloseHandle(sei.hProcess)
 
-    def run(self, app_name, version, scope, selected_path, restart_explorer_on_update):
+    def run(self, app_name, version, scope, selected_path, restart_explorer_on_update,
+            existing_info=None):
         """更新覆蓋安裝流程：先備份舊安裝資料夾，再靜默呼叫舊版本的解除安裝
         助手移除乾淨，之後才繼續安裝新版本。
+
+        existing_info（F15）：呼叫端剛查過 `check_existing()` 就把結果傳
+        進來，避免相隔幾微秒再查一次。這不只是省一次登錄表存取——
+        `installer_core.trigger_installation()` 已經用第一次查到的舊安裝
+        路徑算過磁碟空間需求，如果這裡自己重查、拿到不一樣的路徑，同一次
+        安裝流程就會依據兩份不同的快照做事（依 A 的大小檢查空間、卻備份
+        B）。不傳就自己查，維持這個方法可以獨立呼叫。
 
         修正紀錄（真實抓到的 bug）：這裡呼叫的是「舊版本」的 uninstall.exe，
         它是否會在刪除前關閉檔案總管，原本完全依賴舊版本自己那份
@@ -317,7 +325,7 @@ class UpgradeCoordinator:
         第一次從這麼舊的版本更新可能仍會遇到這個問題，等新版本安裝完成、
         往後再次更新時才會是「新版本呼叫新版本」，這個修正才能確實生效。
         """
-        info = self.check_existing(app_name, version, scope)
+        info = existing_info if existing_info is not None else self.check_existing(app_name, version, scope)
         if not info.get("exists"):
             return {"status": "skipped"}
 

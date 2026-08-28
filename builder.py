@@ -249,7 +249,6 @@ def build_all(
     post_install_embedded = f"post_install_script{os.path.splitext(post_install_script)[1]}" if post_install_script else ""
     config_content = {
         "app_name": app_name,
-        "display_name": app_name,
         "folder_name": folder_name,
         "version": version,
         "publisher": publisher,

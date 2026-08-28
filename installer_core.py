@@ -385,16 +385,21 @@ class InstallerAPI:
     def _discard_upgrade_backup(self):
         self._upgrade.discard_backup()
 
-    def run_upgrade_uninstall(self):
+    def run_upgrade_uninstall(self, existing_info=None):
         """更新覆蓋安裝流程：先備份舊安裝資料夾，再靜默呼叫舊版本的解除
         安裝助手移除乾淨，之後才繼續安裝新版本。完整協定（備份/跨 UAC
         呼叫/pending-delete 重試/失敗復原）收在 upgrade.UpgradeCoordinator
         （見該模組說明），這裡只負責把 InstallerAPI 的實例狀態轉成明確
         參數傳進去。
+
+        existing_info：呼叫端（trigger_installation()）剛查過的覆蓋安裝
+        狀態，往下傳給 UpgradeCoordinator.run() 讓整個流程用同一份快照，
+        見該方法的說明（F15）。
         """
         return self._upgrade.run(
             self.app_name, self.version, self._scope,
             self.selected_path, self.restart_explorer_on_update,
+            existing_info=existing_info,
         )
 
     def select_folder(self):
@@ -837,9 +842,14 @@ class InstallerAPI:
         scheduled_task_name = ""
         journal = install_journal.InstallJournal()
         try:
+            # F15：這裡（以及下面磁碟空間不足、主程式執行中兩處）原本都會
+            # 先呼叫一次 _restore_upgrade_backup()。三處都位於「移除舊版本」
+            # 之前，此時備份根本還沒建立（upgrade.backup() 是在
+            # UpgradeCoordinator.run() 內部才呼叫的），必為空操作——留著只會
+            # 讓讀的人以為這幾條路徑真的有東西要復原。備份建立之後才失敗的
+            # 路徑仍然照舊復原，見下面兩個 except 區塊。
             src_dir = self._app_contents_dir()
             if not os.path.exists(src_dir):
-                self._restore_upgrade_backup()
                 return {"status": "error", "message": "安裝失敗：找不到內建軟體資源！"}
 
             # 覆蓋安裝偵測提前到磁碟空間檢查之前：這是一次唯讀的登錄表查詢，
@@ -852,7 +862,6 @@ class InstallerAPI:
             # 磁碟空間檢查（依落地磁碟分組，可能不只一顆——見 _check_disk_space()）
             ok, drive_reports = self._check_disk_space(existing_install_path)
             if not ok:
-                self._restore_upgrade_backup()
                 detail = "、".join(
                     f"{d['drive']} 需要約 {d['required'] // (1024 * 1024)} MB、"
                     f"剩餘 {d['free'] // (1024 * 1024)} MB"
@@ -882,7 +891,6 @@ class InstallerAPI:
             # 本身的行程狀態問題，不是這裡偵測邏輯的 bug，需要一個讓使用者
             # 不會被卡死的出口）。
             if not skip_process_check and self.main_exe and _is_process_running(os.path.basename(self.main_exe)):
-                self._restore_upgrade_backup()
                 return {
                     "status": "process_running",
                     "message": f"偵測到「{self.main_exe}」正在執行中。\n請先關閉程式後再繼續安裝。",
@@ -895,7 +903,7 @@ class InstallerAPI:
             # existing 沿用上面磁碟空間檢查前查到的那一次結果，不重查。
             if existing.get("exists"):
                 self._report_progress(3, "正在移除舊版本...")
-                upgrade_result = self.run_upgrade_uninstall()
+                upgrade_result = self.run_upgrade_uninstall(existing_info=existing)
                 if upgrade_result.get("status") == "error":
                     return {"status": "error", "message": upgrade_result.get("message")}
 
