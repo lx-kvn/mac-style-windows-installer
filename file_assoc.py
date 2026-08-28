@@ -86,8 +86,16 @@ def unregister(extensions, registry=_real_winreg, no_admin_install=False):
     使用者事後的選擇，或另一個應用程式的關聯。套用刪除測試：拿掉這個
     呼叫，複雜度不會在別處重新出現（跟 register() 那邊「必須清掉才能讓
     新關聯生效」的理由完全不同），純粹是移除一個做過頭的動作。
+
+    回傳值（F02）：這個函式原本對每一次 DeleteKey 都 try/except: pass
+    且不回傳任何值，uninstall.py 的檔案關聯移除步驟因此無條件記錄成功，
+    實際失敗完全沒有出口。改成回傳布林值，語義跟 system_entries.py 的
+    移除原語一致——機碼本來就不存在（DeleteKey 拋 FileNotFoundError）
+    視為成功，只有 FileNotFoundError 以外的例外（權限不足、底下還有子
+    機碼刪不掉）代表機碼仍留在登錄表裡，才回傳 False。
     """
     hive = InstallScope(no_admin_install, registry=registry).registry_hive
+    removal_failed = False
     for ext in extensions:
         pid = prog_id(ext)
         # DefaultIcon 是 shell 的平行子機碼，DeleteKey 要求目標本身沒有子機碼
@@ -103,10 +111,13 @@ def unregister(extensions, registry=_real_winreg, no_admin_install=False):
         ):
             try:
                 registry.DeleteKey(hive, reg_path)
+            except FileNotFoundError:
+                continue
             except Exception:
-                pass
+                removal_failed = True
 
     _notify_association_changed()
+    return not removal_failed
 
 
 def _clear_stale_user_associations(ext, registry, log, just_wrote_hive=None):

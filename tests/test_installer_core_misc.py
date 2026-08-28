@@ -1289,6 +1289,96 @@ class TestTriggerInstallationCreatesWindowsService(unittest.TestCase):
         self.assertTrue(any("MySvc" in w for w in result["warnings"]))
 
 
+class TestNonFatalFailuresAllBecomeWarnings(unittest.TestCase):
+    """F05：安裝流程裡有五種「失敗但不中止安裝」的情況，處理方式原本分成
+    兩類——Windows 服務與排程工作建立失敗會併入回傳結果的 warnings（B17
+    修正），安裝後置腳本、系統還原點、捷徑建立這三種同樣性質、同樣不中止
+    安裝的失敗卻只寫進 install_log.txt。這支 exe 是 --noconsole 編譯的，
+    只寫紀錄檔等於使用者不會知道，跟 B17 當初要解決的問題一模一樣。
+    """
+
+    def setUp(self):
+        self.resource_dir = tempfile.mkdtemp()
+        self.app_contents_dir = os.path.join(self.resource_dir, "app_contents")
+        os.makedirs(self.app_contents_dir)
+        with open(os.path.join(self.app_contents_dir, "app.exe"), "wb") as f:
+            f.write(b"fake-app")
+        self.install_dir = tempfile.mkdtemp()
+        shutil.rmtree(self.install_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.resource_dir, ignore_errors=True)
+        shutil.rmtree(self.install_dir, ignore_errors=True)
+
+    def _install(self, api, create_desktop_shortcut=False, shortcut_ok=True):
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_register_uninstall_entry"), \
+             mock.patch.object(api, "_create_shortcut", return_value=shortcut_ok):
+            return api.trigger_installation(create_desktop_shortcut=create_desktop_shortcut)
+
+    def _make_api(self, **overrides):
+        kwargs = dict(
+            app_name="MyApp", main_exe="app.exe", selected_path=self.install_dir,
+            file_associations=[], add_to_path=False,
+        )
+        kwargs.update(overrides)
+        return make_installer_api(**kwargs)
+
+    def test_post_install_script_failure_is_surfaced_as_warning(self):
+        api = self._make_api(post_install_script="post.bat")
+        with mock.patch.object(api, "_run_install_script", return_value=(False, "腳本回傳 1")):
+            result = self._install(api)
+        self.assertEqual(result["status"], "success")
+        self.assertTrue(
+            any("後置腳本" in w for w in result["warnings"]),
+            f"安裝後置腳本失敗應該出現在 warnings，實際：{result['warnings']}",
+        )
+
+    def test_post_install_script_success_adds_no_warning(self):
+        api = self._make_api(post_install_script="post.bat")
+        with mock.patch.object(api, "_run_install_script", return_value=(True, "")):
+            result = self._install(api)
+        self.assertEqual(result["warnings"], [])
+
+    def test_restore_point_failure_is_surfaced_as_warning(self):
+        api = self._make_api(create_restore_point_before_install=True)
+        with mock.patch("installer_core.restore_point.create_restore_point", return_value=False):
+            result = self._install(api)
+        self.assertEqual(result["status"], "success")
+        self.assertTrue(
+            any("還原點" in w for w in result["warnings"]),
+            f"系統還原點建立失敗應該出現在 warnings，實際：{result['warnings']}",
+        )
+
+    def test_restore_point_success_adds_no_warning(self):
+        api = self._make_api(create_restore_point_before_install=True)
+        with mock.patch("installer_core.restore_point.create_restore_point", return_value=True):
+            result = self._install(api)
+        self.assertEqual(result["warnings"], [])
+
+    def test_shortcut_creation_failure_is_surfaced_as_warning(self):
+        api = self._make_api()
+        result = self._install(api, create_desktop_shortcut=True, shortcut_ok=False)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(
+            len([w for w in result["warnings"] if "捷徑" in w]), 2,
+            f"開始功能表與桌面兩個捷徑都失敗，應該各有一則警告，實際：{result['warnings']}",
+        )
+
+    def test_shortcut_creation_success_adds_no_warning(self):
+        api = self._make_api()
+        result = self._install(api, create_desktop_shortcut=True, shortcut_ok=True)
+        self.assertEqual(result["warnings"], [])
+
+    def test_no_main_exe_does_not_warn_about_shortcuts(self):
+        """沒有主程式就沒有捷徑可以建立，這不是失敗，不該產生警告。"""
+        api = self._make_api(main_exe="")
+        result = self._install(api, create_desktop_shortcut=True, shortcut_ok=False)
+        self.assertEqual(result["warnings"], [])
+
+
 class TestTriggerInstallationCreatesScheduledTask(unittest.TestCase):
     """scheduled_task packaging 欄位有設定時，trigger_installation() 應該
     呼叫 scheduled_task.create_scheduled_task() 建立排程工作、並把工作
@@ -2128,6 +2218,29 @@ class TestSilentInstallLogPath(unittest.TestCase):
         self.assertTrue(os.path.exists(log_path))
         with open(log_path, encoding="utf-8") as f:
             self.assertIn("成功", f.read())
+
+    def test_warnings_from_install_result_are_written_to_the_log(self):
+        """F01：trigger_installation() 回傳的 warnings（服務/排程工作/還原點/
+        後置腳本/捷徑建立失敗）原本只有 GUI 那條路徑「可能」讀得到，靜默
+        安裝完全沒有讀取——無人值守部署的管理員拿到 exit code 0，看到的
+        紀錄檔裡卻沒有任何一項失敗的痕跡。"""
+        log_path = os.path.join(self.tmp_dir, "with_warnings.log")
+        with mock.patch("installer_core.InstallerAPI") as MockAPI, \
+             mock.patch("installer_core._acquire_single_instance_lock", return_value=(True, None)):
+            instance = MockAPI.return_value
+            instance.app_name = "MyApp"
+            instance.password_protected = False
+            instance.check_existing_install.return_value = {"exists": False}
+            instance.get_dependency_warnings.return_value = []
+            instance.trigger_installation.return_value = {
+                "status": "success", "message": "安裝成功",
+                "warnings": ["建立 Windows 服務「MySvc」失敗（不影響安裝結果）"],
+            }
+            exit_code = ic.run_silent_install(log_path=log_path)
+        self.assertEqual(exit_code, 0)
+        with open(log_path, encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("MySvc", content)
 
     def test_falls_back_to_temp_when_custom_path_unwritable(self):
         bogus_path = "Z:\\definitely\\not\\a\\real\\drive\\install.log"

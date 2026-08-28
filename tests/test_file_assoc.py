@@ -179,6 +179,28 @@ class TestUnregister(unittest.TestCase):
         with mock.patch("file_assoc.ctypes.windll.shell32.SHChangeNotify"):
             file_assoc.unregister([".never-existed"], registry=self.reg)  # 不應該拋例外
 
+    def test_returns_true_after_removing_all_keys(self):
+        """F02：這個函式原本對每一次 DeleteKey 都 try/except: pass 且不回傳
+        任何值，呼叫端（uninstall.py 的檔案關聯移除步驟）因此無條件記錄成功。
+        改成回傳布林值，語義跟 system_entries 的兩個移除原語一致。"""
+        self._seed_association(".xyz")
+        with mock.patch("file_assoc.ctypes.windll.shell32.SHChangeNotify"):
+            self.assertTrue(file_assoc.unregister([".xyz"], registry=self.reg))
+
+    def test_returns_true_when_keys_already_absent(self):
+        """依 F04 定下的語義：機碼本來就不存在（DeleteKey 拋 FileNotFoundError）
+        代表結束後目標確實不存在，算成功，不是失敗。"""
+        with mock.patch("file_assoc.ctypes.windll.shell32.SHChangeNotify"):
+            self.assertTrue(file_assoc.unregister([".never-existed"], registry=self.reg))
+
+    def test_returns_false_when_delete_fails_for_other_reason(self):
+        """FileNotFoundError 以外的例外（權限不足、底下還有子機碼刪不掉）
+        代表機碼還留在登錄表裡，這才是真正該回報給使用者的失敗。"""
+        self._seed_association(".xyz")
+        with mock.patch("file_assoc.ctypes.windll.shell32.SHChangeNotify"), \
+             mock.patch.object(self.reg, "DeleteKey", side_effect=PermissionError("模擬權限不足")):
+            self.assertFalse(file_assoc.unregister([".xyz"], registry=self.reg))
+
     def test_does_not_touch_user_choice_on_uninstall(self):
         """真實抓到的問題：unregister() 原本呼叫跟 register() 同一個
         _clear_stale_user_associations()——那個函式存在的理由是「讓剛

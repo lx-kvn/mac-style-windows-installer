@@ -42,8 +42,36 @@ class TestRemoveRegistryEntry(unittest.TestCase):
         )
         self.assertIsNone(self.fake_reg.hkcu(self._reg_path()))
 
-    def test_returns_false_when_missing(self):
-        self.assertFalse(se.remove_registry_entry("NoSuchApp", registry=self.fake_reg))
+    def test_returns_true_when_entry_already_absent(self):
+        """F04：回傳值的語義是「這個函式結束之後，目標是否確實不存在」，
+        不是「這次有沒有刪到東西」。兩個 hive 都找不到目標機碼時
+        DeleteKey 會拋 FileNotFoundError——代表目標本來就不存在（使用者
+        自己清過、或當初根本沒寫成功），對解除安裝而言結果跟「剛剛才刪掉」
+        完全一樣，不該被 _perform_uninstall_steps() 收進 failures，變成
+        使用者畫面上的假警告。
+        """
+        self.assertTrue(se.remove_registry_entry("NoSuchApp", registry=self.fake_reg))
+
+    def test_returns_false_when_delete_fails_for_other_reason(self):
+        """相對地，FileNotFoundError 以外的例外（權限不足、機碼底下還有
+        子機碼）代表目標還在、而且移除失敗，這才是真正該回報的失敗。"""
+        self.fake_reg.set_hklm(self._reg_path(), {})
+        with mock.patch.object(self.fake_reg, "DeleteKey", side_effect=PermissionError("模擬權限不足")):
+            self.assertFalse(se.remove_registry_entry("MyApp", registry=self.fake_reg))
+
+    def test_returns_false_when_primary_hive_fails_even_if_other_hive_is_clean(self):
+        """主 hive 的移除因權限不足失敗、另一個 hive 只是找不到目標時，整體
+        仍算失敗——主 hive 的殘留項目確實還留在「已安裝的應用程式」清單裡，
+        不能因為另一邊乾淨就回報成功。"""
+        real_delete = self.fake_reg.DeleteKey
+
+        def fake_delete(hive, subkey):
+            if hive == self.fake_reg.HKEY_LOCAL_MACHINE:
+                raise PermissionError("模擬權限不足")
+            return real_delete(hive, subkey)
+
+        with mock.patch.object(self.fake_reg, "DeleteKey", side_effect=fake_delete):
+            self.assertFalse(se.remove_registry_entry("MyApp", registry=self.fake_reg))
 
     def test_falls_back_to_other_hive_when_entry_is_there_instead(self):
         """真實抓到的 bug：no_admin_install 從 manifest 讀出來的值可能跟
@@ -70,9 +98,19 @@ class TestRemoveShortcut(unittest.TestCase):
         mock_remove.assert_called_once_with(expected_path)
         self.assertTrue(result)
 
-    def test_returns_false_when_shortcut_missing(self):
+    def test_returns_true_when_shortcut_already_absent(self):
+        """F04：捷徑檔案本來就不存在是完全正常的情境——使用者可能自己把
+        捷徑刪掉了，或安裝當時捷徑建立就失敗過（`_create_shortcut()` 的
+        失敗是可忽略的設計）。函式結束後目標確實不存在，回傳成功。"""
         fake_reg = FakeWinReg()
         with mock.patch("system_entries.os.path.exists", return_value=False):
+            result = se.remove_shortcut("MyApp", registry=fake_reg)
+        self.assertTrue(result)
+
+    def test_returns_false_when_shortcut_removal_fails(self):
+        fake_reg = FakeWinReg()
+        with mock.patch("system_entries.os.path.exists", return_value=True), \
+             mock.patch("system_entries.os.remove", side_effect=PermissionError("檔案被鎖住")):
             result = se.remove_shortcut("MyApp", registry=fake_reg)
         self.assertFalse(result)
 
@@ -85,8 +123,9 @@ class TestRemoveFromPath(unittest.TestCase):
         fake_reg = FakeWinReg()
         fake_reg.set_hklm(self._machine_path_key(), {"Path": "C:\\Windows;C:\\Apps\\MyApp;C:\\Other"})
         with mock.patch("system_entries.ctypes.windll.user32.SendMessageTimeoutW"):
-            se.remove_from_path("C:\\Apps\\MyApp", registry=fake_reg)
+            result = se.remove_from_path("C:\\Apps\\MyApp", registry=fake_reg)
         self.assertEqual(fake_reg.hklm(self._machine_path_key())["Path"], "C:\\Windows;C:\\Other")
+        self.assertTrue(result)
 
     def test_removes_from_user_environment_when_no_admin(self):
         fake_reg = FakeWinReg()
@@ -95,10 +134,36 @@ class TestRemoveFromPath(unittest.TestCase):
             se.remove_from_path("C:\\Apps\\MyApp", no_admin_install=True, registry=fake_reg)
         self.assertEqual(fake_reg.hkcu("Environment")["Path"], "C:\\Windows")
 
-    def test_swallows_failure(self):
+    def test_returns_false_when_registry_access_fails(self):
+        """F02：這個函式原本整段包在一個 try/except: pass 裡、不回傳任何值，
+        呼叫端（uninstall.py 的 PATH 移除步驟）因此無條件記錄成功。改成回傳
+        布林值，語義跟 remove_registry_entry()／remove_shortcut() 一致：權限
+        不足讀不到 PATH 這個值，等於安裝路徑還留在 PATH 裡沒清掉，是失敗。
+        """
         fake_reg = FakeWinReg()
         fake_reg.fail_on_substring = "Environment"
-        se.remove_from_path("C:\\Apps\\MyApp", registry=fake_reg)  # 不應該拋例外
+        self.assertFalse(se.remove_from_path("C:\\Apps\\MyApp", registry=fake_reg))  # 也不應該拋例外
+
+    def test_returns_true_when_path_value_does_not_exist(self):
+        """PATH 這個值根本不存在（或那個機碼不存在）時，安裝路徑當然也不在
+        裡面——結束後目標確實不存在，依 F04 定下的語義算成功，不是失敗。"""
+        fake_reg = FakeWinReg()
+        fake_reg.set_hklm(self._machine_path_key(), {})
+        with mock.patch("system_entries.ctypes.windll.user32.SendMessageTimeoutW"):
+            self.assertTrue(se.remove_from_path("C:\\Apps\\MyApp", registry=fake_reg))
+
+    def test_broadcast_failure_does_not_make_it_a_failure(self):
+        """環境變數變更廣播（SendMessageTimeoutW）在既有修正中已定性為
+        best-effort：登錄表已經寫成功、PATH 實際上已經清掉了，廣播沒送出只
+        影響「已開啟的視窗何時看到新的 PATH」，不該回報成移除失敗。"""
+        fake_reg = FakeWinReg()
+        fake_reg.set_hklm(self._machine_path_key(), {"Path": "C:\\Windows;C:\\Apps\\MyApp"})
+        with mock.patch(
+            "system_entries.ctypes.windll.user32.SendMessageTimeoutW",
+            side_effect=OSError("模擬廣播失敗"),
+        ):
+            self.assertTrue(se.remove_from_path("C:\\Apps\\MyApp", registry=fake_reg))
+        self.assertEqual(fake_reg.hklm(self._machine_path_key())["Path"], "C:\\Windows")
 
 
 class TestCleanupEmptyDirs(unittest.TestCase):

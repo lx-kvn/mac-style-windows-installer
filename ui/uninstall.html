@@ -74,6 +74,24 @@
             border-radius: 20px; font-size: 13px; font-weight: 500; cursor: pointer;
             transition: background 0.2s; outline: none; margin: 0 4px;
         }
+        /* 解除安裝完成但有幾項沒清乾淨時的殘留清單（F01）。跟 index.html 的
+           .warn-list 是同一套視覺與同一組限制：視窗固定 600x420、不可調整
+           大小，清單項目數不可預期（六個移除步驟＋每個刪不掉的檔案各一項），
+           所以限制高度並允許自己捲動，不讓清單把「完成」按鈕擠出畫面。
+           overflow-wrap: anywhere 給檔案路徑、服務名稱這類沒有空白可斷行的
+           長字串用，避免最窄寬度下文字被截斷。 */
+        .warn-list {
+            display: none; text-align: left; background: #fff8ec;
+            border: 1px solid #ffd9a8; border-radius: 10px;
+            padding: 10px 12px; margin-bottom: 16px;
+        }
+        .warn-list.active { display: block; }
+        .warn-list-title { font-size: 12px; font-weight: 600; color: #8a5200; margin-bottom: 4px; }
+        /* 捲動的是 ul 而不是整個 .warn-list：標題留在捲動範圍外才不會被捲走，
+           項目多到需要捲動時使用者仍看得到「這些是沒清乾淨的項目」這個前提。 */
+        .warn-list ul { margin: 0; padding: 0 0 0 16px; max-height: 92px; overflow-y: auto; }
+        .warn-list li { font-size: 12px; color: #7a4a00; line-height: 1.55; overflow-wrap: anywhere; }
+
         .nice-btn:hover { background: #0077ED; }
         .nice-btn.secondary { background: #e5e5ea; color: #1d1d1f; }
         .nice-btn.secondary:hover { background: #d8d8dd; }
@@ -277,6 +295,10 @@
         <div class="nice-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg></div>
         <div class="nice-title" data-i18n="done_title">解除安裝完成</div>
         <div class="nice-message" id="doneMessage" style="text-align:center;"></div>
+        <div class="warn-list" id="uninstallWarnings">
+            <div class="warn-list-title" data-i18n="uninstall_warnings_title">下列項目沒有清除乾淨：</div>
+            <ul id="uninstallWarningItems"></ul>
+        </div>
         <button class="nice-btn" onclick="onFinish()" data-i18n="btn_done">完成</button>
     </div>
 
@@ -308,6 +330,8 @@
                 btn_undo: "復原",
                 done_title: "解除安裝完成",
                 done_message: "「{{name}}」已成功移除。",
+                done_message_with_warnings: "「{{name}}」已移除，但有部分項目沒有清除乾淨。",
+                uninstall_warnings_title: "下列項目沒有清除乾淨：",
                 btn_done: "完成",
                 error_title: "解除安裝失敗",
                 step_registry: "正在清理 Windows 註冊表...",
@@ -333,6 +357,8 @@
                 btn_undo: "Undo",
                 done_title: "Uninstall Complete",
                 done_message: "\"{{name}}\" has been removed successfully.",
+                done_message_with_warnings: "\"{{name}}\" was removed, but some items could not be cleaned up.",
+                uninstall_warnings_title: "The following items were not cleaned up:",
                 btn_done: "Done",
                 error_title: "Uninstall Failed",
                 step_registry: "Cleaning up the Windows registry...",
@@ -523,12 +549,39 @@
             document.getElementById('progressFill').style.width = visualPercent + '%';
         };
 
+        // F01：後端 run_uninstall() 的成功結果一直帶著 warnings（六個移除
+        // 步驟各自的失敗、加上刪不掉的檔案），但兩個呼叫點原本都只判斷
+        // status 就切到完成畫面，這份清單從來沒有被讀取——uninstall.py 收集
+        // 它的理由正是「讓使用者不會在 PATH／捷徑／登錄表項目全部沒清乾淨
+        // 的情況下，還是看到一個解除安裝完成的畫面」，沒有出口等於那個理由
+        // 並未成立。兩個呼叫點共用這一個函式，不各自複製一份判斷。
+        //
+        // 用 textContent 而不是 innerHTML 填內容：警告字串裡含檔案路徑、
+        // 服務名稱、例外訊息，不該被當成 HTML 解析。
+        function showUninstallDone(result) {
+            const warnings = result.warnings || [];
+            document.getElementById('doneMessage').innerText = warnings.length
+                ? t('done_message_with_warnings', { name: appName })
+                : t('done_message', { name: appName });
+
+            const box = document.getElementById('uninstallWarnings');
+            const list = document.getElementById('uninstallWarningItems');
+            list.innerHTML = '';
+            warnings.forEach((w) => {
+                const li = document.createElement('li');
+                li.textContent = w;
+                list.appendChild(li);
+            });
+            box.classList.toggle('active', warnings.length > 0);
+
+            showView('doneView');
+        }
+
         async function startUninstall(killLockingProcesses) {
             showView('progressView');
             const result = await pywebview.api.run_uninstall(killLockingProcesses);
             if (result.status === 'success') {
-                document.getElementById('doneMessage').innerText = t('done_message', { name: appName });
-                showView('doneView');
+                showUninstallDone(result);
             } else {
                 document.getElementById('errorMessage').innerText = result.message || '';
                 showView('errorView');
@@ -597,8 +650,7 @@
                 const result = await pywebview.api.run_uninstall(false);
                 remapProgressToTail = false;
                 if (result.status === 'success') {
-                    document.getElementById('doneMessage').innerText = t('done_message', { name: appName });
-                    showView('doneView');
+                    showUninstallDone(result);
                 } else {
                     document.getElementById('errorMessage').innerText = result.message || '';
                     showView('errorView');

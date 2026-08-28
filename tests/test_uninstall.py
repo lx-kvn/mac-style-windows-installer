@@ -86,6 +86,135 @@ class TestPerformUninstallStepsReportsFailures(unittest.TestCase):
             safe_to_remove, failures = un._perform_uninstall_steps(ctx, [], False, log=lambda m: None)
         self.assertTrue(any("捷徑" in f for f in failures))
 
+    def test_file_association_removal_failure_is_collected(self):
+        """F01/F02：這一步原本無條件記錄成功——`file_assoc.unregister()` 不
+        回傳值，呼叫端沒有東西可以判斷。同一個函式裡六個移除步驟只有四個
+        會被記錄為失敗，檔案關聯與 PATH 兩步是例外。"""
+        ctx = self._make_ctx(
+            self.current_dir, manifest={"files": [], "file_associations": [".foo"]},
+        )
+        with mock.patch("uninstall.remove_registry_entry", return_value=True), \
+             mock.patch("uninstall.file_assoc.unregister", return_value=False):
+            safe_to_remove, failures = un._perform_uninstall_steps(ctx, [], False, log=lambda m: None)
+        self.assertTrue(any("檔案關聯" in f for f in failures))
+
+    def test_file_association_removal_success_is_not_collected(self):
+        ctx = self._make_ctx(
+            self.current_dir, manifest={"files": [], "file_associations": [".foo"]},
+        )
+        with mock.patch("uninstall.remove_registry_entry", return_value=True), \
+             mock.patch("uninstall.file_assoc.unregister", return_value=True):
+            safe_to_remove, failures = un._perform_uninstall_steps(ctx, [], False, log=lambda m: None)
+        self.assertEqual(failures, [])
+
+    def test_path_removal_failure_is_collected(self):
+        ctx = self._make_ctx(
+            self.current_dir, manifest={"files": [], "path_added": True},
+        )
+        with mock.patch("uninstall.remove_registry_entry", return_value=True), \
+             mock.patch("uninstall.remove_from_path", return_value=False):
+            safe_to_remove, failures = un._perform_uninstall_steps(ctx, [], False, log=lambda m: None)
+        self.assertTrue(any("PATH" in f for f in failures))
+
+    def test_path_removal_success_is_not_collected(self):
+        ctx = self._make_ctx(
+            self.current_dir, manifest={"files": [], "path_added": True},
+        )
+        with mock.patch("uninstall.remove_registry_entry", return_value=True), \
+             mock.patch("uninstall.remove_from_path", return_value=True):
+            safe_to_remove, failures = un._perform_uninstall_steps(ctx, [], False, log=lambda m: None)
+        self.assertEqual(failures, [])
+
+
+class TestPerformUninstallStepsReportsDeletionFailures(unittest.TestCase):
+    """F03：清單式刪除失敗的檔案原本只寫進紀錄檔的警告行，不併入
+    failures，所以不會出現在使用者看到的結果裡。更糟的是接下來判斷「能不能
+    整個移除資料夾」時，剩餘項目一律被描述成「可能是使用者自行產生的資料」
+    ——剛才刪除失敗的檔案正好也會出現在那份剩餘清單裡，使用者看到的訊息
+    與實際原因相反。
+    """
+
+    def _make_ctx(self, current_dir, manifest=None):
+        return {
+            "app_name": "MyApp",
+            "manifest": manifest or {},
+            "current_dir": current_dir,
+            "no_admin_install": False,
+        }
+
+    def setUp(self):
+        self.current_dir = tempfile.mkdtemp()
+        self.self_name = "uninstall.exe"
+        with open(os.path.join(self.current_dir, self.self_name), "w") as f:
+            f.write("fake")
+        self.argv_patcher = mock.patch.object(un.sys, "argv", [os.path.join(self.current_dir, self.self_name)])
+        self.argv_patcher.start()
+
+    def tearDown(self):
+        self.argv_patcher.stop()
+        shutil.rmtree(self.current_dir, ignore_errors=True)
+
+    def _run(self, manifest):
+        logs = []
+        ctx = self._make_ctx(self.current_dir, manifest=manifest)
+        with mock.patch("uninstall.remove_registry_entry", return_value=True):
+            safe_to_remove, failures = un._perform_uninstall_steps(ctx, [], False, log=logs.append)
+        return safe_to_remove, failures, logs
+
+    def test_file_deletion_failure_is_collected(self):
+        with open(os.path.join(self.current_dir, "locked.dll"), "w") as f:
+            f.write("被鎖住")
+        with mock.patch("uninstall.os.remove", side_effect=PermissionError("檔案被鎖住")):
+            _safe, failures, _logs = self._run({"files": ["locked.dll"]})
+        self.assertTrue(any("locked.dll" in f for f in failures))
+
+    def test_leftover_from_failed_deletion_is_not_described_as_user_data(self):
+        """刪除失敗留下的檔案不能跟使用者自行產生的資料共用同一句措辭。"""
+        with open(os.path.join(self.current_dir, "locked.dll"), "w") as f:
+            f.write("被鎖住")
+        with mock.patch("uninstall.os.remove", side_effect=PermissionError("檔案被鎖住")):
+            _safe, _failures, logs = self._run({"files": ["locked.dll"]})
+        text = "\n".join(logs)
+        self.assertIn("locked.dll", text)
+        stuck_lines = [line for line in logs if "locked.dll" in line and "保留資料夾" in line]
+        self.assertTrue(stuck_lines, f"應該有一行說明殘留原因，實際紀錄：{logs}")
+        self.assertFalse(
+            any("使用者自行產生" in line for line in stuck_lines),
+            "刪除失敗的檔案被描述成使用者自行產生的資料，訊息與事實相反",
+        )
+
+    def test_user_data_leftover_keeps_its_own_wording(self):
+        """真的是使用者自行產生的資料時，原本那句措辭要維持不變。"""
+        with open(os.path.join(self.current_dir, "app.exe"), "w") as f:
+            f.write("app")
+        with open(os.path.join(self.current_dir, "user_data.txt"), "w") as f:
+            f.write("使用者自己的資料")
+        safe_to_remove, failures, logs = self._run({"files": ["app.exe"]})
+        self.assertFalse(safe_to_remove)
+        self.assertEqual(failures, [])
+        self.assertTrue(any("使用者自行產生" in line and "user_data.txt" in line for line in logs))
+
+    def test_local_appdata_leftovers_are_also_reported(self):
+        """F03 附帶問題：剩餘項目檢查原本只涵蓋安裝目錄，
+        `%LOCALAPPDATA%\\Programs\\<folder_name>` 底下刪剩什麼完全沒有
+        對應檢查——那個目錄同樣是安裝流程建立的，殘留同樣該讓使用者知道。
+        """
+        alt_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, alt_dir, True)
+        with open(os.path.join(alt_dir, "cli.exe"), "w") as f:
+            f.write("copied")
+        with open(os.path.join(alt_dir, "user_cache.bin"), "w") as f:
+            f.write("使用者自己的資料")
+        _safe, _failures, logs = self._run({
+            "files": ["cli.exe"],
+            "local_appdata_files": ["cli.exe"],
+            "local_appdata_dir": alt_dir,
+        })
+        self.assertTrue(
+            any("user_cache.bin" in line for line in logs),
+            f"local_appdata 目錄的殘留項目應該也被回報，實際紀錄：{logs}",
+        )
+
 
 class TestPerformUninstallStepsLockRelease(unittest.TestCase):
     """_perform_uninstall_steps()：需要結束鎖定檔案的程式時，實際的釋放

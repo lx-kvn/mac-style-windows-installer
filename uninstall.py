@@ -346,6 +346,26 @@ def _write_uninstall_log(log_lines, app_name, argv):
 # exe_path/safe_to_remove_whole_dir，要不要排程的前置判斷也收在裡面。
 
 
+def _log_remaining_items(log, label, remaining, stuck_names, keep_note):
+    """把「刪除失敗留下的殘留」跟「使用者自行產生的資料」分成兩種措辭回報。
+
+    F03：這兩種殘留原本共用同一句「可能是使用者自行產生的資料」——剛才
+    刪除失敗的檔案正好也會出現在剩餘清單裡，使用者看到的訊息與實際原因
+    相反，還會誤以為那是自己的東西而不敢動。兩者的後續處置也不同：前者
+    要使用者自己去看為什麼刪不掉（檔案被鎖住、權限不足），後者是本來就
+    該保留的。
+    """
+    stuck = [item for item in remaining if item in stuck_names]
+    user_items = [item for item in remaining if item not in stuck_names]
+    if stuck:
+        log(f"[警告] {label}內有 {len(stuck)} 個項目刪除失敗、仍然殘留，{keep_note}：{stuck}")
+    if user_items:
+        log(
+            f"{label}內還有清單之外的 {len(user_items)} 個項目（可能是使用者自行產生的資料），"
+            f"{keep_note}：{user_items}"
+        )
+
+
 def _perform_uninstall_steps(ctx, locking_processes, kill_locking_processes, log, report_progress=None):
     """實際的解除安裝步驟：登錄表 → 捷徑 → 檔案關聯 → PATH →（視情況結束
     鎖定檔案的程式）→ 清單式刪除。互動流程（UninstallerAPI.run_uninstall()）
@@ -365,6 +385,16 @@ def _perform_uninstall_steps(ctx, locking_processes, kill_locking_processes, log
         項目全部沒清乾淨的情況下，還是看到一個「解除安裝完成」的畫面。
         這裡把每一步實際失敗（而不是「呼叫沒拋例外」）的項目收集起來，
         讓呼叫端有機會如實回報「完成，但有 N 項沒清乾淨」。
+
+        F01/F02/F03：這份清單原本只涵蓋六個移除步驟裡的四個，檔案關聯與
+        PATH 兩步無條件記錄成功（根因是被呼叫的兩個函式不回傳值，見
+        file_assoc.unregister() 與 system_entries.remove_from_path() 的
+        說明），清單式刪除失敗的檔案也只寫進紀錄檔。現在六個步驟與檔案
+        刪除全部接上同一份清單。
+
+        清單內每一項所依據的「失敗」定義見 system_entries.py 的
+        remove_registry_entry()：目標本來就不存在算成功，只有實際移除
+        失敗才算失敗——否則使用者手動刪過捷徑這類正常情境會變成假警告。
     """
     app_name = ctx["app_name"]
     manifest = ctx["manifest"]
@@ -404,13 +434,21 @@ def _perform_uninstall_steps(ctx, locking_processes, kill_locking_processes, log
     file_associations = manifest.get("file_associations") or []
     if file_associations:
         progress(40, "正在移除檔案關聯...")
-        file_assoc.unregister(file_associations, no_admin_install=no_admin_install)
-        log(f"已移除檔案關聯: {file_associations}")
+        if file_assoc.unregister(file_associations, no_admin_install=no_admin_install):
+            log(f"已移除檔案關聯: {file_associations}")
+        else:
+            msg = f"移除檔案關聯 {file_associations} 失敗"
+            log(f"[警告] {msg}")
+            failures.append(msg)
 
     if manifest.get("path_added"):
         progress(50, "正在從環境變數 PATH 移除安裝路徑...")
-        remove_from_path(_path_removal_target(manifest, current_dir), no_admin_install)
-        log("已從 PATH 移除安裝路徑")
+        if remove_from_path(_path_removal_target(manifest, current_dir), no_admin_install):
+            log("已從 PATH 移除安裝路徑")
+        else:
+            msg = "從環境變數 PATH 移除安裝路徑失敗"
+            log(f"[警告] {msg}")
+            failures.append(msg)
 
     windows_service_name = manifest.get("windows_service_name")
     if windows_service_name:
@@ -464,6 +502,7 @@ def _perform_uninstall_steps(ctx, locking_processes, kill_locking_processes, log
             # 部分檔案打包時可能被指定落地到 %LOCALAPPDATA%\Programs\<folder_name>
             # （見 installer_core.py 的 local_appdata_files），要從那邊刪，
             # 不是安裝目錄（current_dir）。
+            failed_deletions = []
             for rel in files_to_remove:
                 if os.path.basename(rel) == self_name:
                     continue  # 自己交給下面的自我刪除流程處理，執行中無法自刪
@@ -472,7 +511,13 @@ def _perform_uninstall_steps(ctx, locking_processes, kill_locking_processes, log
                     if os.path.exists(item_path):
                         os.remove(item_path)
                 except Exception as e:
-                    log(f"[警告] 無法刪除 {rel}: {e}")
+                    # F03：刪除失敗原本只寫進紀錄檔的警告行，不併入 failures，
+                    # 所以完全不會出現在使用者看到的結果裡——安裝目錄裡留著
+                    # 刪不掉的檔案，畫面上仍是一個乾淨的「解除安裝完成」。
+                    msg = f"無法刪除 {rel}: {e}"
+                    log(f"[警告] {msg}")
+                    failures.append(msg)
+                    failed_deletions.append(rel)
 
             # 清掉刪空的子目錄（安裝目錄與別位的 local_appdata 目錄分開清）
             for root, dirs, files in os.walk(current_dir, topdown=False):
@@ -485,19 +530,46 @@ def _perform_uninstall_steps(ctx, locking_processes, kill_locking_processes, log
                         pass
             if local_appdata_dir:
                 system_entries.cleanup_empty_dirs(local_appdata_dir)
-            log(f"已依安裝清單刪除 {len(files_to_remove)} 個檔案")
+            log(f"已依安裝清單刪除 {len(files_to_remove) - len(failed_deletions)} 個檔案")
+
+            def _stuck_top_level_names(base_dir):
+                """回傳這次刪除失敗、且落在 base_dir 底下的項目在該目錄中的
+                最上層名稱。清單裡的路徑可能是 `assets/logo.png` 這種相對
+                路徑，目錄列表看到的卻是最上層的 `assets`，兩者要對得起來
+                才能判斷某個殘留項目究竟是刪除失敗留下的、還是使用者自己的。
+                """
+                names = set()
+                for rel in failed_deletions:
+                    rel_base = local_appdata_dir if (local_appdata_dir and is_local_appdata_file(rel)) else current_dir
+                    if os.path.normcase(rel_base) != os.path.normcase(base_dir):
+                        continue
+                    names.add(rel.replace("/", os.sep).replace("\\", os.sep).split(os.sep)[0])
+                return names
 
             # 清單刪完之後，看看資料夾裡除了自己還剩什麼——這才是真正決定能不能
             # 整個 rmdir 的依據，不能像原本那樣不管三七二十一直接砍。
             remaining = [item for item in os.listdir(current_dir) if item != self_name]
             if remaining:
-                log(
-                    f"安裝目錄內還有清單之外的 {len(remaining)} 個項目（可能是使用者自行產生的資料），"
-                    f"保留資料夾，只刪除解除安裝程式本身：{remaining}"
+                _log_remaining_items(
+                    log, "安裝目錄", remaining, _stuck_top_level_names(current_dir),
+                    keep_note="保留資料夾，只刪除解除安裝程式本身",
                 )
                 safe_to_remove_whole_dir = False
             else:
                 safe_to_remove_whole_dir = True
+
+            # F03 附帶問題：剩餘項目檢查原本只涵蓋安裝目錄，local_appdata_dir
+            # 底下刪剩什麼完全沒有對應檢查。那個目錄同樣是安裝流程建立的，
+            # 殘留同樣該讓使用者知道（cleanup_empty_dirs() 已經在上面把空目錄
+            # 整個清掉，走到這裡還存在就代表裡面確實還有東西）。
+            if local_appdata_dir and os.path.exists(local_appdata_dir):
+                local_remaining = os.listdir(local_appdata_dir)
+                if local_remaining:
+                    _log_remaining_items(
+                        log, f"應用程式資料目錄（{local_appdata_dir}）",
+                        local_remaining, _stuck_top_level_names(local_appdata_dir),
+                        keep_note="保留資料夾",
+                    )
         else:
             log("[警告] 找不到安裝清單，改為整個安裝目錄清除")
             for item in os.listdir(current_dir):
@@ -510,7 +582,11 @@ def _perform_uninstall_steps(ctx, locking_processes, kill_locking_processes, log
                     else:
                         os.remove(item_path)
                 except Exception as e:
-                    log(f"[警告] 無法刪除 {item}: {e}")
+                    # 跟上面清單式刪除同一個理由（F03）：刪不掉的東西要讓
+                    # 使用者知道，不能只留在紀錄檔裡。
+                    msg = f"無法刪除 {item}: {e}"
+                    log(f"[警告] {msg}")
+                    failures.append(msg)
             # 找不到清單這個分支，設計上本來就是要整個清空，維持原行為
             safe_to_remove_whole_dir = True
     finally:

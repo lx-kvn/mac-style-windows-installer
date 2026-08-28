@@ -218,6 +218,24 @@
         }
         .nice-btn.tertiary:hover { color: #1d1d1f; background: transparent; }
 
+        /* 安裝完成但有幾項沒成功時的警告清單（F01）。安裝視窗固定 600x420、
+           不可調整大小，非致命失敗最多五種（服務／排程工作／系統還原點／
+           安裝後置腳本／捷徑），所以限制高度並允許自己捲動，不讓清單把
+           「完成」按鈕擠出畫面。overflow-wrap: anywhere 是給服務名稱、
+           檔案路徑這類沒有空白可斷行的長字串用的——不加的話最窄寬度下
+           會把整個彈窗撐寬、文字被切掉。 */
+        .warn-list {
+            display: none; text-align: left; background: #fff8ec;
+            border: 1px solid #ffd9a8; border-radius: 10px;
+            padding: 10px 12px; margin-bottom: 16px;
+        }
+        .warn-list.active { display: block; }
+        .warn-list-title { font-size: 12px; font-weight: 600; color: #8a5200; margin-bottom: 4px; }
+        /* 捲動的是 ul 而不是整個 .warn-list：標題留在捲動範圍外才不會被捲走，
+           項目多到需要捲動時使用者仍看得到「這些是沒成功的項目」這個前提。 */
+        .warn-list ul { margin: 0; padding: 0 0 0 16px; max-height: 92px; overflow-y: auto; }
+        .warn-list li { font-size: 12px; color: #7a4a00; line-height: 1.55; overflow-wrap: anywhere; }
+
         .launch-row { display: flex; align-items: center; justify-content: center; gap: 6px; margin: 4px 0 16px 0; }
         .launch-row input[type="checkbox"] { width: 14px; height: 14px; cursor: pointer; }
         .launch-row label { font-size: 12px; color: #1d1d1f; cursor: pointer; user-select: none; }
@@ -404,6 +422,10 @@
             </div>
             <div class="nice-title" id="modal-title" data-i18n="install_success_title">安裝成功</div>
             <div class="nice-message" id="modal-message" style="text-align:center;"></div>
+            <div class="warn-list" id="installWarnings">
+                <div class="warn-list-title" data-i18n="install_warnings_title">安裝已完成，但下列項目沒有成功：</div>
+                <ul id="installWarningItems"></ul>
+            </div>
             <div class="launch-row" id="launchRow">
                 <input type="checkbox" id="launchAfterInstall" checked>
                 <label for="launchAfterInstall" data-i18n="launch_after_install_label">安裝完成後立即執行程式</label>
@@ -447,6 +469,7 @@
                 dep_install_failed_toast: "{{names}} 自動安裝未成功，請參考上方連結手動安裝",
                 install_success_title: "安裝成功",
                 install_failed_title: "安裝失敗",
+                install_warnings_title: "安裝已完成，但下列項目沒有成功：",
                 launch_after_install_label: "安裝完成後立即執行程式",
                 btn_done: "完成",
                 initializing_install: "正在初始化安裝...",
@@ -491,6 +514,7 @@
                 dep_install_failed_toast: "{{names}} could not be installed automatically — please use the link above to install manually",
                 install_success_title: "Installation Complete",
                 install_failed_title: "Installation Failed",
+                install_warnings_title: "Installation finished, but the following did not succeed:",
                 launch_after_install_label: "Launch the app after installation",
                 btn_done: "Done",
                 initializing_install: "Initializing installation...",
@@ -582,7 +606,37 @@
                 icon.innerHTML = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
             }
             document.getElementById('launchRow').style.display = showLaunchOption ? 'flex' : 'none';
+            // 這個彈窗是共用的（覆蓋安裝提示、相依元件、安裝結果都走它），
+            // 每次顯示先把警告清單清空收起來，避免上一次安裝留下的內容
+            // 出現在另一個用途的彈窗上。要顯示警告的呼叫端在 showModal()
+            // 之後自己呼叫 renderInstallWarnings()。
+            clearInstallWarnings();
             modal.classList.add('active');
+        }
+
+        function clearInstallWarnings() {
+            const box = document.getElementById('installWarnings');
+            box.classList.remove('active');
+            document.getElementById('installWarningItems').innerHTML = '';
+        }
+
+        // F01：後端 trigger_installation() 的成功結果一直帶著 warnings
+        // （Windows 服務／排程工作／系統還原點／安裝後置腳本／捷徑建立失敗
+        // 這些不中止安裝的失敗），但前端原本只判斷 status 就顯示安裝成功
+        // 畫面，這份清單從來沒有被讀取——使用者以為打包時設定的服務已經
+        // 正常裝好，直到某天發現它根本不存在。
+        //
+        // 用 textContent 而不是 innerHTML 填內容：警告字串裡含使用者自己
+        // 填的服務名稱、腳本回傳的錯誤訊息，不該被當成 HTML 解析。
+        function renderInstallWarnings(warnings) {
+            if (!warnings || warnings.length === 0) return;
+            const list = document.getElementById('installWarningItems');
+            warnings.forEach((w) => {
+                const li = document.createElement('li');
+                li.textContent = w;
+                list.appendChild(li);
+            });
+            document.getElementById('installWarnings').classList.add('active');
         }
 
         let installSucceeded = false;
@@ -1145,6 +1199,7 @@
             if (result.status === 'success') {
                 installSucceeded = true;
                 showModal(t('install_success_title'), '', false, true);
+                renderInstallWarnings(result.warnings);
                 pathPreview.innerText = t('install_complete_path');
                 document.getElementById('installProgressWrap').style.display = 'none';
             } else if (result.status === 'process_running') {

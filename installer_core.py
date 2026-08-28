@@ -848,7 +848,14 @@ class InstallerAPI:
                 if restore_point.create_restore_point(f"安裝 {self.app_name} {self.version}"):
                     log("系統還原點已就緒（可能是新建立的，也可能是 24 小時內的既有還原點）")
                 else:
-                    log("[警告] 建立系統還原點失敗（不影響安裝結果）")
+                    # F05：這種「失敗但不中止安裝」的情況原本只寫進 log 檔，
+                    # 跟服務/排程工作建立失敗（B17 已改成併入 warnings）性質
+                    # 相同、嚴重性相當，處理方式卻分成兩類。使用者以為安裝前
+                    # 已經有還原點可以回頭，實際上沒有——這正是 B17 當初要
+                    # 解決的那種「使用者不會知道」的情況。
+                    msg = "建立系統還原點失敗（不影響安裝結果）"
+                    log(f"[警告] {msg}")
+                    warnings.append(msg)
 
             # pre-install 腳本：檔案還沒複製之前執行，失敗視為安裝失敗中止——
             # 主程式可能依賴這個腳本先做的事（例如停用某個會鎖住待複製檔案
@@ -956,10 +963,22 @@ class InstallerAPI:
                 registry_entry_created = True
             except Exception as e:
                 raise RuntimeError(f"寫入解除安裝登錄表失敗：{e}") from e
-            if self._create_shortcut(desktop=False, log=log):
-                shortcuts_created.append(False)
-            if create_desktop_shortcut and self._create_shortcut(desktop=True, log=log):
-                shortcuts_created.append(True)
+            # F05：捷徑建立失敗同樣併入 warnings。沒有主程式時本來就沒有
+            # 捷徑可以建立，那不是失敗，不進 warnings。
+            if self.main_exe:
+                if self._create_shortcut(desktop=False, log=log):
+                    shortcuts_created.append(False)
+                else:
+                    msg = "建立開始功能表捷徑失敗（不影響安裝結果）"
+                    log(f"[警告] {msg}")
+                    warnings.append(msg)
+                if create_desktop_shortcut:
+                    if self._create_shortcut(desktop=True, log=log):
+                        shortcuts_created.append(True)
+                    else:
+                        msg = "建立桌面捷徑失敗（不影響安裝結果）"
+                        log(f"[警告] {msg}")
+                        warnings.append(msg)
             if self.file_associations:
                 main_exe_path = self._resolve_installed_path(self.main_exe)
                 icon_refs = self._resolve_doc_icon_refs(main_exe_path)
@@ -1022,11 +1041,14 @@ class InstallerAPI:
             # 狀態，不該因為收尾腳本（例如額外的環境設定）失敗就整個作廢。
             if self.post_install_script:
                 self._report_progress(96, "正在執行安裝後置腳本...")
-                ok, msg = self._run_install_script(self.post_install_script)
+                ok, script_error = self._run_install_script(self.post_install_script)
                 if ok:
                     log("已執行安裝後置腳本")
                 else:
-                    log(f"[警告] 安裝後置腳本執行失敗（不影響安裝結果）: {msg}")
+                    # F05：跟服務/排程工作建立失敗同一種處理方式，不再只寫 log。
+                    msg = f"安裝後置腳本執行失敗（不影響安裝結果）: {script_error}"
+                    log(f"[警告] {msg}")
+                    warnings.append(msg)
 
             # 寫入安裝清單，供解除安裝時「照清單刪」使用
             self._report_progress(97, "正在寫入安裝紀錄...")
@@ -1356,6 +1378,13 @@ def run_silent_install(install_dir=None, create_desktop_shortcut=True, log_path=
     result = api.trigger_installation(create_desktop_shortcut=create_desktop_shortcut)
     if result.get("status") == "success":
         log(f"[成功] {result.get('message')}")
+        # F01：安裝過程收集到的非致命失敗（服務/排程工作/還原點/後置腳本/
+        # 捷徑）原本只存在於回傳結果裡，靜默安裝完全沒有讀取，等於這些
+        # 警告在無人值守情境下沒有任何出口。跟靜默解除安裝同一種做法：
+        # 至少寫進這份紀錄檔，不要讓 exit code 0 掩蓋掉「其實有幾項沒成功」。
+        install_warnings = result.get("warnings") or []
+        for w in install_warnings:
+            log(f"[警告] {w}")
         return write_log_and_return(api.app_name, 0)
     else:
         log(f"[錯誤] {result.get('message')}")
