@@ -135,13 +135,21 @@ def is_admin():
 
 
 def is_process_running(exe_name):
+    """F07：原本以 shell=True 搭配字串拼接組出 tasklist 指令，跟
+    installer_core.py 的 `_is_process_running()` 是同一個問題的另一份。
+    exe_name 來自 install_manifest.json 的 main_exe（打包時使用者指定的
+    主程式檔名，未限制字元），`My&App.exe` 這種檔名會讓 cmd.exe 把 `&`
+    之後的部分當成另一道指令，偵測結果不再對應到那支程式，解除安裝時
+    就會漏掉「主程式還在執行」這道保護。改成傳入參數陣列並移除
+    shell=True，篩選字串整段當成一個參數交給 tasklist。
+    """
     if not exe_name:
         return False
     try:
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         output = subprocess.check_output(
-            f'tasklist /FI "IMAGENAME eq {exe_name}" /NH',
-            shell=True, text=True, stderr=subprocess.DEVNULL, creationflags=creationflags,
+            ["tasklist", "/FI", f"IMAGENAME eq {exe_name}", "/NH"],
+            text=True, stderr=subprocess.DEVNULL, creationflags=creationflags,
         )
         return exe_name.lower() in output.lower()
     except Exception:

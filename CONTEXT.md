@@ -71,8 +71,12 @@ Windows 針對「使用者選過這個副檔名要用什麼開」記住的三層
 
 - **`window_drag.py`** — `WindowDragController`，無邊框視窗的自訂拖曳邏輯，
   `ConfigAPI`（製作工具視窗）跟 `InstallerAPI`（安裝端視窗）共用同一份實作。
-- **`disk_space.py`** — `check_disk_space()`/`required_install_size()`，純函式，
-  不需要建構 `InstallerAPI()` 就能測。
+- **`disk_space.py`** — `check_drive_space()`/`required_install_size()`，純函式，
+  不需要建構 `InstallerAPI()` 就能測。`check_drive_space()` 吃的是一組
+  「落地目錄 → 需要多少空間」，依磁碟代號分組後逐一檢查——安裝內容可能
+  同時落在安裝目錄、`%LOCALAPPDATA%\Programs\<folder_name>`（見
+  `local_appdata_files`）與 `%TEMP%`（覆蓋安裝的備份），三者不保證在
+  同一顆磁碟上。
 - **`file_assoc.py`** — 見上面。
 
 `trigger_installation()` 本身（複製檔案 + 完整性驗證 + 失敗回滾的協定）維持在

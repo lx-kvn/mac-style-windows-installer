@@ -108,18 +108,22 @@ class TestCliArgs(unittest.TestCase):
 
 
 class TestCheckDiskSpace(unittest.TestCase):
-    """_check_disk_space() 本身的邏輯（10% 緩衝、磁碟代號 fallback）已經抽到
-    disk_space.py，由 tests/test_disk_space.py 直接測那個純函式。這裡只確認
-    InstallerAPI._check_disk_space() 有把正確的參數轉交過去（真正的深模組
-    seam 在 disk_space.check_disk_space()，這裡是薄呼叫端）。"""
+    """_check_disk_space() 本身的邏輯（10% 緩衝、磁碟代號 fallback、依落地
+    磁碟分組）已經抽到 disk_space.py，由 tests/test_disk_space.py 直接測那個
+    純函式。這裡只確認 InstallerAPI._check_disk_space() 有把正確的參數轉交
+    過去，以及回傳值原封不動傳回（真正的深模組 seam 在
+    disk_space.check_drive_space()，這裡是薄呼叫端）。需求量怎麼依落地位置
+    分組，見 TestDiskSpaceRequirementsSpanMultipleDrives。"""
 
     def test_delegates_to_disk_space_module_with_correct_args(self):
         api = make_installer_api(selected_path="C:\\FakeApp", default_path="C:\\Fallback")
-        with mock.patch.object(api, "_required_size", return_value=1000), \
-             mock.patch("installer_core.check_disk_space", return_value=(True, 9999, 1000)) as mock_check:
+        expected = (True, [{"drive": "C:", "free": 9999, "required": 1000, "sufficient": True}])
+        with mock.patch.object(
+            api, "_required_size_by_destination", return_value=[("C:\\FakeApp", 1000)],
+        ), mock.patch("installer_core.check_drive_space", return_value=expected) as mock_check:
             result = api._check_disk_space()
-        mock_check.assert_called_once_with(1000, "C:\\FakeApp", "C:\\Fallback")
-        self.assertEqual(result, (True, 9999, 1000))
+        mock_check.assert_called_once_with([("C:\\FakeApp", 1000)], "C:\\Fallback")
+        self.assertEqual(result, expected)
 
 
 class TestAddToPathEnv(unittest.TestCase):
@@ -376,7 +380,7 @@ class TestProcessRunningDetection(unittest.TestCase):
         )
         with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
              mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
-             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, [])), \
              mock.patch("installer_core._is_process_running", return_value=True):
             result = api.trigger_installation(create_desktop_shortcut=False)
 
@@ -398,7 +402,7 @@ class TestProcessRunningDetection(unittest.TestCase):
         )
         with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
              mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
-             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, [])), \
              mock.patch("installer_core._is_process_running", return_value=True), \
              mock.patch("installer_core.restore_point.create_restore_point") as mock_restore_point:
             api.trigger_installation(create_desktop_shortcut=False)
@@ -414,7 +418,7 @@ class TestProcessRunningDetection(unittest.TestCase):
         )
         with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
              mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
-             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, [])), \
              mock.patch("installer_core._is_process_running", return_value=True):
             result = api.trigger_installation(create_desktop_shortcut=False, skip_process_check=True)
 
@@ -464,7 +468,7 @@ class TestTriggerInstallationUpgradeFlow(unittest.TestCase):
         with mock.patch("installer_core.get_resource_path", side_effect=self._resource_path), \
              mock.patch.object(api, "check_existing_install", return_value={"exists": True}), \
              mock.patch.object(api, "run_upgrade_uninstall", side_effect=fake_run_upgrade_uninstall), \
-             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, [])), \
              mock.patch.object(api, "_register_uninstall_entry"), \
              mock.patch.object(api, "_create_shortcut", return_value=True), \
              mock.patch.object(api, "_discard_upgrade_backup") as mock_discard, \
@@ -485,7 +489,7 @@ class TestTriggerInstallationUpgradeFlow(unittest.TestCase):
                  api, "run_upgrade_uninstall",
                  return_value={"status": "error", "message": "移除舊版本失敗: 模擬錯誤"},
              ), \
-             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)):
+             mock.patch.object(api, "_check_disk_space", return_value=(True, [])):
             result = api.trigger_installation(create_desktop_shortcut=False)
 
         self.assertEqual(result["status"], "error")
@@ -571,7 +575,7 @@ class TestPartialCopyFailureRollback(unittest.TestCase):
         api = make_installer_api(app_name="MyApp", main_exe="app.exe", selected_path=self.install_dir)
         with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
              mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
-             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, [])), \
              mock.patch("installer_core.shutil.copy2", side_effect=fake_copy2):
             result = api.trigger_installation(create_desktop_shortcut=False)
 
@@ -699,7 +703,7 @@ class TestTriggerInstallationRollsBackSystemEntriesOnLateFailure(unittest.TestCa
         )
         with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
              mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
-             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, [])), \
              mock.patch.object(api, "_register_uninstall_entry"), \
              mock.patch.object(api, "_create_shortcut", return_value=True), \
              mock.patch("installer_core.file_assoc.register") as mock_register, \
@@ -726,7 +730,7 @@ class TestTriggerInstallationRollsBackSystemEntriesOnLateFailure(unittest.TestCa
         )
         with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
              mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
-             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, [])), \
              mock.patch.object(api, "_register_uninstall_entry"), \
              mock.patch.object(api, "_create_shortcut", return_value=True), \
              mock.patch("installer_core.windows_service.create_service", return_value=True), \
@@ -766,7 +770,9 @@ class TestInstallLogWrittenOnFailure(unittest.TestCase):
     def test_disk_space_failure_still_writes_a_log(self):
         api = make_installer_api(app_name="MyApp", selected_path=self.install_dir)
         with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
-             mock.patch.object(api, "_check_disk_space", return_value=(False, 100, 100 * 1024 * 1024)):
+             mock.patch.object(api, "_check_disk_space", return_value=(False, [
+                 {"drive": "C:", "free": 100, "required": 100 * 1024 * 1024, "sufficient": False},
+             ])):
             result = api.trigger_installation()
 
         self.assertEqual(result["status"], "error")
@@ -1082,7 +1088,7 @@ class TestTriggerInstallationFileLocked(unittest.TestCase):
         api = self._make_api()
         with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
              mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
-             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, [])), \
              mock.patch("installer_core.shutil.copy2", side_effect=_FakeWinError(32, "sharing violation")), \
              mock.patch(
                  "installer_core.restart_manager.find_locking_processes",
@@ -1099,7 +1105,7 @@ class TestTriggerInstallationFileLocked(unittest.TestCase):
         api = self._make_api()
         with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
              mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
-             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, [])), \
              mock.patch("installer_core.shutil.copy2", side_effect=_FakeWinError(32, "sharing violation")), \
              mock.patch("installer_core.restart_manager.find_locking_processes", return_value=[]):
             result = api.trigger_installation(create_desktop_shortcut=False)
@@ -1140,7 +1146,7 @@ class TestTriggerInstallationRestoresExplorerLock(unittest.TestCase):
         api._explorer_forced_down_state = {"previous_auto_restart_shell": "1"}
         with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
              mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
-             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, [])), \
              mock.patch.object(api, "_register_uninstall_entry"), \
              mock.patch("installer_core.explorer_lock_release.restore_after_lock_release") as mock_restore:
             result = api.trigger_installation(create_desktop_shortcut=False)
@@ -1181,7 +1187,7 @@ class TestTriggerInstallationRestoresExplorerLock(unittest.TestCase):
         api._explorer_forced_down_state = None
         with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
              mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
-             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, [])), \
              mock.patch.object(api, "_register_uninstall_entry"), \
              mock.patch("installer_core.explorer_lock_release.restore_after_lock_release") as mock_restore:
             api.trigger_installation(create_desktop_shortcut=False)
@@ -1220,7 +1226,7 @@ class TestTriggerInstallationCreatesWindowsService(unittest.TestCase):
         })
         with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
              mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
-             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, [])), \
              mock.patch.object(api, "_register_uninstall_entry"), \
              mock.patch("installer_core.windows_service.create_service", return_value=True) as mock_create:
             result = api.trigger_installation(create_desktop_shortcut=False)
@@ -1235,7 +1241,7 @@ class TestTriggerInstallationCreatesWindowsService(unittest.TestCase):
         api = self._make_api()
         with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
              mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
-             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, [])), \
              mock.patch.object(api, "_register_uninstall_entry"), \
              mock.patch("installer_core.windows_service.create_service") as mock_create:
             api.trigger_installation(create_desktop_shortcut=False)
@@ -1246,7 +1252,7 @@ class TestTriggerInstallationCreatesWindowsService(unittest.TestCase):
         api = self._make_api(windows_service={"service_name": "MySvc", "exe_relative_path": "app.exe"})
         with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
              mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
-             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, [])), \
              mock.patch.object(api, "_register_uninstall_entry"), \
              mock.patch("installer_core.windows_service.create_service", return_value=True):
             api.trigger_installation(create_desktop_shortcut=False)
@@ -1259,7 +1265,7 @@ class TestTriggerInstallationCreatesWindowsService(unittest.TestCase):
         api = self._make_api(windows_service={"service_name": "MySvc", "exe_relative_path": "app.exe"})
         with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
              mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
-             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, [])), \
              mock.patch.object(api, "_register_uninstall_entry"), \
              mock.patch("installer_core.windows_service.create_service", return_value=False):
             result = api.trigger_installation(create_desktop_shortcut=False)
@@ -1279,7 +1285,7 @@ class TestTriggerInstallationCreatesWindowsService(unittest.TestCase):
         api = self._make_api(windows_service={"service_name": "MySvc", "exe_relative_path": "app.exe"})
         with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
              mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
-             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, [])), \
              mock.patch.object(api, "_register_uninstall_entry"), \
              mock.patch("installer_core.windows_service.create_service", return_value=False):
             result = api.trigger_installation(create_desktop_shortcut=False)
@@ -1287,6 +1293,129 @@ class TestTriggerInstallationCreatesWindowsService(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertIn("warnings", result)
         self.assertTrue(any("MySvc" in w for w in result["warnings"]))
+
+
+class TestDiskSpaceRequirementsSpanMultipleDrives(unittest.TestCase):
+    """F08：磁碟空間需求要依「檔案實際會落到哪裡」分組。
+
+    `local_appdata_files` 指定的檔案落在
+    `%LOCALAPPDATA%\\Programs\\<folder_name>`，可能位於另一顆磁碟——原本
+    整份來源資料夾一律算在 `selected_path` 所在磁碟上，那顆磁碟從未被
+    檢查，目標磁碟的需求量同時被高估。覆蓋安裝時整份舊安裝資料夾會複製
+    到 `%TEMP%`（見 upgrade.backup()），那份需求也完全沒有被計入。
+    """
+
+    def setUp(self):
+        self.resource_dir = tempfile.mkdtemp()
+        self.app_contents_dir = os.path.join(self.resource_dir, "app_contents")
+        os.makedirs(self.app_contents_dir)
+        with open(os.path.join(self.app_contents_dir, "gui.exe"), "wb") as f:
+            f.write(b"g" * 500)
+        with open(os.path.join(self.app_contents_dir, "cli.exe"), "wb") as f:
+            f.write(b"c" * 300)
+        self.install_dir = tempfile.mkdtemp()
+        self.appdata_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.resource_dir, ignore_errors=True)
+        shutil.rmtree(self.install_dir, ignore_errors=True)
+        shutil.rmtree(self.appdata_dir, ignore_errors=True)
+
+    def _api(self, **overrides):
+        kwargs = dict(
+            app_name="MyApp", folder_name="MyApp", main_exe="gui.exe",
+            selected_path=self.install_dir, default_path=self.install_dir,
+            file_associations=[], add_to_path=False,
+        )
+        kwargs.update(overrides)
+        return make_installer_api(**kwargs)
+
+    def _capture_requirements(self, api, existing_install_path=""):
+        captured = {}
+
+        def fake_check(requirements, fallback_path=""):
+            captured["requirements"] = list(requirements)
+            return True, []
+
+        with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
+             mock.patch("installer_core.check_drive_space", side_effect=fake_check):
+            api._check_disk_space(existing_install_path)
+        return captured["requirements"]
+
+    def test_local_appdata_files_are_charged_to_the_appdata_drive(self):
+        api = self._api(local_appdata_files=["cli.exe"])
+        with mock.patch.object(api, "_local_appdata_root", return_value=self.appdata_dir):
+            requirements = self._capture_requirements(api)
+        by_path = dict(requirements)
+        self.assertEqual(by_path[self.install_dir], 500, "只有 gui.exe 落在安裝目錄")
+        self.assertEqual(by_path[self.appdata_dir], 300, "cli.exe 落在 %LOCALAPPDATA%，要算在那顆磁碟上")
+
+    def test_without_local_appdata_files_everything_is_charged_to_the_install_dir(self):
+        api = self._api()
+        requirements = self._capture_requirements(api)
+        self.assertEqual(dict(requirements), {self.install_dir: 800})
+
+    def test_upgrade_backup_is_charged_to_temp(self):
+        """覆蓋安裝：舊安裝資料夾整份會先複製到 %TEMP%，那份需求要計入。"""
+        old_install = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, old_install, True)
+        with open(os.path.join(old_install, "old.bin"), "wb") as f:
+            f.write(b"o" * 1234)
+
+        api = self._api()
+        requirements = self._capture_requirements(api, existing_install_path=old_install)
+        by_path = dict(requirements)
+        self.assertEqual(by_path.get(tempfile.gettempdir()), 1234)
+
+    def test_no_temp_requirement_for_a_fresh_install(self):
+        api = self._api()
+        requirements = self._capture_requirements(api)
+        self.assertNotIn(tempfile.gettempdir(), dict(requirements))
+
+
+class TestIsProcessRunning(unittest.TestCase):
+    """F07：主程式檔名含 shell 特殊字元時行程偵測會失效。
+
+    這裡原本以 `shell=True` 搭配字串拼接組出 tasklist 指令。Windows 檔名
+    允許 `&`、`|`、`^` 這些字元，打包端只驗證 `main_exe` 是否存在於來源
+    資料夾，未限制字元——`My&App.exe` 這種檔名會讓 cmd.exe 把 `&` 之後
+    的部分當成另一道指令，偵測結果不再對應到那支程式。
+
+    斷言對象是 `tasklist` 這個外部工具的實際介面（參數陣列的形狀、
+    `IMAGENAME eq <檔名>` 這個篩選字串的原文），不是模組自己的常數。
+    同一支檔案裡其他 subprocess 呼叫已經是參數陣列的寫法。
+    """
+
+    def _run(self, exe_name, output=""):
+        with mock.patch("installer_core.subprocess.check_output", return_value=output) as mock_check:
+            result = ic._is_process_running(exe_name)
+        return result, mock_check
+
+    def test_passes_an_argument_list_without_shell(self):
+        _result, mock_check = self._run("app.exe")
+        args, kwargs = mock_check.call_args
+        self.assertEqual(args[0], ["tasklist", "/FI", "IMAGENAME eq app.exe", "/NH"])
+        self.assertFalse(kwargs.get("shell", False), "shell=True 會讓檔名裡的特殊字元被 cmd.exe 解讀")
+
+    def test_filename_with_ampersand_is_passed_through_intact(self):
+        _result, mock_check = self._run("My&App.exe")
+        args, _kwargs = mock_check.call_args
+        self.assertIn("IMAGENAME eq My&App.exe", args[0])
+
+    def test_detects_a_running_process_from_tasklist_output(self):
+        result, _ = self._run("app.exe", output="app.exe    1234 Console    1    12,345 K\n")
+        self.assertTrue(result)
+
+    def test_not_running_when_tasklist_says_no_tasks(self):
+        result, _ = self._run("app.exe", output="資訊: 沒有符合搜尋準則的工作正在執行。\n")
+        self.assertFalse(result)
+
+    def test_empty_exe_name_is_not_running(self):
+        self.assertFalse(ic._is_process_running(""))
+
+    def test_swallows_exception(self):
+        with mock.patch("installer_core.subprocess.check_output", side_effect=OSError("模擬失敗")):
+            self.assertFalse(ic._is_process_running("app.exe"))
 
 
 class TestNonFatalFailuresAllBecomeWarnings(unittest.TestCase):
@@ -1313,7 +1442,7 @@ class TestNonFatalFailuresAllBecomeWarnings(unittest.TestCase):
     def _install(self, api, create_desktop_shortcut=False, shortcut_ok=True):
         with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
              mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
-             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, [])), \
              mock.patch.object(api, "_register_uninstall_entry"), \
              mock.patch.object(api, "_create_shortcut", return_value=shortcut_ok):
             return api.trigger_installation(create_desktop_shortcut=create_desktop_shortcut)
@@ -1410,7 +1539,7 @@ class TestTriggerInstallationCreatesScheduledTask(unittest.TestCase):
         })
         with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
              mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
-             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, [])), \
              mock.patch.object(api, "_register_uninstall_entry"), \
              mock.patch("installer_core.scheduled_task.create_scheduled_task", return_value=True) as mock_create:
             result = api.trigger_installation(create_desktop_shortcut=False)
@@ -1424,7 +1553,7 @@ class TestTriggerInstallationCreatesScheduledTask(unittest.TestCase):
         api = self._make_api()
         with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
              mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
-             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, [])), \
              mock.patch.object(api, "_register_uninstall_entry"), \
              mock.patch("installer_core.scheduled_task.create_scheduled_task") as mock_create:
             api.trigger_installation(create_desktop_shortcut=False)
@@ -1435,7 +1564,7 @@ class TestTriggerInstallationCreatesScheduledTask(unittest.TestCase):
         api = self._make_api(scheduled_task={"task_name": "MyTask", "exe_relative_path": "app.exe"})
         with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
              mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
-             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, [])), \
              mock.patch.object(api, "_register_uninstall_entry"), \
              mock.patch("installer_core.scheduled_task.create_scheduled_task", return_value=True):
             api.trigger_installation(create_desktop_shortcut=False)
@@ -1448,7 +1577,7 @@ class TestTriggerInstallationCreatesScheduledTask(unittest.TestCase):
         api = self._make_api(scheduled_task={"task_name": "MyTask", "exe_relative_path": "app.exe"})
         with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
              mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
-             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, [])), \
              mock.patch.object(api, "_register_uninstall_entry"), \
              mock.patch("installer_core.scheduled_task.create_scheduled_task", return_value=False):
             result = api.trigger_installation(create_desktop_shortcut=False)
@@ -1488,7 +1617,7 @@ class TestTriggerInstallationCreatesRestorePoint(unittest.TestCase):
         api = self._make_api(create_restore_point_before_install=True)
         with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
              mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
-             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, [])), \
              mock.patch.object(api, "_register_uninstall_entry"), \
              mock.patch("installer_core.restore_point.create_restore_point", return_value=True) as mock_create:
             result = api.trigger_installation(create_desktop_shortcut=False)
@@ -1500,7 +1629,7 @@ class TestTriggerInstallationCreatesRestorePoint(unittest.TestCase):
         api = self._make_api()
         with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
              mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
-             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, [])), \
              mock.patch.object(api, "_register_uninstall_entry"), \
              mock.patch("installer_core.restore_point.create_restore_point") as mock_create:
             api.trigger_installation(create_desktop_shortcut=False)
@@ -1511,7 +1640,7 @@ class TestTriggerInstallationCreatesRestorePoint(unittest.TestCase):
         api = self._make_api(create_restore_point_before_install=True)
         with mock.patch("installer_core.get_resource_path", side_effect=lambda p: os.path.join(self.resource_dir, p)), \
              mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
-             mock.patch.object(api, "_check_disk_space", return_value=(True, 10 ** 9, 1)), \
+             mock.patch.object(api, "_check_disk_space", return_value=(True, [])), \
              mock.patch.object(api, "_register_uninstall_entry"), \
              mock.patch("installer_core.restore_point.create_restore_point", return_value=False):
             result = api.trigger_installation(create_desktop_shortcut=False)

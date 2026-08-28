@@ -32,7 +32,7 @@ import zlib
 import webview
 from datetime import datetime
 from window_drag import WindowDragController
-from disk_space import required_install_size, check_disk_space
+from disk_space import required_install_size, check_drive_space
 import file_assoc
 import lang_detect
 import restart_manager
@@ -100,14 +100,21 @@ def _is_process_running(exe_name):
 
     修正紀錄：shell=True 會透過 cmd.exe 執行指令，在 --noconsole 的 GUI 程式裡
     呼叫會短暫跳出一個命令提示字元視窗。加上 CREATE_NO_WINDOW 徹底避免。
+
+    F07：原本以 shell=True 搭配字串拼接組出指令。Windows 檔名允許 `&`、
+    `|`、`^` 這些字元，打包端只驗證 main_exe 是否存在於來源資料夾，未限制
+    字元——`My&App.exe` 這種檔名會讓 cmd.exe 把 `&` 之後的部分當成另一道
+    指令，偵測結果不再對應到那支程式。改成傳入參數陣列並移除 shell=True，
+    篩選字串整段當成一個參數交給 tasklist，不再經過 cmd.exe 的解析。同一支
+    檔案裡其他 subprocess 呼叫已經是這個寫法。
     """
     if not exe_name:
         return False
     try:
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         output = subprocess.check_output(
-            f'tasklist /FI "IMAGENAME eq {exe_name}" /NH',
-            shell=True, text=True, stderr=subprocess.DEVNULL, creationflags=creationflags,
+            ["tasklist", "/FI", f"IMAGENAME eq {exe_name}", "/NH"],
+            text=True, stderr=subprocess.DEVNULL, creationflags=creationflags,
         )
         return exe_name.lower() in output.lower()
     except Exception:
@@ -410,10 +417,55 @@ class InstallerAPI:
         progress_report.report_progress(window, "updateInstallProgress", percent, message)
 
     def _required_size(self):
+        """這次安裝的總容量（所有落地位置加總）。登錄表的
+        EstimatedSize 欄位用這個值——那個欄位本來就只有一個數字，
+        不區分落在哪顆磁碟。"""
         return required_install_size(self._app_contents_dir())
 
-    def _check_disk_space(self):
-        return check_disk_space(self._required_size(), self.selected_path, self.default_path)
+    def _required_size_by_destination(self):
+        """把來源檔案依「實際會落到哪個目錄」分組加總，回傳
+        `[(落地目錄, 位元組數), ...]`。
+
+        F08：原本一律算在 `selected_path` 所在磁碟上，但
+        `local_appdata_files` 指定的檔案實際落在 `_local_appdata_root()`
+        （`%LOCALAPPDATA%\\Programs\\<folder_name>`），可能位於另一顆磁碟
+        ——那顆磁碟從未被檢查，而目標磁碟的需求量同時被高估。分組的規則
+        直接用 `_is_local_appdata_file()`，跟實際複製時決定落點的
+        `_resolve_installed_path()` 是同一個判斷，不另外維護一份。
+        """
+        src_dir = self._app_contents_dir()
+        sizes = {}
+        for root, _dirs, files in os.walk(src_dir):
+            for name in files:
+                full_path = os.path.join(root, name)
+                rel_path = os.path.relpath(full_path, src_dir)
+                dest_dir = (
+                    self._local_appdata_root() if self._is_local_appdata_file(rel_path)
+                    else self.selected_path
+                )
+                sizes[dest_dir] = sizes.get(dest_dir, 0) + os.path.getsize(full_path)
+        return list(sizes.items())
+
+    def _check_disk_space(self, existing_install_path=""):
+        """回傳 `(是否全部足夠, 各磁碟的檢查結果)`，見
+        `disk_space.check_drive_space()`。
+
+        existing_install_path：這次是覆蓋安裝時，舊安裝資料夾的位置。
+        `upgrade.backup()` 會在移除舊版本之前把整份資料夾複製到 `%TEMP%`，
+        那份需求原本完全沒有被計入——`%TEMP%` 所在磁碟不夠時，備份會失敗
+        （備份失敗只回傳 None、不擋更新流程），使用者就此失去唯一的復原
+        機會，而且事前沒有任何警告。
+
+        密碼保護的安裝把解密內容展開到 `%TEMP%` 這件事不計入：那一步發生在
+        `verify_install_password()`，早於整個 `trigger_installation()`，走到
+        這裡時那份空間已經實際佔用成功了，再檢查一次沒有意義。
+        """
+        requirements = self._required_size_by_destination()
+        if existing_install_path and os.path.isdir(existing_install_path):
+            requirements.append(
+                (tempfile.gettempdir(), required_install_size(existing_install_path))
+            )
+        return check_drive_space(requirements, self.default_path)
 
     def _register_uninstall_entry(self):
         import winreg
@@ -790,16 +842,35 @@ class InstallerAPI:
                 self._restore_upgrade_backup()
                 return {"status": "error", "message": "安裝失敗：找不到內建軟體資源！"}
 
-            # 磁碟空間檢查
-            ok, free, required = self._check_disk_space()
+            # 覆蓋安裝偵測提前到磁碟空間檢查之前：這是一次唯讀的登錄表查詢，
+            # 沒有副作用，但磁碟空間檢查需要知道「這次會不會把舊安裝資料夾
+            # 整份備份到 %TEMP%」才算得出完整的需求量（F08）。查詢結果留給
+            # 下面真正執行移除舊版本的那一步共用，不重新查一次。
+            existing = self.check_existing_install()
+            existing_install_path = existing.get("install_path", "") if existing.get("exists") else ""
+
+            # 磁碟空間檢查（依落地磁碟分組，可能不只一顆——見 _check_disk_space()）
+            ok, drive_reports = self._check_disk_space(existing_install_path)
             if not ok:
                 self._restore_upgrade_backup()
-                return {
-                    "status": "error",
-                    "message": f"磁碟空間不足：本次安裝約需 {required // (1024 * 1024)} MB，"
-                                f"目標磁碟剩餘 {free // (1024 * 1024)} MB。",
-                }
-            log(f"磁碟空間檢查通過（需要約 {required // (1024 * 1024)} MB）")
+                detail = "、".join(
+                    f"{d['drive']} 需要約 {d['required'] // (1024 * 1024)} MB、"
+                    f"剩餘 {d['free'] // (1024 * 1024)} MB"
+                    for d in drive_reports if not d["sufficient"]
+                )
+                return {"status": "error", "message": f"磁碟空間不足：{detail}。"}
+            if drive_reports:
+                log(
+                    "磁碟空間檢查通過（"
+                    + "、".join(
+                        f"{d['drive']} 約需 {d['required'] // (1024 * 1024)} MB" for d in drive_reports
+                    )
+                    + "）"
+                )
+            else:
+                # 需求量全為 0，或所有落地磁碟都查不到用量——沒有東西可以
+                # 回報，但也不是失敗（見 disk_space.check_drive_space()）。
+                log("磁碟空間檢查通過（沒有可回報的磁碟需求量）")
 
             # 主程式執行中偵測：回傳獨立於一般 "error" 的狀態值，讓前端可以
             # 跳出「關閉程式並繼續安裝／取消」的互動選擇，而不是直接判定
@@ -821,7 +892,7 @@ class InstallerAPI:
             # 刪除舊版本檔案的動作延後到這裡——使用者已經實際拖曳圖示、確定要
             # 安裝了才動手，而不是彈窗一按確認鈕、使用者都還沒觸發安裝就先刪。
             # run_upgrade_uninstall() 內部會先備份舊安裝資料夾，失敗時自己復原。
-            existing = self.check_existing_install()
+            # existing 沿用上面磁碟空間檢查前查到的那一次結果，不重查。
             if existing.get("exists"):
                 self._report_progress(3, "正在移除舊版本...")
                 upgrade_result = self.run_upgrade_uninstall()

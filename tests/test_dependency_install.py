@@ -6,8 +6,11 @@ test_installer_core_misc.py 測，因為那部分主要在驗證「InstallerAPI 
 正確傳參數/委派」，屬於整合層級；這裡只測純粹的登錄表偵測邏輯，不需要
 建構 InstallerAPI。
 """
+import hashlib
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -212,6 +215,66 @@ class TestCheckDotnetDesktopFilesystemFallback(unittest.TestCase):
     def test_registry_empty_min_version_not_met_via_filesystem(self):
         os.makedirs(os.path.join(self.shared_dir, "6.0.36"))
         self.assertFalse(di._check_dotnet_desktop(min_version="8.0.0"))
+
+
+class TestBundledDependencyIsAlsoVerified(unittest.TestCase):
+    """F06：`sha256` 驗證原本位於「需要連線下載」的分支內，走內嵌路徑
+    （打包時就把安裝檔嵌進 Setup.exe）時整段跳過。
+
+    加上打包端當時也沒有任何驗證，合併效果是：使用者同時填寫 `sha256`
+    並勾選內嵌時，該檔案從打包到安裝沒有任何一個環節驗證過。把驗證移到
+    兩條路徑的共同位置成本極低（讀一次檔案算摘要），而且能涵蓋「Setup.exe
+    打包完成之後、內嵌檔案被替換」這種下載端驗證抓不到的情況。
+    """
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.payload = b"bundled-dependency-installer"
+        os.makedirs(os.path.join(self.tmp_dir, "dependencies"))
+        self.bundled_path = os.path.join(self.tmp_dir, "dependencies", "mydep.exe")
+        with open(self.bundled_path, "wb") as f:
+            f.write(self.payload)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _install(self, sha256, check_result=True):
+        checkers = {
+            "mydep": (lambda: check_result, "My Dep", "https://example.invalid/mydep.exe", ["/S"]),
+        }
+        custom_dependencies = [{"key": "mydep", "sha256": sha256}] if sha256 else []
+        with mock.patch("dependency_install.subprocess.run") as mock_run:
+            result = di.install(
+                "mydep", checkers,
+                custom_dependencies=custom_dependencies,
+                bundle_dependencies=["mydep"],
+                resolve_resource_path=lambda rel: os.path.join(self.tmp_dir, rel),
+            )
+        return result, mock_run
+
+    def test_bundled_file_with_wrong_sha256_is_not_executed(self):
+        result, mock_run = self._install("0" * 64)
+        self.assertEqual(result["status"], "error")
+        mock_run.assert_not_called()
+
+    def test_bundled_file_with_matching_sha256_is_executed(self):
+        digest = hashlib.sha256(self.payload).hexdigest()
+        result, mock_run = self._install(digest)
+        self.assertEqual(result["status"], "success")
+        mock_run.assert_called_once()
+
+    def test_bundled_file_without_sha256_is_executed_as_before(self):
+        """沒填 sha256 的情況維持原行為，不是「沒填就一律拒絕」。"""
+        result, mock_run = self._install(None)
+        self.assertEqual(result["status"], "success")
+        mock_run.assert_called_once()
+
+    def test_bundled_file_is_not_deleted_when_verification_fails(self):
+        """內嵌檔案是這次安裝檔自己的資源（PyInstaller 解壓出來的暫存內容，
+        或開發模式下的原始檔案），不是我們下載出來的暫存檔——驗證失敗時
+        只能拒絕執行，不能把它刪掉。"""
+        self._install("0" * 64)
+        self.assertTrue(os.path.exists(self.bundled_path))
 
 
 if __name__ == "__main__":

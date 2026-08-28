@@ -216,6 +216,49 @@ class TestPerformUninstallStepsReportsDeletionFailures(unittest.TestCase):
         )
 
 
+class TestIsProcessRunning(unittest.TestCase):
+    """F07 的同一個問題在解除安裝端也有一份：這裡原本同樣以 `shell=True`
+    搭配字串拼接組出 tasklist 指令，`exe_name` 來自 install_manifest.json
+    的 `main_exe`（也就是打包時使用者指定的主程式檔名，未限制字元）。
+    `My&App.exe` 這種檔名會讓 cmd.exe 把 `&` 之後的部分當成另一道指令，
+    偵測結果不再對應到那支程式——解除安裝時就會漏掉「主程式還在執行」
+    這道保護。
+
+    斷言對象是 `tasklist` 這個外部工具的實際介面，不是模組自己的常數。
+    """
+
+    def _run(self, exe_name, output=""):
+        with mock.patch("uninstall.subprocess.check_output", return_value=output) as mock_check:
+            result = un.is_process_running(exe_name)
+        return result, mock_check
+
+    def test_passes_an_argument_list_without_shell(self):
+        _result, mock_check = self._run("app.exe")
+        args, kwargs = mock_check.call_args
+        self.assertEqual(args[0], ["tasklist", "/FI", "IMAGENAME eq app.exe", "/NH"])
+        self.assertFalse(kwargs.get("shell", False), "shell=True 會讓檔名裡的特殊字元被 cmd.exe 解讀")
+
+    def test_filename_with_ampersand_is_passed_through_intact(self):
+        _result, mock_check = self._run("My&App.exe")
+        args, _kwargs = mock_check.call_args
+        self.assertIn("IMAGENAME eq My&App.exe", args[0])
+
+    def test_detects_a_running_process_from_tasklist_output(self):
+        result, _ = self._run("app.exe", output="app.exe    1234 Console    1    12,345 K\n")
+        self.assertTrue(result)
+
+    def test_not_running_when_tasklist_says_no_tasks(self):
+        result, _ = self._run("app.exe", output="資訊: 沒有符合搜尋準則的工作正在執行。\n")
+        self.assertFalse(result)
+
+    def test_empty_exe_name_is_not_running(self):
+        self.assertFalse(un.is_process_running(""))
+
+    def test_swallows_exception(self):
+        with mock.patch("uninstall.subprocess.check_output", side_effect=OSError("模擬失敗")):
+            self.assertFalse(un.is_process_running("app.exe"))
+
+
 class TestPerformUninstallStepsLockRelease(unittest.TestCase):
     """_perform_uninstall_steps()：需要結束鎖定檔案的程式時，實際的釋放
     邏輯（先關瀏覽視窗、不夠才暫停 AutoRestartShell 強制關殼層）收在

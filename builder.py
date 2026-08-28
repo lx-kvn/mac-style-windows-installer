@@ -39,6 +39,7 @@ builder.py
     這個副檔名自己的 doc_icons 設定 -> 共用的 doc_icon -> 主程式圖示）。
 """
 
+import hashlib
 import os
 import subprocess
 import json
@@ -53,21 +54,73 @@ import install_encryption
 CONFIG_FILE_NAME = "installer_config.json"
 
 
-def _download_file(url, dest_path, timeout=60):
+def _file_sha256(path, chunk_size=1024 * 1024):
+    """算檔案的 SHA-256 摘要（十六進位小寫字串）。
+
+    安裝端 dependency_install.py 有一份同樣的實作，這裡不改成共用同一份：
+    共用會讓打包工具的 import 圖多出一條指向安裝端執行期模組的邊，而那個
+    模組是透過 --add-data 內嵌、PyInstaller 的靜態分析看不到的，改成
+    import 反而增加 frozen exe 找不到模組的風險（這個專案已經因為模組清單
+    沒同步踩過好幾次）。SHA-256 是規格固定的演算法，不像 URL 清單或命名
+    慣例那樣有「兩邊悄悄不同步」的空間。
+    """
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _download_file(url, dest_path, timeout=60, expected_sha256=None):
     """下載一個檔案到指定路徑，供 bundle_dependencies（打包時嵌入相依元件
     安裝檔）共用。install_dependency()（installer_core.py）安裝時的線上
-    下載也是同一段邏輯的另一個副本——這裡刻意不強行合併成同一份程式碼：
+    下載也是同一段邏輯的另一個副本——這裡不強行合併成同一份程式碼，因為
     一個在打包工具端（同步、失敗直接中止整個 pack）、一個在安裝端
     （需要推播進度給前端），兩邊的呼叫情境跟錯誤處理方式不同，硬併會讓
     兩邊都要遷就對方不需要的參數。
+
+    F06：兩邊「不合併」成立，但兩邊的驗證強度不該因此產生落差。這裡原本
+    既沒有 Content-Length 完整性比對、也沒有 sha256 驗證，而內嵌迴圈呼叫
+    時連使用者填的 `sha256` 都沒有傳進來——使用者同時填 `sha256` 又勾選
+    內嵌時，該檔案從打包到安裝沒有任何一個環節驗證過。打包當下網路中斷
+    （read() 只會回傳空字串正常結束迴圈，不拋例外）會把一顆內容截斷的
+    執行檔內嵌進 Setup.exe，之後每一位終端使用者都會執行它。
+
+    驗證失敗時刪掉已寫入的部分檔案再往外拋：留著等於下一步的 --add-data
+    仍然可能把一顆沒通過驗證的檔案內嵌進去。
     """
-    with urllib.request.urlopen(url, timeout=timeout) as resp:
-        with open(dest_path, "wb") as f:
-            while True:
-                chunk = resp.read(1024 * 256)
-                if not chunk:
-                    break
-                f.write(chunk)
+    downloaded = 0
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            total = resp.getheader("Content-Length")
+            total = int(total) if total else None
+            with open(dest_path, "wb") as f:
+                while True:
+                    chunk = resp.read(1024 * 256)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+
+        if total is not None and downloaded != total:
+            raise Exception(f"下載不完整（預期 {total} bytes，實際收到 {downloaded} bytes）。")
+
+        if expected_sha256:
+            actual = _file_sha256(dest_path)
+            if actual != str(expected_sha256).strip().lower():
+                raise Exception(
+                    f"完整性驗證失敗（sha256 不符）：預期 {expected_sha256}，實際 {actual}。"
+                )
+    except Exception:
+        if os.path.exists(dest_path):
+            try:
+                os.remove(dest_path)
+            except Exception:
+                pass
+        raise
 
 
 def _sign_executable(exe_path, signing):
@@ -382,6 +435,14 @@ def build_all(
         dependency_url_map = {
             key: meta["download_url"] for key, meta in dependency_defs.BUILT_IN_DEPENDENCIES.items()
         }
+        # F06：使用者在 custom_dependencies 填的 sha256 原本沒有被傳給
+        # _download_file()，內嵌模式下這個欄位形同裝飾。內建相依元件目前
+        # 沒有這個欄位（Microsoft 的永久連結指向的檔案本來就會隨版本更新，
+        # 固定不了摘要），所以只從 custom_dependencies 收集。
+        dependency_sha256_map = {
+            entry["key"]: entry["sha256"]
+            for entry in custom_dependencies if entry.get("sha256")
+        }
         for entry in custom_dependencies:
             dependency_url_map[entry["key"]] = entry["download_url"]
 
@@ -395,7 +456,7 @@ def build_all(
             # install_dependency() 查找的固定路徑是 dependencies/<key>.exe。
             temp_path = os.path.join(workspace_dir, f"{key}.exe")
             try:
-                _download_file(url, temp_path)
+                _download_file(url, temp_path, expected_sha256=dependency_sha256_map.get(key))
             except Exception as e:
                 raise Exception(f"下載相依元件「{key}」失敗，無法內嵌：{e}")
             temp_dependency_files.append(temp_path)

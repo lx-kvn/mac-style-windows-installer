@@ -4,6 +4,7 @@
 編譯要數十秒，而且測試不應該依賴外部工具是否安裝），驗證的是「這個函式組出
 來的設定檔內容、呼叫順序、錯誤處理」這幾件事，不是編譯本身。
 """
+import hashlib
 import os
 import sys
 import json
@@ -526,6 +527,148 @@ class TestTempArtifactCleanupOnFailure(BuildAllTestBase):
             os.path.exists(expected_temp_doc_icon),
             "doc_icon.ico 暫存檔應該在例外拋出後也被清掉，不能留到下一輪打包才清",
         )
+
+
+class FakeHttpResponse:
+    """模擬 urllib.request.urlopen() 回傳的物件：支援 context manager、
+    分塊 read()、以及 getheader("Content-Length")。斷線情境用「宣告的
+    Content-Length 比實際內容長」表達——真正的連線中斷就是這個形狀：
+    read() 只是回傳空字串正常結束迴圈，不會拋例外。
+    """
+
+    def __init__(self, body, declared_length=None):
+        self._body = body
+        self._pos = 0
+        self._declared_length = len(body) if declared_length is None else declared_length
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self, size):
+        chunk = self._body[self._pos:self._pos + size]
+        self._pos += len(chunk)
+        return chunk
+
+    def getheader(self, name):
+        if name == "Content-Length":
+            return str(self._declared_length)
+        return None
+
+
+class TestDownloadFileVerification(unittest.TestCase):
+    """F06：`sha256` 這個欄位在內嵌模式下完全不生效。
+
+    打包端 `_download_file()` 原本只有讀取與寫檔，既沒有 Content-Length
+    完整性比對，也沒有 sha256 驗證，內嵌迴圈呼叫它時 `custom_dependencies`
+    裡填的 `sha256` 根本沒有被傳進來。安裝端兩項驗證都有，但 sha256 檢查
+    位於「需要連線下載」的分支內，走內嵌路徑時整段跳過。
+
+    合併效果：使用者同時填寫 `sha256` 並勾選內嵌時，該檔案從打包到安裝
+    沒有任何一個環節驗證過——打包當下網路中斷會把一顆內容截斷的執行檔
+    內嵌進 Setup.exe，之後每一位終端使用者都會執行它。
+    """
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.dest = os.path.join(self.tmp_dir, "dep.exe")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_writes_the_file_when_everything_matches(self):
+        body = b"installer-payload"
+        with mock.patch("builder.urllib.request.urlopen", return_value=FakeHttpResponse(body)):
+            builder._download_file("https://example.invalid/dep.exe", self.dest)
+        with open(self.dest, "rb") as f:
+            self.assertEqual(f.read(), body)
+
+    def test_raises_when_fewer_bytes_arrive_than_content_length(self):
+        """連線中途斷掉的形狀：read() 回傳空字串正常結束，不拋例外，
+        Content-Length 是唯一能看出內容短少的依據。"""
+        resp = FakeHttpResponse(b"trunc", declared_length=9999)
+        with mock.patch("builder.urllib.request.urlopen", return_value=resp), \
+             self.assertRaises(Exception) as ctx:
+            builder._download_file("https://example.invalid/dep.exe", self.dest)
+        self.assertIn("9999", str(ctx.exception))
+
+    def test_raises_when_sha256_does_not_match(self):
+        body = b"installer-payload"
+        wrong = "0" * 64
+        with mock.patch("builder.urllib.request.urlopen", return_value=FakeHttpResponse(body)), \
+             self.assertRaises(Exception) as ctx:
+            builder._download_file(
+                "https://example.invalid/dep.exe", self.dest, expected_sha256=wrong,
+            )
+        # 訊息要說得出「驗證不符」，不能只是任何一個例外——沒有這個斷言的話，
+        # 連「函式根本不接受 expected_sha256 參數」的 TypeError 都會讓測試綠燈。
+        self.assertIn("sha256", str(ctx.exception).lower())
+        self.assertIn("不符", str(ctx.exception))
+
+    def test_accepts_matching_sha256_case_insensitively(self):
+        body = b"installer-payload"
+        digest = hashlib.sha256(body).hexdigest()
+        with mock.patch("builder.urllib.request.urlopen", return_value=FakeHttpResponse(body)):
+            builder._download_file(
+                "https://example.invalid/dep.exe", self.dest, expected_sha256=digest.upper(),
+            )
+        self.assertTrue(os.path.exists(self.dest))
+
+    def test_does_not_leave_a_failed_download_behind(self):
+        """驗證失敗時不能留下那顆檔案——留著等於下一步的 --add-data 仍然
+        可能把它內嵌進去（呼叫端目前會中止，但這裡不依賴呼叫端的行為）。"""
+        resp = FakeHttpResponse(b"trunc", declared_length=9999)
+        with mock.patch("builder.urllib.request.urlopen", return_value=resp), \
+             self.assertRaises(Exception):
+            builder._download_file("https://example.invalid/dep.exe", self.dest)
+        self.assertFalse(os.path.exists(self.dest))
+
+
+class TestBundleDependenciesPassesSha256(BuildAllTestBase):
+    """F06 的另一半：內嵌迴圈要把該相依元件設定裡的 `sha256` 傳給
+    `_download_file()`。欄位存在、驗證函式也存在，但兩者之間沒有接線，
+    等於使用者填的 sha256 在內嵌模式下是一個裝飾。"""
+
+    def test_custom_dependency_sha256_is_passed_to_the_downloader(self):
+        digest = "a" * 64
+        captured = {}
+
+        def fake_download(url, dest_path, timeout=60, expected_sha256=None):
+            captured["url"] = url
+            captured["expected_sha256"] = expected_sha256
+            with open(dest_path, "wb") as f:
+                f.write(b"FAKE_DEP")
+
+        with mock.patch("builder._download_file", side_effect=fake_download):
+            self._call_build_all(
+                custom_dependencies=[{
+                    "key": "mydep", "display_name": "My Dep",
+                    "download_url": "https://example.invalid/mydep.exe",
+                    "silent_args": ["/S"], "sha256": digest,
+                }],
+                dependencies=["mydep"],
+                bundle_dependencies=["mydep"],
+            )
+
+        self.assertEqual(captured.get("expected_sha256"), digest)
+
+    def test_dependency_without_sha256_passes_none(self):
+        captured = {}
+
+        def fake_download(url, dest_path, timeout=60, expected_sha256=None):
+            captured["expected_sha256"] = expected_sha256
+            with open(dest_path, "wb") as f:
+                f.write(b"FAKE_DEP")
+
+        with mock.patch("builder._download_file", side_effect=fake_download):
+            self._call_build_all(
+                dependencies=["vcredist_x64"],
+                bundle_dependencies=["vcredist_x64"],
+            )
+
+        self.assertIsNone(captured.get("expected_sha256"))
 
 
 class TestErrorPaths(BuildAllTestBase):

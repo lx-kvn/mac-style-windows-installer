@@ -391,15 +391,25 @@ def install(key, checkers, custom_dependencies=(), bundle_dependencies=(),
                 return {"status": "error", "message": f"下載 {display_name} 失敗：{e}"}
         run_path = tmp_path
 
-        if expected_sha256:
-            actual_sha256 = _file_sha256(run_path)
-            if actual_sha256 != expected_sha256:
+    # F06：這段驗證原本位於上面「需要連線下載」的分支內，走內嵌路徑時整段
+    # 跳過——加上打包端當時也沒有任何驗證，使用者同時填 sha256 又勾選內嵌
+    # 時，該檔案從打包到安裝沒有任何一個環節驗證過。移到兩條路徑的共同位置：
+    # 成本只是讀一次檔案算摘要，而且能涵蓋「Setup.exe 打包完成之後、內嵌
+    # 檔案被替換」這種打包端驗證抓不到的情況。
+    #
+    # tmp_dir 是 None 時代表走的是內嵌路徑，那份檔案是這次安裝檔自己的資源
+    # （PyInstaller 解壓出來的暫存內容，或開發模式下的原始檔案），不是我們
+    # 下載出來的暫存檔，驗證失敗時只能拒絕執行、不能刪掉它。
+    if expected_sha256:
+        actual_sha256 = _file_sha256(run_path)
+        if actual_sha256 != expected_sha256:
+            if tmp_dir is not None:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
-                return {
-                    "status": "error",
-                    "message": f"{display_name} 下載完整性驗證失敗（sha256 不符），"
-                               f"可能是下載過程被竄改，已略過執行。",
-                }
+            return {
+                "status": "error",
+                "message": f"{display_name} 完整性驗證失敗（sha256 不符），"
+                           f"可能是檔案已被竄改，已略過執行。",
+            }
 
     try:
         on_progress(60, f"正在安裝 {display_name}...")
