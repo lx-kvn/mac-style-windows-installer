@@ -811,14 +811,17 @@
         const SPRING_RESPONSE = 0.25;   // 彈簧的自然週期（秒）。彈簧沒有固定長度，
                                         // 這個值是「多快到位」，不是「動畫幾秒」
         const PICKUP_SCALE = 1.06;      // 拿起來就是離開桌面靠近眼睛，所以變大
-        const ABSORB_MS = 420;          // 命中後被吸進資料夾的時間
-        const SWALLOW_MS = 320;         // 資料夾吞下去的那一口本身有多長（不含前面
-                                        // 等圖示飛過來的時間）。短於這個長度會變成
-                                        // 一次抽搐，而不是一個回應
+        const ABSORB_MS = 320;          // 命中後被吸進資料夾的時間
+        const SWALLOW_MS = 300;         // 資料夾吞下去的那一口有多長
+        const SWALLOW_SQUASH = 0.94;    // 壓到比原始大小更小的那個底
         const HIT_TOLERANCE = 25;       // 命中判定往外撐幾 px（重疊即命中的容差）
         const MAGNET_STRENGTH = 0.20;   // 靠近資料夾時被拉過去的程度
         const MAGNET_RANGE = 150;       // 這個距離內磁吸才開始作用
         const EASE_OUT = 'cubic-bezier(0.23, 1, 0.32, 1)';
+        // 更強的 ease-out：幾乎在第一幀就衝出去，後段收得很慢。用在「已經成定局」
+        // 的動作（圖示被吸進去、資料夾被壓下去）——這類動作開頭慢半拍就會拖沓，
+        // 使用者要的是它趕快演完，不是欣賞它加速。
+        const EASE_SNAP = 'cubic-bezier(0.16, 1, 0.3, 1)';
 
         const dragInner = dragItem.querySelector('.drag-inner');
         const dragGhost = document.getElementById('dragGhost');
@@ -1009,37 +1012,40 @@
             dragInner.style.filter = 'none';
             dragInner.animate(
                 [{ transform: 'scale(' + PICKUP_SCALE + ')' }, { transform: 'scale(0.34)' }],
-                { duration: duration, easing: EASE_OUT, fill: 'forwards' }
+                { duration: duration, easing: EASE_SNAP, fill: 'forwards' }
             );
             const flight = dragItem.animate(
                 [
                     { transform: 'translate3d(' + dragX.x + 'px, ' + dragY.x + 'px, 0)', opacity: 1 },
                     { transform: 'translate3d(' + (dragX.x + dx) + 'px, ' + (dragY.x + dy) + 'px, 0)', opacity: 0 }
                 ],
-                { duration: duration, easing: EASE_OUT, fill: 'forwards' }
+                { duration: duration, easing: EASE_SNAP, fill: 'forwards' }
             );
-            // 資料夾吞下去的那一口：從拖曳中的放大狀態（1.08）接著演，中間不能
-            // 有任何一刻沒人管這個 transform——放大是 CSS class 給的，一旦把
-            // class 收掉又還沒輪到動畫接手（例如靠 delay 等圖示飛過來），資料夾
-            // 就會先瞬間縮回原大小、乾等一段時間、再跳回放大開始演，看起來像
-            // 卡住。所以這裡不用 delay：動畫從第一幀就接管，用 offset 讓它前段
-            // 維持在放大狀態等圖示抵達，抵達後才真的吞下去。
+            // 資料夾吞下去的那一口：放開的當下資料夾已經是放大狀態（拖曳中的
+            // 1.08），從那裡直接開始縮，經過原始大小時不停，一路壓到比原始
+            // 大小更小，再彈回原始大小——像被壓了一下然後回彈，而不是先漲大
+            // 再收回。
+            //
+            // 這裡不用 delay：放大是 CSS class 給的，一旦把 class 收掉又還沒
+            // 輪到動畫接手，中間那段時間沒有任何一方在管這個 transform，資料夾
+            // 會先瞬間縮回原大小、乾等、再跳回放大開始演，看起來就是卡住。
+            // 動畫必須從第一幀就接管。
             dropSlot.style.transition = 'none';
             dragHovering = false;
             dropTarget.classList.remove('drag-over');
             if (motionReduced()) {
                 dropSlot.style.transition = '';
             } else {
-                const total = duration + SWALLOW_MS;
-                const arrive = duration / total;
                 const swallow = dropSlot.animate(
                     [
-                        { transform: 'scale(1.08)', offset: 0 },
-                        { transform: 'scale(1.08)', offset: arrive * 0.92 },
-                        { transform: 'scale(1.13)', offset: Math.min(arrive + 0.1, 0.9) },
+                        // 壓下去這段一開始就衝到底：這個動作已成定局，開頭慢半拍
+                        // 只會顯得拖沓
+                        { transform: 'scale(1.08)', offset: 0, easing: EASE_SNAP },
+                        { transform: 'scale(' + SWALLOW_SQUASH + ')', offset: 0.35, easing: EASE_OUT },
+                        { transform: 'scale(1.012)', offset: 0.72 },
                         { transform: 'scale(1)', offset: 1 }
                     ],
-                    { duration: total, easing: EASE_OUT, fill: 'forwards' }
+                    { duration: SWALLOW_MS, fill: 'forwards' }
                 );
                 swallow.finished.catch(() => {}).then(() => {
                     swallow.cancel();
