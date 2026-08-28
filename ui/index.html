@@ -134,19 +134,22 @@
         .install-progress-track { width: 100%; height: 4px; background: #e5e5ea; border-radius: 2px; overflow: hidden; }
         .install-progress-fill { width: 0%; height: 100%; background: #0071e3; transition: width 0.2s ease; }
 
-        /* 通用質感彈窗樣式 */
+        /* 通用質感彈窗樣式。這些彈窗不畫成浮在半透明遮罩上的白色卡片，而是
+           整片換成跟主畫面同一個底色的完整畫面——解除安裝端（uninstall.html
+           的 .nice-view）本來就是這種作法，安裝端的 EULA 頁、密碼頁、相依
+           元件安裝頁也是，只有這幾個 modal 例外。統一成同一種語彙後，整個
+           安裝流程的每一頁都是「換一整頁」，而不是有時換頁、有時疊卡片。 */
         .nice-modal-overlay {
             position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(255, 255, 255, 0.9); backdrop-filter: blur(5px);
+            background: #f5f5f7;
             display: none; justify-content: center; align-items: center; z-index: 10000;
             opacity: 0; transition: opacity 0.3s ease; padding: 24px;
         }
         .nice-modal-overlay.active { display: flex; opacity: 1; }
         .nice-modal-box {
-            background: white; padding: 24px 32px; border-radius: 16px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.08); text-align: center;
+            text-align: center;
             transform: scale(0.9); transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
-            border: 1px solid #e5e5ea; max-width: 420px; max-height: 80vh; overflow-y: auto;
+            max-width: 480px; max-height: 80vh; overflow-y: auto;
         }
         .nice-modal-overlay.active .nice-modal-box { transform: scale(1); }
         .nice-icon {
