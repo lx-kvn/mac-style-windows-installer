@@ -254,6 +254,20 @@ class TestDragToInstallInteraction(unittest.TestCase):
             "找不到原位殘影元素（id=\"dragGhost\"）",
         )
 
+    def test_drop_target_gives_feedback_when_pressed(self):
+        """安裝目的地圖示點下去會開啟選擇資料夾的對話框，它就是一顆按鈕。
+        按鈕在被按住的當下就要有視覺回饋（不是等放開才有），否則使用者
+        不確定自己到底按到了沒有。"""
+        content = _read_index_html()
+        rules = re.findall(r"#drop-target:active[^{]*\{([^}]*)\}", content)
+        self.assertTrue(
+            rules, "#drop-target 按下去的時候沒有任何視覺回饋（缺 :active 樣式）",
+        )
+        self.assertTrue(
+            any("transform" in r and "scale" in r for r in rules),
+            "#drop-target:active 沒有縮放回饋：{}".format(rules),
+        )
+
     def test_reduced_motion_is_respected(self):
         """系統要求減少動態效果時，自己會跑的動畫要收掉。跟手的位移不算
         在內（那是使用者的手在動，不是介面自己在動）。"""

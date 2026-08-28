@@ -120,7 +120,12 @@
            螢幕報讀器辨識成按鈕，這裡補上鍵盤焦點框（跟 .nice-btn /
            .custom-close-btn 同一套視覺，只在鍵盤導覽時顯示）。 */
         #drag-item:focus-visible { outline: 2px solid #0071e3; outline-offset: 2px; }
-        #drop-target .icon-wrapper { cursor: pointer; }
+        #drop-target .icon-wrapper { cursor: pointer; transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1), filter 160ms cubic-bezier(0.23, 1, 0.32, 1); }
+        /* 按下去就縮一下：這顆圖示點下去會開啟選擇資料夾的對話框，是一顆
+           按鈕，回饋要出現在「按住的當下」而不是放開之後，使用者才知道
+           自己確實按到了。拖曳中的放大（.drag-over）走同一條 transition，
+           原本的 0.2s 在拖曳過程中會慢半拍，一起縮短到 160ms。 */
+        #drop-target:active .icon-wrapper { transform: scale(0.96); }
         /* 安裝目的地圖示同樣原本只有滑鼠 click 事件，補上鍵盤操作後也要
            有焦點框。外框畫在內部的 .icon-wrapper 上而不是整個 .icon-box
            上，讓它跟 #drag-item 一樣只框住圖示本身，不會把底下的標籤與
@@ -807,6 +812,9 @@
                                         // 這個值是「多快到位」，不是「動畫幾秒」
         const PICKUP_SCALE = 1.06;      // 拿起來就是離開桌面靠近眼睛，所以變大
         const ABSORB_MS = 420;          // 命中後被吸進資料夾的時間
+        const SWALLOW_MS = 320;         // 資料夾吞下去的那一口本身有多長（不含前面
+                                        // 等圖示飛過來的時間）。短於這個長度會變成
+                                        // 一次抽搐，而不是一個回應
         const HIT_TOLERANCE = 25;       // 命中判定往外撐幾 px（重疊即命中的容差）
         const MAGNET_STRENGTH = 0.20;   // 靠近資料夾時被拉過去的程度
         const MAGNET_RANGE = 150;       // 這個距離內磁吸才開始作用
@@ -963,12 +971,16 @@
             const vy = (last.y - first.y) / dt;
 
             const hit = dragIsOverDropTarget();
-            setDropHover(false);
 
             if (hit) {
+                // 命中時不在這裡收掉放大狀態——放大是 CSS class 控制的，
+                // 收回的 transition 會跟接下來的吸入動畫搶同一個 transform，
+                // 兩股力道疊在一起就是那種抽搐感。改由 absorbIntoDropTarget()
+                // 從目前的放大狀態接手，一路演到結束。
                 absorbIntoDropTarget();
                 return;
             }
+            setDropHover(false);
             // 沒放中：彈回原位，並把手上的速度交接給彈簧，拖曳與動畫之間才不會
             // 有一個看得出來的接縫
             dragX.target = 0; dragY.target = 0;
@@ -1006,11 +1018,33 @@
                 ],
                 { duration: duration, easing: EASE_OUT, fill: 'forwards' }
             );
-            if (!motionReduced()) {
-                dropSlot.animate(
-                    [{ transform: 'scale(1)' }, { transform: 'scale(1.12)', offset: 0.35 }, { transform: 'scale(1)' }],
-                    { duration: 260, easing: EASE_OUT, delay: Math.max(duration - 120, 0) }
+            // 資料夾吞下去的那一口：從拖曳中的放大狀態（1.08）接著演，中間不能
+            // 有任何一刻沒人管這個 transform——放大是 CSS class 給的，一旦把
+            // class 收掉又還沒輪到動畫接手（例如靠 delay 等圖示飛過來），資料夾
+            // 就會先瞬間縮回原大小、乾等一段時間、再跳回放大開始演，看起來像
+            // 卡住。所以這裡不用 delay：動畫從第一幀就接管，用 offset 讓它前段
+            // 維持在放大狀態等圖示抵達，抵達後才真的吞下去。
+            dropSlot.style.transition = 'none';
+            dragHovering = false;
+            dropTarget.classList.remove('drag-over');
+            if (motionReduced()) {
+                dropSlot.style.transition = '';
+            } else {
+                const total = duration + SWALLOW_MS;
+                const arrive = duration / total;
+                const swallow = dropSlot.animate(
+                    [
+                        { transform: 'scale(1.08)', offset: 0 },
+                        { transform: 'scale(1.08)', offset: arrive * 0.92 },
+                        { transform: 'scale(1.13)', offset: Math.min(arrive + 0.1, 0.9) },
+                        { transform: 'scale(1)', offset: 1 }
+                    ],
+                    { duration: total, easing: EASE_OUT, fill: 'forwards' }
                 );
+                swallow.finished.catch(() => {}).then(() => {
+                    swallow.cancel();
+                    dropSlot.style.transition = '';
+                });
             }
 
             flight.finished.catch(() => {}).then(() => {
@@ -1023,6 +1057,11 @@
                 renderDragPosition();
                 setPickedUp(false);
                 dragAbsorbing = false;
+                // 圖示剛剛才淡出，瞬間又出現在原位會突兀，讓它淡回來
+                if (!motionReduced()) {
+                    dragItem.animate([{ opacity: 0 }, { opacity: 1 }],
+                        { duration: 240, easing: EASE_OUT });
+                }
                 triggerInstallFromDragItem();
             });
         }
