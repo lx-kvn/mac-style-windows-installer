@@ -93,31 +93,69 @@ def unregister(extensions, registry=_real_winreg, no_admin_install=False):
     移除原語一致——機碼本來就不存在（DeleteKey 拋 FileNotFoundError）
     視為成功，只有 FileNotFoundError 以外的例外（權限不足、底下還有子
     機碼刪不掉）代表機碼仍留在登錄表裡，才回傳 False。
+
+    F12：兩個 hive 都試，理由跟 system_entries.remove_registry_entry() 的
+    雙 hive 探測完全相同——no_admin_install 從 manifest 讀出來的值可能跟
+    當初實際安裝時用的模式對不上，關聯實際寫在另一個 hive 時完全找不到，
+    殘留永遠留著。
+
+    擴大到兩個 hive 之後多出來的風險，以及對應的保護：ProgID 機碼
+    （`AppFile<ext>`，見 prog_id() 的命名慣例）確定是我們寫的，兩個 hive
+    都可以直接刪；但 `Software\\Classes\\<ext>` 這個副檔名機碼本身不是
+    我們專屬的——它的預設值指向某個 ProgID，那個 ProgID 隨時可能已經是
+    另一個應用程式的（使用者事後改用別的程式開啟這個副檔名）。所以副檔名
+    機碼只在「它確實指著我們的 ProgID」時才刪除。這道保護對兩個 hive
+    一律適用，不只針對擴大出來的那一個。
     """
-    hive = InstallScope(no_admin_install, registry=registry).registry_hive
+    primary_hive = InstallScope(no_admin_install, registry=registry).registry_hive
+    other_hive = (
+        registry.HKEY_CURRENT_USER if primary_hive == registry.HKEY_LOCAL_MACHINE
+        else registry.HKEY_LOCAL_MACHINE
+    )
     removal_failed = False
-    for ext in extensions:
-        pid = prog_id(ext)
-        # DefaultIcon 是 shell 的平行子機碼，DeleteKey 要求目標本身沒有子機碼
-        # 才能刪除，所以要在刪 {pid} 本體之前先把它跟 shell\open\command 清掉，
-        # 不然最後一步會因為底下還有東西而刪不掉，留下殘留機碼。
-        for reg_path in (
-            f"Software\\Classes\\{ext}",
-            f"Software\\Classes\\{pid}\\shell\\open\\command",
-            f"Software\\Classes\\{pid}\\shell\\open",
-            f"Software\\Classes\\{pid}\\shell",
-            f"Software\\Classes\\{pid}\\DefaultIcon",
-            f"Software\\Classes\\{pid}",
-        ):
-            try:
-                registry.DeleteKey(hive, reg_path)
-            except FileNotFoundError:
-                continue
-            except Exception:
-                removal_failed = True
+    for hive in (primary_hive, other_hive):
+        for ext in extensions:
+            pid = prog_id(ext)
+            reg_paths = []
+            if _extension_points_at(hive, ext, pid, registry):
+                reg_paths.append(f"Software\\Classes\\{ext}")
+            # DefaultIcon 是 shell 的平行子機碼，DeleteKey 要求目標本身沒有子機碼
+            # 才能刪除，所以要在刪 {pid} 本體之前先把它跟 shell\open\command 清掉，
+            # 不然最後一步會因為底下還有東西而刪不掉，留下殘留機碼。
+            reg_paths += [
+                f"Software\\Classes\\{pid}\\shell\\open\\command",
+                f"Software\\Classes\\{pid}\\shell\\open",
+                f"Software\\Classes\\{pid}\\shell",
+                f"Software\\Classes\\{pid}\\DefaultIcon",
+                f"Software\\Classes\\{pid}",
+            ]
+            for reg_path in reg_paths:
+                try:
+                    registry.DeleteKey(hive, reg_path)
+                except FileNotFoundError:
+                    continue
+                except Exception:
+                    removal_failed = True
 
     _notify_association_changed()
     return not removal_failed
+
+
+def _extension_points_at(hive, ext, pid, registry):
+    """`Software\\Classes\\<ext>` 的預設值是不是我們的 ProgID。
+
+    機碼不存在（讀不到）時回傳 False：沒有東西要刪，跟「指向別人」在
+    後續處理上是同一件事——DeleteKey 本來就會拋 FileNotFoundError 被
+    當成成功，這裡先跳過只是少一次無謂的呼叫。讀取失敗（權限不足）同樣
+    回傳 False：讀不到就無從確認這個機碼是不是我們的，寧可不刪。
+    """
+    try:
+        key = registry.OpenKey(hive, f"Software\\Classes\\{ext}", 0, registry.KEY_READ)
+        value, _reg_type = registry.QueryValueEx(key, "")
+        registry.CloseKey(key)
+    except Exception:
+        return False
+    return value == pid
 
 
 def _clear_stale_user_associations(ext, registry, log, just_wrote_hive=None):

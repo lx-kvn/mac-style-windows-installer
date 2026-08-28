@@ -66,5 +66,53 @@ class TestCompareVersions(unittest.TestCase):
         self.assertEqual(vc.compare_versions("1.0.0", "1.0.0-rc2"), 1)
 
 
+class TestComparingTwoPrereleases(unittest.TestCase):
+    """F13：數字段相同、兩邊都有後綴時原本一律回傳 0，`1.0.0-rc1` 升級到
+    `1.0.0-rc2` 會被判定成「版本完全一致」的重新安裝。
+
+    這個情境原本踩不到，因為 `version_info._parse_version_tuple()` 讓帶
+    後綴的版本號根本無法打包產出；ADR-0003 放寬版本號格式之後（稽核第三輪
+    已實作）就會立刻浮現，所以這是必做項而不是選配。
+
+    比較規則依 ADR-0003：後綴以字串逐字比較（ASCII 順序）。不引入
+    semantic versioning 對 alpha/beta/rc 的語意排序——後綴是自由文字，
+    無法保證使用者只用這三個詞。
+    """
+
+    def test_later_rc_is_newer(self):
+        self.assertEqual(vc.compare_versions("1.0.0-rc2", "1.0.0-rc1"), 1)
+        self.assertEqual(vc.compare_versions("1.0.0-rc1", "1.0.0-rc2"), -1)
+
+    def test_identical_prereleases_are_equal(self):
+        self.assertEqual(vc.compare_versions("1.0.0-rc1", "1.0.0-rc1"), 0)
+
+    def test_beta_sorts_before_rc_by_ascii_order(self):
+        self.assertEqual(vc.compare_versions("1.0.0-beta", "1.0.0-rc1"), -1)
+
+    def test_numeric_segments_still_win_over_the_suffix(self):
+        """後綴只有在數字段完全相同時才拿出來比——`1.0.1-rc1` 比
+        `1.0.0-rc9` 新，不能因為後綴字串較小就判成舊的。"""
+        self.assertEqual(vc.compare_versions("1.0.1-rc1", "1.0.0-rc9"), 1)
+
+    def test_double_digit_rc_sorts_by_ascii_not_by_number(self):
+        """已知限制（ADR-0003）：後綴採 ASCII 逐字順序，`1.0.0-rc10` 會被
+        判定為早於 `1.0.0-rc9`（'1' < '9'）。需要兩位數 rc 編號的使用者要
+        自行補零成 rc09。這裡把這個限制釘成測試，讓它是一個有記錄的取捨，
+        而不是哪天有人以為修好了就默默改掉。"""
+        self.assertEqual(vc.compare_versions("1.0.0-rc10", "1.0.0-rc9"), -1)
+
+
+class TestPrereleaseSuffix(unittest.TestCase):
+    def test_returns_the_text_after_the_first_hyphen(self):
+        self.assertEqual(vc.prerelease_suffix("1.0.0-rc1"), "rc1")
+
+    def test_returns_empty_string_without_a_suffix(self):
+        self.assertEqual(vc.prerelease_suffix("1.0.0"), "")
+
+    def test_keeps_everything_after_the_first_hyphen(self):
+        """後綴本身含連字號時整段保留，不再切一次——後綴是自由文字。"""
+        self.assertEqual(vc.prerelease_suffix("1.0.0-rc1-hotfix"), "rc1-hotfix")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

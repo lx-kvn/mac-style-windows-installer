@@ -88,13 +88,20 @@ class TestRemoveRegistryEntry(unittest.TestCase):
 
 class TestRemoveShortcut(unittest.TestCase):
     def test_removes_user_desktop_shortcut_when_no_admin(self):
+        """no_admin_install=True 時，捷徑應該從目前使用者自己的桌面移除
+        （不是所有使用者共用的 Public Desktop）。F12 之後這個函式兩個位置
+        都會探，所以這裡把「另一個位置沒有捷徑」明確表達出來，斷言仍然
+        鎖住『使用者自己的桌面那一份確實被刪掉了』。"""
         fake_reg = FakeWinReg()
+        expected_path = os.path.join("C:\\Users\\Tester", "Desktop", "MyApp.lnk")
         with mock.patch("system_entries.os.path.expanduser", return_value="C:\\Users\\Tester"), \
-             mock.patch("system_entries.os.path.exists", return_value=True) as mock_exists, \
+             mock.patch("system_entries.os.path.exists", side_effect=lambda p: p == expected_path) as mock_exists, \
              mock.patch("system_entries.os.remove") as mock_remove:
             result = se.remove_shortcut("MyApp", desktop=True, no_admin_install=True, registry=fake_reg)
-        expected_path = os.path.join("C:\\Users\\Tester", "Desktop", "MyApp.lnk")
-        mock_exists.assert_called_once_with(expected_path)
+        self.assertEqual(
+            mock_exists.call_args_list[0], mock.call(expected_path),
+            "no_admin_install 推導出來的位置應該是第一個被檢查的",
+        )
         mock_remove.assert_called_once_with(expected_path)
         self.assertTrue(result)
 
@@ -113,6 +120,41 @@ class TestRemoveShortcut(unittest.TestCase):
              mock.patch("system_entries.os.remove", side_effect=PermissionError("檔案被鎖住")):
             result = se.remove_shortcut("MyApp", registry=fake_reg)
         self.assertFalse(result)
+
+    def test_falls_back_to_the_other_location_when_the_shortcut_is_there_instead(self):
+        """F12：`remove_registry_entry()` 早就會依序試兩個 hive，理由是
+        manifest 裡的 `no_admin_install` 可能跟當初實際安裝時不符（欄位
+        遺失時回退成 False、或 manifest 被手動編輯過）。同一個理由完全
+        適用於捷徑位置，但這裡原本只認 manifest 推導出的那一個目錄——
+        捷徑實際建在另一個位置時完全找不到，永遠留在使用者的開始功能表裡。
+        """
+        fake_reg = FakeWinReg()
+        user_desktop = os.path.join("C:\\Users\\Tester", "Desktop", "MyApp.lnk")
+        public_desktop = os.path.join("C:\\Users\\Public\\Desktop", "MyApp.lnk")
+        removed = []
+
+        with mock.patch("system_entries.os.path.expanduser", return_value="C:\\Users\\Tester"), \
+             mock.patch("system_entries.os.path.exists", side_effect=lambda p: p == user_desktop), \
+             mock.patch("system_entries.os.remove", side_effect=removed.append):
+            # manifest 說是需要提權的安裝（捷徑應該在 Public Desktop），
+            # 但實際上捷徑建在使用者自己的桌面。
+            result = se.remove_shortcut("MyApp", desktop=True, no_admin_install=False, registry=fake_reg)
+
+        self.assertTrue(result)
+        self.assertEqual(removed, [user_desktop])
+        self.assertNotIn(public_desktop, removed)
+
+    def test_removes_the_shortcut_from_both_locations_when_both_exist(self):
+        """兩個位置都有同名捷徑時兩個都清掉——留一個下來就等於解除安裝
+        沒清乾淨，使用者的開始功能表仍然看得到這個應用程式。"""
+        fake_reg = FakeWinReg()
+        removed = []
+        with mock.patch("system_entries.os.path.expanduser", return_value="C:\\Users\\Tester"), \
+             mock.patch("system_entries.os.path.exists", return_value=True), \
+             mock.patch("system_entries.os.remove", side_effect=removed.append):
+            result = se.remove_shortcut("MyApp", desktop=True, no_admin_install=False, registry=fake_reg)
+        self.assertTrue(result)
+        self.assertEqual(len(removed), 2, f"兩個位置都該被清掉，實際清了：{removed}")
 
 
 class TestRemoveFromPath(unittest.TestCase):
@@ -164,6 +206,40 @@ class TestRemoveFromPath(unittest.TestCase):
         ):
             self.assertTrue(se.remove_from_path("C:\\Apps\\MyApp", registry=fake_reg))
         self.assertEqual(fake_reg.hklm(self._machine_path_key())["Path"], "C:\\Windows")
+
+    def test_falls_back_to_the_other_hive_when_the_entry_is_there_instead(self):
+        """F12：跟 remove_registry_entry() 的雙 hive 探測同一個理由——
+        manifest 裡的 no_admin_install 可能跟當初實際安裝時不符，PATH 實際
+        寫在另一個 hive 時完全找不到，安裝路徑永遠留在使用者的 PATH 裡。"""
+        fake_reg = FakeWinReg()
+        fake_reg.set_hkcu("Environment", {"Path": "C:\\Windows;C:\\Apps\\MyApp"})
+        with mock.patch("system_entries.ctypes.windll.user32.SendMessageTimeoutW"):
+            # manifest 說是需要提權的安裝（PATH 應該寫在機器層級），
+            # 但實際上寫在使用者層級。
+            result = se.remove_from_path("C:\\Apps\\MyApp", no_admin_install=False, registry=fake_reg)
+        self.assertTrue(result)
+        self.assertEqual(fake_reg.hkcu("Environment")["Path"], "C:\\Windows")
+
+    def test_does_not_rewrite_a_hive_that_never_contained_the_install_path(self):
+        """另一個 hive 沒有這筆安裝路徑時完全不動它——把值原樣寫回去雖然
+        內容一樣，卻是一次沒有必要的登錄表寫入，在權限不足的 hive 上還會
+        變成一個假的失敗回報。"""
+        fake_reg = FakeWinReg()
+        fake_reg.set_hklm(self._machine_path_key(), {"Path": "C:\\Windows;C:\\Apps\\MyApp"})
+        fake_reg.set_hkcu("Environment", {"Path": "C:\\Tools"})
+        written = []
+        real_set = fake_reg.SetValueEx
+
+        def spy_set(key_ctx, name, reserved, value_type, value):
+            written.append((key_ctx.hive, key_ctx.subkey))
+            return real_set(key_ctx, name, reserved, value_type, value)
+
+        with mock.patch.object(fake_reg, "SetValueEx", side_effect=spy_set), \
+             mock.patch("system_entries.ctypes.windll.user32.SendMessageTimeoutW"):
+            self.assertTrue(se.remove_from_path("C:\\Apps\\MyApp", registry=fake_reg))
+
+        self.assertEqual(written, [(fake_reg.HKEY_LOCAL_MACHINE, self._machine_path_key())])
+        self.assertEqual(fake_reg.hkcu("Environment")["Path"], "C:\\Tools")
 
 
 class TestCleanupEmptyDirs(unittest.TestCase):

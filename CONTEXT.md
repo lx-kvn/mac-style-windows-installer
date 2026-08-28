@@ -142,6 +142,43 @@ PATH 的寫入順序相反）呼叫 `system_entries` 的移除函式跟
 呼叫端（`trigger_installation()`）在四個寫入步驟各自成功後才把對應的
 狀態記下來，失敗時原封不動傳給 `_rollback()`。
 
+### 移除原語的兩條共通規則
+
+**一、回傳值的語義是「這個函式結束之後，目標是否確實不存在」**，不是
+「這次有沒有刪到東西」。目標本來就不存在（登錄表機碼 `DeleteKey` 拋
+`FileNotFoundError`、捷徑檔案不存在、PATH 裡本來就沒有這筆）一律視為成功，
+只有實際移除失敗才回傳 `False`。`file_assoc.unregister()` 與
+`system_entries.remove_from_path()` 原本不回傳任何值，現在也遵守同一套語義。
+
+這個語義是「解除安裝完成畫面顯示未清乾淨項目」的前提：舊語義下「本來就
+沒有這個項目」跟「移除失敗」回傳同一個值，接上畫面之後，使用者自己刪過
+捷徑、或安裝當時捷徑建立就失敗過（那是可忽略的設計）這些正常情境，全部
+會變成解除安裝結束時的假警告。
+
+**二、四個移除點都嘗試兩個位置。** `manifest` 裡的 `no_admin_install`
+可能跟當初實際安裝時用的模式不符（欄位遺失時 `uninstall.py` 預設回退成
+`False`、或 `manifest` 被手動編輯過），只認推導出來的單一位置時，項目
+實際寫在另一個位置就完全找不到，殘留永遠留著。四個移除點分別是：
+
+| 移除點 | 兩個位置 |
+|---|---|
+| `remove_registry_entry()` | HKLM ／ HKCU 的 Uninstall 機碼 |
+| `remove_shortcut()` | Public Desktop・ProgramData 開始功能表 ／ 使用者自己的桌面・開始功能表 |
+| `remove_from_path()` | 機器層級 ／ 使用者層級的 Environment 機碼 |
+| `file_assoc.unregister()` | HKLM ／ HKCU 的 `Software\Classes` |
+
+擴大範圍帶來的兩個保護措施：
+
+- `remove_from_path()` 每個 hive 先唯讀探一次，確認安裝路徑真的在裡面才
+  用寫入權限重開。沒有這一步的話，一般權限執行的解除安裝會在機器層級的
+  Environment 拿到 `PermissionError`，變成一個假的失敗回報——那個 hive 裡
+  本來就沒有東西要清。
+- `file_assoc.unregister()` 只在 `Software\Classes\<ext>` 的預設值確實
+  指著我們的 ProgID（`AppFile<ext>`，見 `prog_id()` 的命名慣例）時才刪除
+  那個副檔名機碼。ProgID 機碼本身確定是我們寫的，可以直接刪；但副檔名
+  機碼指向的 ProgID 隨時可能已經是另一個應用程式的（使用者事後改用別的
+  程式開啟這個副檔名）。
+
 ## 編譯工作目錄（packaging_core.get_workspace_dir() / packaging_settings.py）
 
 真實抓到的 bug：`get_workspace_dir()` 在 frozen exe 情境下原本固定用

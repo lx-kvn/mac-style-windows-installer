@@ -17,6 +17,9 @@ class FakeWinReg:
     REG_DWORD = 4
     REG_EXPAND_SZ = 2
     KEY_ALL_ACCESS = 0xF003F
+    # 唯讀開啟：呼叫端在「還不確定這個位置有沒有東西要移除」時先用它探一次，
+    # 確定有才用 KEY_ALL_ACCESS 重開來寫（見 system_entries.remove_from_path()）。
+    KEY_READ = 0x20019
 
     def __init__(self):
         self.store = {}

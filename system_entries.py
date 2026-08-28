@@ -64,15 +64,26 @@ def remove_shortcut(app_name, desktop=False, no_admin_install=False, registry=_r
     """回傳值語義同 remove_registry_entry()：檔案本來就不存在（使用者
     自己刪過、或安裝當時捷徑建立就失敗過——installer_core.py 的
     `_create_shortcut()` 失敗是可忽略的設計）視為成功，只有實際刪除
-    失敗才回傳 False。"""
-    base = InstallScope(no_admin_install, registry=registry).shortcut_dir(desktop=desktop)
-    path = os.path.join(base, f"{app_name}.lnk")
-    try:
-        if os.path.exists(path):
-            os.remove(path)
-        return True
-    except Exception:
-        return False
+    失敗才回傳 False。
+
+    F12：兩個位置（所有使用者共用的 Public Desktop／ProgramData 開始功能表，
+    與目前使用者自己的桌面／開始功能表）都試，理由跟
+    remove_registry_entry() 的雙 hive 探測完全相同——manifest 裡的
+    no_admin_install 可能跟當初實際安裝時用的模式不符。原本只認 manifest
+    推導出的那一個目錄，捷徑實際建在另一個位置時完全找不到，永遠留在
+    使用者的開始功能表裡。兩個位置都是「同名應用程式自己的捷徑」，擴大
+    嘗試範圍不會波及其他應用程式。
+    """
+    removal_failed = False
+    for scope_flag in (bool(no_admin_install), not bool(no_admin_install)):
+        base = InstallScope(scope_flag, registry=registry).shortcut_dir(desktop=desktop)
+        path = os.path.join(base, f"{app_name}.lnk")
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            removal_failed = True
+    return not removal_failed
 
 
 def remove_from_path(install_path, no_admin_install=False, registry=_real_winreg):
@@ -87,28 +98,56 @@ def remove_from_path(install_path, no_admin_install=False, registry=_real_winreg
     環境變數變更廣播（SendMessageTimeoutW）不影響回傳值：登錄表已經寫
     成功、PATH 實際上已經清掉了，廣播沒送出只影響「已開啟的視窗何時看到
     新的 PATH」，該廣播在既有修正中已定性為 best-effort。
-    """
-    try:
-        hive, sub_key = InstallScope(no_admin_install, registry=registry).path_env_hive_and_key
-        key = registry.OpenKey(hive, sub_key, 0, registry.KEY_ALL_ACCESS)
-        current, reg_type = registry.QueryValueEx(key, "Path")
-        parts = [p for p in current.split(";") if p and os.path.normcase(p) != os.path.normcase(install_path)]
-        registry.SetValueEx(key, "Path", 0, reg_type, ";".join(parts))
-        registry.CloseKey(key)
-    except FileNotFoundError:
-        return True
-    except Exception:
-        return False
 
-    try:
-        HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG = 0xFFFF, 0x1A, 0x0002
-        result = ctypes.c_long()
-        ctypes.windll.user32.SendMessageTimeoutW(
-            HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment", SMTO_ABORTIFHUNG, 5000, ctypes.byref(result)
-        )
-    except Exception:
-        pass
-    return True
+    F12：機器層級與使用者層級兩個 hive 都試，理由跟 remove_registry_entry()
+    的雙 hive 探測完全相同——manifest 裡的 no_admin_install 可能跟當初實際
+    安裝時用的模式不符，PATH 實際寫在另一個 hive 時完全找不到。
+
+    每個 hive 先用唯讀開啟探一次，確認 install_path 真的在裡面才用寫入
+    權限重開：沒有這一步的話，一般權限執行的解除安裝會在「另一個 hive」
+    （機器層級的 Environment）拿到 PermissionError，變成一個假的失敗回報
+    ——那個 hive 裡本來就沒有東西要清。順帶讓這個函式變成冪等的：不會把
+    內容完全一樣的值再寫回去一次。
+    """
+    removal_failed = False
+    changed_any = False
+    for scope_flag in (bool(no_admin_install), not bool(no_admin_install)):
+        hive, sub_key = InstallScope(scope_flag, registry=registry).path_env_hive_and_key
+        try:
+            key = registry.OpenKey(hive, sub_key, 0, registry.KEY_READ)
+            current, reg_type = registry.QueryValueEx(key, "Path")
+            registry.CloseKey(key)
+        except FileNotFoundError:
+            # 機碼或 Path 這個值不存在：安裝路徑當然也不在裡面，沒事可做。
+            continue
+        except Exception:
+            # 讀不到就無從判斷這裡有沒有殘留，如實回報失敗。
+            removal_failed = True
+            continue
+
+        parts = [p for p in current.split(";") if p and os.path.normcase(p) != os.path.normcase(install_path)]
+        new_value = ";".join(parts)
+        if new_value == current:
+            continue
+
+        try:
+            key = registry.OpenKey(hive, sub_key, 0, registry.KEY_ALL_ACCESS)
+            registry.SetValueEx(key, "Path", 0, reg_type, new_value)
+            registry.CloseKey(key)
+            changed_any = True
+        except Exception:
+            removal_failed = True
+
+    if changed_any:
+        try:
+            HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG = 0xFFFF, 0x1A, 0x0002
+            result = ctypes.c_long()
+            ctypes.windll.user32.SendMessageTimeoutW(
+                HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment", SMTO_ABORTIFHUNG, 5000, ctypes.byref(result)
+            )
+        except Exception:
+            pass
+    return not removal_failed
 
 
 def cleanup_empty_dirs(root_dir):

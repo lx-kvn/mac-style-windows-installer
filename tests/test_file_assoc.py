@@ -201,6 +201,59 @@ class TestUnregister(unittest.TestCase):
              mock.patch.object(self.reg, "DeleteKey", side_effect=PermissionError("模擬權限不足")):
             self.assertFalse(file_assoc.unregister([".xyz"], registry=self.reg))
 
+    def _seed_association_in_hkcu(self, ext):
+        pid = file_assoc.prog_id(ext)
+        self.reg.set_hkcu(f"Software\\Classes\\{ext}", {"": pid})
+        self.reg.set_hkcu(f"Software\\Classes\\{pid}", {"": "App File"})
+        self.reg.set_hkcu(f"Software\\Classes\\{pid}\\shell", {})
+        self.reg.set_hkcu(f"Software\\Classes\\{pid}\\shell\\open", {})
+        self.reg.set_hkcu(f"Software\\Classes\\{pid}\\shell\\open\\command", {"": '"app.exe" "%1"'})
+        self.reg.set_hkcu(f"Software\\Classes\\{pid}\\DefaultIcon", {"": "app.exe,0"})
+
+    def test_falls_back_to_the_other_hive_when_the_association_is_there_instead(self):
+        """F12：跟 system_entries.remove_registry_entry() 的雙 hive 探測
+        同一個理由——manifest 裡的 no_admin_install 可能跟當初實際安裝時
+        用的模式不符，關聯實際寫在另一個 hive 時完全找不到，殘留永遠留著。
+        """
+        self._seed_association_in_hkcu(".xyz")
+        with mock.patch("file_assoc.ctypes.windll.shell32.SHChangeNotify"):
+            # manifest 說是需要提權的安裝（關聯應該寫在 HKLM），
+            # 但實際上寫在 HKCU。
+            result = file_assoc.unregister([".xyz"], registry=self.reg, no_admin_install=False)
+
+        self.assertTrue(result)
+        remaining = [
+            k for k in self.reg.store
+            if "AppFilexyz" in k[1] or k[1] == "Software\\Classes\\.xyz"
+        ]
+        self.assertEqual(remaining, [], f"另一個 hive 的關聯也應該被清掉，但還留著: {remaining}")
+
+    def test_does_not_delete_an_extension_key_that_points_at_another_app(self):
+        """擴大到兩個 hive 之後多出來的風險：`Software\\Classes\\<ext>` 這個
+        機碼本身不是「我們專屬」的——它的預設值指向某個 ProgID，那個 ProgID
+        隨時可能已經是另一個應用程式的（使用者事後改用別的程式開啟這個
+        副檔名）。ProgID 機碼本身（`AppFile<ext>`，見 prog_id() 的命名慣例）
+        確定是我們寫的，可以直接刪；副檔名機碼只有在它確實指著我們的
+        ProgID 時才刪。
+        """
+        self._seed_association(".xyz")
+        # 使用者事後把 .xyz 改成用另一個應用程式開啟
+        self.reg.set_hklm("Software\\Classes\\.xyz", {"": "SomeOtherApp.xyzfile"})
+
+        with mock.patch("file_assoc.ctypes.windll.shell32.SHChangeNotify"):
+            result = file_assoc.unregister([".xyz"], registry=self.reg)
+
+        self.assertTrue(result)
+        self.assertIsNotNone(
+            self.reg.hklm("Software\\Classes\\.xyz"),
+            "指向另一個應用程式的副檔名機碼不該被我們的解除安裝清掉",
+        )
+        self.assertEqual(self.reg.hklm("Software\\Classes\\.xyz")[""], "SomeOtherApp.xyzfile")
+        self.assertIsNone(
+            self.reg.hklm("Software\\Classes\\AppFilexyz"),
+            "我們自己的 ProgID 機碼仍然要清掉",
+        )
+
     def test_does_not_touch_user_choice_on_uninstall(self):
         """真實抓到的問題：unregister() 原本呼叫跟 register() 同一個
         _clear_stale_user_associations()——那個函式存在的理由是「讓剛
