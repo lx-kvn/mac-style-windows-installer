@@ -519,11 +519,18 @@ class InstallerAPI:
             raise
 
     def _create_shortcut(self, desktop=False, log=None):
-        """建立開始功能表或桌面捷徑（依賴 pywin32，未安裝時靜默略過）。
+        """建立開始功能表或桌面捷徑（依賴 pywin32），成功回傳 True。
 
-        跟其他登錄表寫入函式不同：捷徑建立失敗是刻意設計成「可忽略」，
-        不影響安裝整體成敗，所以這裡維持吞例外、回傳 False 的行為，
-        只是把回報管道從無效的 print() 換成真正會寫進 install_log.txt 的 log()。
+        跟其他登錄表寫入函式不同：捷徑建立失敗不影響安裝整體成敗，所以
+        這裡吞例外、回傳 False，不讓例外往外拋觸發整個安裝回滾。
+
+        回報管道的變化紀錄：最早是無效的 print()（這支 exe 是 --noconsole
+        編譯），後來改成會寫進 install_log.txt 的 log()。F05 之後呼叫端
+        還會把 False 併入回傳結果的 warnings，顯示在安裝完成畫面上——
+        「安裝成功但沒有捷徑」對使用者是看得見的差別（開始功能表裡找不到
+        這個應用程式），不該只留在使用者通常不會去看的紀錄檔裡。打包機器
+        沒裝 pywin32 時這裡會一律失敗，那個情境本來就會在打包工具的環境
+        檢查裡被標示出來（見 packaging_core.check_build_environment()）。
         """
         if not self.main_exe:
             return False
