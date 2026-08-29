@@ -411,6 +411,9 @@
         </div>
     </div>
 
+    <!-- 介面翻譯，三份畫面共用同一份（見該檔案的說明）。必須排在下面那段
+         之前：createI18n() 在那裡就會被呼叫。 -->
+    <script src="i18n.js"></script>
     <script>
         document.addEventListener('contextmenu', (e) => e.preventDefault());
 
@@ -866,19 +869,14 @@
         };
 
         let currentLang = "zh-TW";
-        function t(key, vars) {
-            let s = (I18N[currentLang] && I18N[currentLang][key]) || (I18N["zh-TW"][key] || key);
-            if (vars) { for (const k in vars) s = s.replaceAll(`{{${k}}}`, vars[k]); }
-            return s;
-        }
+        // 翻譯機制收在 ui/i18n.js，三份畫面共用（見該檔案的說明）。
+        const i18n = createI18n(I18N, "zh-TW");
+        function t(key, vars) { return i18n.t(key, vars); }
         function applyI18n(lang) {
-            currentLang = I18N[lang] ? lang : "zh-TW";
-            document.documentElement.setAttribute("lang", currentLang);
+            currentLang = i18n.apply(lang);
+            // 下面幾行是這個畫面獨有的收尾，不是被複製出來的重複，所以留在
+            // 這裡、在共用的 apply() 之後執行。
             document.getElementById("langSelect").value = currentLang;
-            document.querySelectorAll("[data-i18n]").forEach(el => { el.innerText = t(el.dataset.i18n); });
-            document.querySelectorAll("[data-i18n-placeholder]").forEach(el => { el.placeholder = t(el.dataset.i18nPlaceholder); });
-            document.querySelectorAll("[data-i18n-title]").forEach(el => { el.setAttribute("title", t(el.dataset.i18nTitle)); });
-            document.querySelectorAll("[data-i18n-html]").forEach(el => { el.innerHTML = t(el.dataset.i18nHtml); });
             // 深色模式按鈕文字不是靠 data-i18n（切換深色/淺色時另外自己控制文字），這裡補上同步
             const themeText = document.getElementById('theme-btn-text');
             themeText.innerText = document.body.classList.contains('dark') ? t('theme_light') : t('theme_dark');

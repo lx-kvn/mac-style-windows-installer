@@ -118,6 +118,9 @@ _REQUIRED_FILES = [
     # 缺了的話兩邊的畫面都還畫得出來，但圖示完全拖不動——編得出一顆
     # 跑起來才發現核心動作失效的安裝檔，所以列進編譯前的檢查。
     ("ui/drag_to_target.js", os.path.join("ui", "drag_to_target.js")),
+    # 介面翻譯，三份畫面都以 <script src> 載入它。缺了的話畫面上全部是
+    # data-i18n 的預設文字、按鈕也沒有文字，同樣是「編得出來但跑起來不對」。
+    ("ui/i18n.js", os.path.join("ui", "i18n.js")),
     ("splash_helper.py", "splash_helper.py"),
 ] + [(name, name) for name in _SHARED_ADD_DATA]
 
