@@ -45,6 +45,37 @@ SHARED_DEEP_MODULES = [
     "dependency_install.py", "version_compare.py", "upgrade.py",
 ]
 
+# `ui/` 底下「使用者可能自己換掉」的靜態資源。ensure_workspace_files() 只有
+# 這幾個是「缺少時才補、絕不覆蓋」，**其餘一律視為介面實作、無條件覆蓋**。
+#
+# 這個方向是反過來的，而且是有意的。原本的規則是一份寫死的覆蓋白名單
+# （`name in ("index.html", "uninstall.html")`），新增任何介面實作檔案
+# （例如把共用的前端邏輯抽成 ui/*.js）都會落進「只在缺少時才補」那一邊——
+# 重複使用同一個工作目錄的人，卡在那裡的舊版永遠不會被換掉，不管重新編譯
+# 幾次都一樣，而且沒有任何錯誤訊息。那正是這個函式說明文字裡以「【重要】」
+# 標記、已經修過一次的缺陷，換一道門重新出現。
+#
+# 白名單反轉之後，新增介面實作檔案不需要記得更新任何清單；真正需要維護的
+# 只剩「哪些是使用者的東西」，而那是一份本來就該被明確宣告、也很少變動的
+# 清單。
+USER_CUSTOMIZABLE_UI_ASSETS = frozenset({
+    "folder_icon.png",   # 安裝畫面右側的安裝目的地圖示
+    "trash_body.svg",    # 解除安裝畫面的垃圾桶（桶身）
+    "trash_lid.svg",     # 解除安裝畫面的垃圾桶（桶蓋，會開闔）
+})
+
+# 打包當下才產生、不存在於版本庫的 `ui/` 資源。`app_icon.png` 是
+# builder.build_all() 把開發者選的那張 PNG 複製過去的（見 builder.py 的
+# `temp_icon`），每次打包都會重新產生，而且內容取決於這次打包的設定。
+#
+# 它們不是「使用者可自訂的靜態資源」（那是指工作目錄裡被換掉、要保留的
+# 東西），也不是介面實作。獨立列出來是為了讓「ui/ 底下每個檔案都有明確
+# 歸屬」這件事成立——三份 HTML 都引用 app_icon.png，檢查引用完整性的測試
+# 必須知道它是預期在版本庫裡缺席的，否則會永遠紅燈。
+BUILD_GENERATED_UI_ASSETS = frozenset({
+    "app_icon.png",      # 安裝/解除安裝畫面左側的應用程式圖示
+})
+
 
 def get_resource_path(relative_path):
     """獲取資源絕對路徑，相容 .py 直接執行與 PyInstaller onefile 打包後的環境。
@@ -206,13 +237,14 @@ def ensure_workspace_files(workspace_dir):
                 dest = os.path.join(workspace_dir, "ui", name)
                 if not os.path.isfile(src):
                     continue
-                if name in ("index.html", "uninstall.html"):
-                    # 安裝端/解除安裝端介面實作，同樣不是使用者自訂項目，
-                    # 要跟著同步更新
-                    shutil.copy2(src, dest)
-                elif not os.path.exists(dest):
-                    # 其他靜態資源使用者可能自己換過（例如 folder_icon.png），
-                    # 只在缺少時才補上，不要覆蓋使用者的客製化。
+                if name in USER_CUSTOMIZABLE_UI_ASSETS:
+                    # 使用者可能自己換過的靜態資源，只在缺少時才補上，
+                    # 不要覆蓋使用者的客製化。
+                    if not os.path.exists(dest):
+                        shutil.copy2(src, dest)
+                else:
+                    # 其餘一律視為介面實作，跟 installer_core.py/uninstall.py
+                    # 一樣無條件覆蓋，隨時跟目前這顆 exe 內嵌的版本保持同步。
                     shutil.copy2(src, dest)
 
         return None

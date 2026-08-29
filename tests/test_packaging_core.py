@@ -235,6 +235,45 @@ class TestEnsureWorkspaceFiles(unittest.TestCase):
         with open(dest, "rb") as f:
             self.assertEqual(f.read(), b"NEW_ICON_BYTES")
 
+    def test_a_newly_added_ui_implementation_file_is_also_overwritten(self):
+        """F01：覆蓋策略原本是一份寫死的檔名白名單
+        （`name in ("index.html", "uninstall.html")`），之後新增的任何實作
+        檔案（例如把自繪拖曳抽成 `ui/drag_to_target.js`）都會落進「只在
+        缺少時才補」那個分支——重複使用同一個工作目錄的人，卡在那裡的舊版
+        永遠不會被換掉，而且沒有任何錯誤訊息。
+
+        這正是這個函式說明文字裡以「【重要】」標記、已經修過一次的同一個
+        缺陷，只是換一道門重新出現。根因是修正的形式是白名單，白名單天生
+        涵蓋不到之後新增的檔案。改成白名單反轉：**只有已知的使用者可自訂
+        靜態資源不覆蓋**，其餘一律覆蓋——新增實作檔案時不需要記得更新任何
+        清單。
+
+        這個測試用一個「目前不存在、將來才會加」的檔名，斷言的是規則本身
+        而不是某一份清單的內容。
+        """
+        with open(os.path.join(self.embedded_dir, "ui", "some_future_module.js"), "w") as f:
+            f.write("// NEW shared js")
+        os.makedirs(os.path.join(self.workspace_dir, "ui"))
+        with open(os.path.join(self.workspace_dir, "ui", "some_future_module.js"), "w") as f:
+            f.write("// STALE old shared js")
+
+        packaging_core.ensure_workspace_files(self.workspace_dir)
+
+        with open(os.path.join(self.workspace_dir, "ui", "some_future_module.js")) as f:
+            self.assertEqual(
+                f.read(), "// NEW shared js",
+                "新增的實作檔案沒有被覆蓋——工作目錄裡的舊版會靜默生效",
+            )
+
+    def test_the_customizable_asset_list_is_the_thing_that_is_declared(self):
+        """既然規則反轉了，「哪些是使用者可自訂的」就必須是一份明確宣告的
+        清單，而不是靠「沒列在覆蓋清單裡」推導出來的。"""
+        self.assertTrue(
+            hasattr(packaging_core, "USER_CUSTOMIZABLE_UI_ASSETS"),
+            "找不到明確宣告的可自訂資源清單",
+        )
+        self.assertIn("folder_icon.png", packaging_core.USER_CUSTOMIZABLE_UI_ASSETS)
+
     def test_copy_failure_returns_readable_error_message(self):
         with mock.patch.object(shutil, "copy2", side_effect=PermissionError("拒絕存取")):
             result = packaging_core.ensure_workspace_files(self.workspace_dir)
