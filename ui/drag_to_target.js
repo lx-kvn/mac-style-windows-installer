@@ -85,33 +85,16 @@ function createDragToTarget(config) {
         : { matches: false };
     function motionReduced() { return reduceMotionQuery.matches; }
 
-    // 彈簧：用「回彈 / 多快到位」兩個參數換算成一般的彈簧方程式。X 跟 Y
-    // 各自獨立一條，合成單一條會在兩軸速度不同時失去同步。
+    // 求解器收在 ui/spring.js（垃圾桶蓋的角度動畫也用同一份）。X 跟 Y 各自
+    // 獨立一條，合成單一條會在兩軸速度不同時失去同步。
     //
-    // 用彈簧而不是固定長度的 CSS 動畫，關鍵價值不是「看起來比較彈」，而是
-    // 它天生從「目前的位置」繼續算，所以可以在任何一刻被使用者接手：彈回
-    // 原位的途中再按下去，圖示會從當下所在位置繼續跟手，不會跳位。
-    function makeSpring() { return { x: 0, v: 0, target: 0 }; }
-    function stepSpring(sp, dt) {
-        const zeta = 1 - T.SPRING_BOUNCE;
-        const w = (2 * Math.PI) / T.SPRING_RESPONSE;
-        const k = w * w;
-        const c = 2 * zeta * w;
-        let remaining = dt;
-        while (remaining > 0) {
-            // 固定子步長積分，掉幀時彈簧才不會發散
-            const h = Math.min(remaining, 1 / 240);
-            sp.v += (-k * (sp.x - sp.target) - c * sp.v) * h;
-            sp.x += sp.v * h;
-            remaining -= h;
-        }
+    // SPRING_BOUNCE 是「回彈程度」，換算成阻尼比就是 1 - bounce：0 回彈 =
+    // 臨界阻尼（剛好不過衝），越大越晃。
+    function newSpring() {
+        return createSpring({ response: T.SPRING_RESPONSE, damping: 1 - T.SPRING_BOUNCE });
     }
-    function springAtRest(sp) {
-        return Math.abs(sp.x - sp.target) < 0.05 && Math.abs(sp.v) < 0.05;
-    }
-
-    const dragX = makeSpring();
-    const dragY = makeSpring();
+    const dragX = newSpring();
+    const dragY = newSpring();
     let dragActive = false;
     let dragPointerId = null;
     let dragStartPoint = { x: 0, y: 0 };
@@ -153,9 +136,9 @@ function createDragToTarget(config) {
     function dragLoop(now) {
         const dt = Math.min((now - dragLastFrame) / 1000, 1 / 30);
         dragLastFrame = now;
-        if (!dragActive) { stepSpring(dragX, dt); stepSpring(dragY, dt); }
+        if (!dragActive) { dragX.step(dt); dragY.step(dt); }
         renderDragPosition();
-        if (dragActive || !(springAtRest(dragX) && springAtRest(dragY))) {
+        if (dragActive || !(dragX.atRest() && dragY.atRest())) {
             dragRaf = requestAnimationFrame(dragLoop);
         } else {
             dragX.x = dragX.target; dragY.x = dragY.target;

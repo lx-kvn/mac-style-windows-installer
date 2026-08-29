@@ -434,6 +434,9 @@
         </div>
     </div>
 
+    <!-- 彈簧求解器，拖曳位移與垃圾桶蓋角度共用（見該檔案的說明）。必須排在
+         drag_to_target.js 之前：那份檔案會呼叫 createSpring()。 -->
+    <script src="spring.js"></script>
     <!-- 拖曳手勢的實作，跟解除安裝端共用同一份（見 ADR-0002 與該檔案的
          說明）。必須排在下面那段之前：createDragToTarget() 在那裡就會被
          呼叫。 -->

@@ -349,6 +349,9 @@
         <button class="nice-btn" onclick="onCancel()" data-i18n="btn_ok">了解</button>
     </div>
 
+    <!-- 彈簧求解器，拖曳位移與垃圾桶蓋角度共用（見該檔案的說明）。必須排在
+         drag_to_target.js 之前：那份檔案會呼叫 createSpring()。 -->
+    <script src="spring.js"></script>
     <!-- 拖曳手勢的實作，跟安裝端共用同一份（見 ADR-0002 與該檔案的說明）。
          必須排在下面那段之前：createDragToTarget() 在那裡就會被呼叫。 -->
     <script src="drag_to_target.js"></script>
@@ -454,10 +457,11 @@
            速度接續，不會卡頓、也不會在方向反轉時瞬間跳幀。 */
         function createAngleSpring(el, opts) {
             const { closedAngle = 0, openAngle = 9, openDamping = 0.85, closeDamping = 1.0, response = 0.35 } = opts || {};
-            let angle = closedAngle;
-            let velocity = 0;
-            let target = closedAngle;
-            let damping = closeDamping;
+            // 求解器收在 ui/spring.js，跟拖曳的位移動畫共用同一份（原本這裡
+            // 自己寫了一份，而且少了固定子步長積分——掉幀時角度會發散，
+            // 見該檔案的說明）。開闔用不同的阻尼：掀開時允許一點過衝比較
+            //有彈開的感覺，闔上時不過衝才像蓋子真的蓋回去。
+            const sp = createSpring({ response: response, damping: closeDamping, value: closedAngle });
             let rafId = null;
             let lastTime = null;
 
@@ -465,29 +469,21 @@
                 if (lastTime === null) lastTime = now;
                 const dt = Math.min((now - lastTime) / 1000, 1 / 30);
                 lastTime = now;
-                const angularFreq = (2 * Math.PI) / response;
-                const dampingCoeff = 2 * damping * angularFreq;
-                const springCoeff = angularFreq * angularFreq;
-                const displacement = angle - target;
-                const accel = -springCoeff * displacement - dampingCoeff * velocity;
-                velocity += accel * dt;
-                angle += velocity * dt;
-
-                if (Math.abs(displacement) > 0.05 || Math.abs(velocity) > 0.05) {
-                    el.style.transform = `rotate(${angle}deg)`;
+                sp.step(dt);
+                el.style.transform = `rotate(${sp.x}deg)`;
+                if (!sp.atRest()) {
                     rafId = requestAnimationFrame(step);
                 } else {
-                    angle = target;
-                    velocity = 0;
-                    el.style.transform = `rotate(${angle}deg)`;
+                    sp.settle();
+                    el.style.transform = `rotate(${sp.x}deg)`;
                     rafId = null;
                     lastTime = null;
                 }
             }
 
             function setOpen(open) {
-                target = open ? openAngle : closedAngle;
-                damping = open ? openDamping : closeDamping;
+                sp.target = open ? openAngle : closedAngle;
+                sp.damping = open ? openDamping : closeDamping;
                 if (rafId === null) { lastTime = null; rafId = requestAnimationFrame(step); }
             }
 
