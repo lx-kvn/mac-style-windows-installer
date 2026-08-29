@@ -2,7 +2,13 @@
 
 ## 狀態
 
-已接受（2026-08-29 實作完成，`ui/index.html`）。
+已接受（2026-08-29 實作完成於 `ui/index.html`）。
+
+**2026-08-30 補充**：實作抽成共用的 `ui/drag_to_target.js`，解除安裝端
+（`ui/uninstall.html`）也改用同一套。原本只有安裝端換掉，解除安裝端仍停在
+下面「背景」段描述的那個瀏覽器內建拖放上——本 ADR 的理由對它一字不改地
+成立（拖曳解除安裝跟拖曳安裝是同一個核心識別動作的兩端），等於這個決定
+當初只做了一半。詳見文末「後續」。
 
 ## 背景
 
@@ -63,16 +69,47 @@ Apple 的動量投射做法（依放開時的速度推算落點，再吸附到�
 
 ## 後果
 
-- 拖曳安裝的行為不再由瀏覽器與作業系統決定，所有時間與曲線都寫在
-  `ui/index.html` 開頭一組具名常數裡（`SPRING_BOUNCE`、`SPRING_RESPONSE`、
-  `PICKUP_SCALE`、`ABSORB_MS`、`SWALLOW_MS`、`HIT_TOLERANCE`、
-  `MAGNET_STRENGTH`），要微調直接改那裡。這些數值是在互動原型上反覆
-  拖曳調出來的觀感值，不是推導出來的常數，因此不寫進測試——把它們釘死
-  只會擋住往後的微調。
+- 拖曳安裝的行為不再由瀏覽器與作業系統決定，所有時間與曲線都寫在一組具名
+  常數裡（`SPRING_BOUNCE`、`SPRING_RESPONSE`、`PICKUP_SCALE`、`ABSORB_MS`、
+  `HIT_TOLERANCE`、`MAGNET_STRENGTH` 等），要微調直接改那裡。這些數值是在
+  互動原型上反覆拖曳調出來的觀感值，不是推導出來的常數，因此不寫進測試
+  ——把它們釘死只會擋住往後的微調。**位置**：這組常數當初在
+  `ui/index.html` 開頭，後續抽成共用實作之後改在
+  `ui/drag_to_target.js` 的 `DRAG_TUNING_DEFAULTS`；資料夾「吞一下」那組
+  （`SWALLOW_MS`／`SWALLOW_SQUASH`）是安裝端專屬的，仍留在 `ui/index.html`。
 - 測試改為守結構性契約（原生拖曳確實移除、走 pointer 事件並使用
   `setPointerCapture`、原位殘影存在、尊重 `prefers-reduced-motion`、
-  鍵盤與滑鼠共用同一個安裝觸發函式），見
-  [`tests/test_ui_accessibility.py`](../../tests/test_ui_accessibility.py)。
+  鍵盤與滑鼠共用同一個觸發函式），見
+  [`tests/test_ui_accessibility.py`](../../tests/test_ui_accessibility.py)
+  與 [`tests/test_ui_uninstall_drag.py`](../../tests/test_ui_uninstall_drag.py)。
 - 手感本身無法自動化驗證。模擬的滑鼠與鍵盤事件送不進 pywebview 的
   WebView2 內容區（`.claude/skills/run-installer-gui` 的說明也記載了
   同樣的限制），所以每次調整都必須由人在真實視窗上實際拖過才算驗證完成。
+
+## 後續（2026-08-30）：解除安裝端改用同一套
+
+原本這個決定只套用在安裝端。解除安裝端的圖示拖到垃圾桶那個動作仍然掛著
+`draggable="true"` 與 `dragstart`／`dragenter`／`dragleave`／`drop`，也就是
+上面「背景」段落描述、並且已經被否定掉的那套機制。
+
+實作抽成 `ui/drag_to_target.js`（彈簧求解器再往下抽成 `ui/spring.js`），
+兩端共用。兩端真正不同的只有目的地自己的回應，用 callback 參數化：
+
+- `onHoverChange` — 懸停時目的地做什麼（安裝端只有 CSS class，解除安裝端
+  還要掀開垃圾桶蓋）
+- `onAbsorb` — 命中時目的地的回應動畫（資料夾吞一下 vs 垃圾桶闔蓋）
+
+上面四個附帶決定（自己寫彈簧、用彈簧而非固定長度動畫、重疊即命中、不另外
+提供跳過拖曳的按鈕）原樣適用於兩端，沒有為解除安裝端另開例外。
+
+**同時補上一個完全缺席的無障礙缺口**：解除安裝端的圖示原本沒有 `tabindex`、
+沒有 `role`、沒有任何鍵盤事件——整個解除安裝介面完全無法用鍵盤操作。依上面
+的決定四，拖曳是那個畫面唯一的觸發點，所以那不是「少一條捷徑」，是那個
+介面對鍵盤使用者完全不可用。現在兩端一致：滑鼠與鍵盤走同一個觸發函式。
+
+**另外新增的一條規則**：動作進行中與完成後，圖示不可再被拖曳。這來自一個
+真實抓到的缺陷——使用者在成功畫面出現之前抓住圖示、畫面切過去之後再放到
+目的地上，會把動作觸發第二次。覆蓋層或隱藏畫面都擋不住這種拖曳，因為已經
+`setPointerCapture()` 的事件完全不經過命中測試，所以顯示結果畫面時要主動
+呼叫共用模組的 `cancel()` 終結它。這一條在 ADR 當初寫下時不存在，是自繪
+拖曳（指標捕獲）帶來的新責任。
