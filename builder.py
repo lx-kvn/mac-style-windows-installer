@@ -168,7 +168,7 @@ def build_all(
     restart_explorer_on_update=False, no_admin_install=False, pre_install_script="", post_install_script="",
     custom_dependencies=None, bundle_dependencies=None, signing=None, custom_install_dir="",
     windows_service=None, scheduled_task=None, dependencies_min_version=None,
-    create_restore_point_before_install=False, install_password_env="",
+    create_restore_point_before_install=False, install_password_env="", install_password="",
     workspace_dir=".", progress_callback=None,
 ):
     """流水線：產生配置 -> 編譯反安裝檔 -> 編譯主安裝檔
@@ -206,6 +206,14 @@ def build_all(
     local_appdata_files = local_appdata_files or []
     custom_dependencies = custom_dependencies or []
     bundle_dependencies = bundle_dependencies or []
+
+    # 安裝密碼有兩個可能的來源（見 docs/adr/0004）：配置精靈直接輸入的
+    # install_password 參數，或 install_password_env 指定的環境變數。在這裡
+    # 解析成單一的 install_password_value，下面整段流程只認這一個值——來源
+    # 不同不該讓打包結果分岔。呼叫端（packaging_core 的驗證）已經確認過
+    # 兩者不會同時給、且環境變數當下確實有值。
+    install_password_value = install_password or os.environ.get(install_password_env, "")
+    password_protected = bool(install_password or install_password_env)
     windows_service = windows_service or {}
     scheduled_task = scheduled_task or {}
     dependencies_min_version = dependencies_min_version or {}
@@ -273,7 +281,9 @@ def build_all(
         "create_restore_point_before_install": bool(create_restore_point_before_install),
         "pre_install_script": pre_install_embedded,
         "post_install_script": post_install_embedded,
-        "password_protected": bool(install_password_env),
+        # 只留「這份安裝檔有沒有密碼保護」這個布林值。密碼本身絕對不能寫進
+        # 這份設定檔——它會被打包進安裝檔、跟著送到每一位終端使用者手上。
+        "password_protected": password_protected,
     }
     config_path = os.path.join(workspace_dir, CONFIG_FILE_NAME)
     with open(config_path, "w", encoding="utf-8") as f:
@@ -385,17 +395,15 @@ def build_all(
     temp_doc_icons = []
     temp_scripts = []
     temp_dependency_files = []
-    # 安裝密碼保護（見 CONTEXT.md「安裝密碼保護」一節）：有設定
-    # install_password_env 時，app_dir 整包加密成一份檔案再內嵌，
-    # 不能像沒設定密碼保護時那樣直接把明文 app_dir 塞進 --add-data，
-    # 不然密碼保護形同虛設。這份暫存加密檔跟其他暫存產物一樣，在
-    # 下面的 finally 區塊統一清掉。
+    # 安裝密碼保護（見 CONTEXT.md「安裝密碼保護」一節）：有設定密碼時，
+    # app_dir 整包加密成一份檔案再內嵌，不能像沒設定密碼保護時那樣直接把
+    # 明文 app_dir 塞進 --add-data，不然密碼保護形同虛設。這份暫存加密檔
+    # 跟其他暫存產物一樣，在下面的 finally 區塊統一清掉。
     temp_encrypted_payload = None
     try:
-        if install_password_env:
-            password = os.environ.get(install_password_env, "")
+        if password_protected:
             temp_encrypted_payload = os.path.join(workspace_dir, "app_contents.enc")
-            install_encryption.encrypt_directory(app_dir, temp_encrypted_payload, password)
+            install_encryption.encrypt_directory(app_dir, temp_encrypted_payload, install_password_value)
             cmd.append(f"--add-data={temp_encrypted_payload};.")
         else:
             cmd.append(f"--add-data={app_dir};app_contents")

@@ -255,8 +255,15 @@ class ConfigAPI:
         """掃描目前選定的 app_dir，回傳裡面所有 .exe 的相對路徑，供前端下拉選單選擇主執行檔"""
         return [p for p in self.list_app_dir_files() if p.lower().endswith(".exe")]
 
-    def start_pack(self, data):
-        """接收前端表單資料，執行嚴格驗證並啟動背景線程打包"""
+    def start_pack(self, data, install_password=""):
+        """接收前端表單資料，執行嚴格驗證並啟動背景線程打包。
+
+        install_password：使用者在「啟用安裝密碼保護」區塊選擇「直接輸入
+        密碼」時填的那組密碼。它是一個獨立參數、不在 `data` 裡，理由見
+        docs/adr/0004——`data` 的欄位集合就是設定檔的格式，把密碼放進去
+        等於同時讓設定檔能寫明文密碼。同理它也不會被寫進 pack_data，而是
+        一路以獨立參數傳到 builder.build_all()。
+        """
         env = check_build_environment()
         if not env["ready"]:
             missing = []
@@ -274,6 +281,7 @@ class ConfigAPI:
 
         pack_data, error = validate_and_build_pack_data(
             data, self.app_dir, self.png_path, self.ico_path, self.doc_icon_path,
+            has_inline_password=bool(install_password),
         )
         if error:
             return {"status": "error", "message": error}
@@ -284,11 +292,13 @@ class ConfigAPI:
             return {"status": "error", "message": f"環境準備失敗：<br>{prep_error}"}
         pack_data["workspace_dir"] = workspace_dir
 
-        threading.Thread(target=self._run_pack_thread, args=(pack_data,)).start()
+        threading.Thread(
+            target=self._run_pack_thread, args=(pack_data, install_password),
+        ).start()
         return {"status": "processing", "message": "驗證通過，開始編譯流程。"}
 
-    def _run_pack_thread(self, data):
-        """在背景線程中安全執行打包"""
+    def _run_pack_thread(self, data, install_password=""):
+        """在背景線程中安全執行打包。install_password 見 start_pack()。"""
 
         def progress_handler(percent, status_msg, cap=99, time_constant=15):
             safe_msg = json.dumps(status_msg, ensure_ascii=False)
@@ -333,6 +343,8 @@ class ConfigAPI:
                 dependencies_min_version=data.get("dependencies_min_version", {}),
                 create_restore_point_before_install=data.get("create_restore_point_before_install", False),
                 install_password_env=data.get("install_password_env", ""),
+                # 密碼本身來自獨立參數，不是 data 的一個欄位（見 docs/adr/0004）。
+                install_password=install_password,
                 workspace_dir=workspace_dir,
                 progress_callback=progress_handler,
             )

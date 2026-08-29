@@ -76,8 +76,11 @@
         h2 { margin: 0 0 24px 0; font-size: 22px; font-weight: 600; color: var(--text-main); letter-spacing: -0.02em; }
         .form-group { margin-bottom: 20px; }
         label { display: block; font-size: 12px; font-weight: 500; margin-bottom: 8px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
-        input[type="text"], textarea, select { width: 100%; padding: 12px 14px; border: 1px solid var(--border-color); border-radius: 8px; background-color: var(--input-bg); font-size: 14px; color: var(--text-main); font-family: inherit; transition: border-color 0.2s, background-color 0.2s, color 0.2s; }
-        input[type="text"]:focus, textarea:focus, select:focus { outline: none; border-color: var(--text-muted); }
+        /* password 跟 text 套同一組樣式，不只是為了長相一致：安裝密碼那格的
+           「顯示密碼」切換是直接改 input 的 type，只選 text 的話欄位會在切換
+           當下從窄變寬跳一下。 */
+        input[type="text"], input[type="password"], textarea, select { width: 100%; padding: 12px 14px; border: 1px solid var(--border-color); border-radius: 8px; background-color: var(--input-bg); font-size: 14px; color: var(--text-main); font-family: inherit; transition: border-color 0.2s, background-color 0.2s, color 0.2s; }
+        input[type="text"]:focus, input[type="password"]:focus, textarea:focus, select:focus { outline: none; border-color: var(--text-muted); }
         textarea { resize: vertical; min-height: 80px; }
         .checkbox-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
         .checkbox-row input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; }
@@ -319,6 +322,27 @@
         </div>
 
         <div class="form-group">
+            <div class="checkbox-row"><input type="checkbox" id="need_install_password" onchange="toggleInstallPasswordFields(this.checked)"><label for="need_install_password" data-i18n="label_install_password">啟用安裝密碼保護（選填）</label></div>
+            <div id="install_password_section" style="display: none; margin-top: 8px;">
+                <div class="checkbox-row"><input type="radio" name="install_password_mode" id="install_password_mode_inline" value="inline" checked onchange="onInstallPasswordModeChange()"><label for="install_password_mode_inline" data-i18n="label_pw_mode_inline">直接輸入密碼</label></div>
+                <div class="checkbox-row"><input type="radio" name="install_password_mode" id="install_password_mode_env" value="env" onchange="onInstallPasswordModeChange()"><label for="install_password_mode_env" data-i18n="label_pw_mode_env">用環境變數存放密碼</label></div>
+
+                <div id="install_password_inline_row" style="margin-top: 8px;">
+                    <label data-i18n="label_pw_inline">安裝密碼</label>
+                    <input type="password" id="install_password" placeholder="輸入這份安裝檔要用的密碼" data-i18n-placeholder="ph_pw_inline">
+                    <div class="checkbox-row" style="margin-top: 6px;"><input type="checkbox" id="install_password_reveal" onchange="toggleInstallPasswordReveal(this.checked)"><label for="install_password_reveal" data-i18n="label_pw_reveal">顯示密碼</label></div>
+                </div>
+
+                <div id="install_password_env_row" style="display: none; margin-top: 8px;">
+                    <label data-i18n="label_pw_env">安裝密碼的環境變數名稱</label>
+                    <input type="text" id="install_password_env" placeholder="例如: MSWI_INSTALL_PASSWORD" data-i18n-placeholder="ph_pw_env">
+                </div>
+
+                <span class="note" data-i18n="note_install_password">打包時把你的應用程式檔案整包加密，終端使用者要先輸入正確密碼才能繼續安裝（這道關卡出現在 EULA 之前）。用途是防止安裝檔被誤傳、亂用，不是拿來擋有心人硬破解的機制，不要用它保護真正機密的內容。「直接輸入密碼」只有這個畫面可以用，密碼不會被寫進任何檔案；需要重複打包或自動化流程，請改用環境變數那個選項，設定檔裡只會記下變數名稱。密碼打錯工具無法幫你檢查，做出來的安裝檔會沒有人打得開，送出前請用「顯示密碼」確認一次。</span>
+            </div>
+        </div>
+
+        <div class="form-group">
             <div class="checkbox-row"><input type="checkbox" id="enable_signing" onchange="toggleSigningFields(this.checked)"><label for="enable_signing" data-i18n="label_enable_signing">啟用數位簽章自動化</label></div>
             <div id="signing_section" style="display: none; margin-top: 8px;">
                 <div class="file-selector">
@@ -437,7 +461,8 @@
                 改成只把它所在的目錄加進 PATH，避免整個安裝目錄下所有 exe 都變成全域可呼叫。
 
                 <h4>安裝端實際會做的事</h4>
-                單一實例鎖、EULA（有設定的話，語言依系統自動偵測）、覆蓋安裝偵測（偵測到已安裝版本會比較版本新舊，
+                單一實例鎖、安裝密碼關卡（有設定的話，出現在 EULA 之前）、
+                EULA（有設定的話，語言依系統自動偵測）、覆蓋安裝偵測（偵測到已安裝版本會比較版本新舊，
                 版本較新才會問是否更新，版本相同或較舊會提示使用者）、相依元件提示、磁碟空間檢查、
                 執行中偵測、真實複製進度、複製後 checksum 完整性驗證、失敗自動回滾、
                 登錄表寫入、捷徑、檔案關聯、PATH、安裝清單與安裝紀錄。安裝介面本身的語言（按鈕、
@@ -516,7 +541,8 @@
                 the install directory doesn't become globally callable.
 
                 <h4>What the installer actually does</h4>
-                Single-instance lock, EULA (if configured, language auto-detected), upgrade detection
+                Single-instance lock, install password gate (if configured, shown before the EULA),
+                EULA (if configured, language auto-detected), upgrade detection
                 (compares version numbers and only offers an update when the new version is actually newer;
                 same or older versions prompt the user), dependency warnings, disk space check, running-process
                 detection, real copy progress, post-copy checksum verification, automatic rollback on failure,
@@ -652,6 +678,15 @@
                 label_task_trigger: "觸發條件",
                 opt_trigger_onlogon: "使用者登入時", opt_trigger_onstart: "系統開機時",
                 note_scheduled_task: "安裝時會用 schtasks.exe 註冊這個排程工作；解除安裝時自動移除。",
+                label_install_password: "啟用安裝密碼保護（選填）",
+                label_pw_mode_inline: "直接輸入密碼",
+                label_pw_mode_env: "用環境變數存放密碼",
+                label_pw_inline: "安裝密碼",
+                ph_pw_inline: "輸入這份安裝檔要用的密碼",
+                label_pw_reveal: "顯示密碼",
+                label_pw_env: "安裝密碼的環境變數名稱",
+                ph_pw_env: "例如: MSWI_INSTALL_PASSWORD",
+                note_install_password: "打包時把你的應用程式檔案整包加密，終端使用者要先輸入正確密碼才能繼續安裝（這道關卡出現在 EULA 之前）。用途是防止安裝檔被誤傳、亂用，不是拿來擋有心人硬破解的機制，不要用它保護真正機密的內容。「直接輸入密碼」只有這個畫面可以用，密碼不會被寫進任何檔案；需要重複打包或自動化流程，請改用環境變數那個選項，設定檔裡只會記下變數名稱。密碼打錯工具無法幫你檢查，做出來的安裝檔會沒有人打得開，送出前請用「顯示密碼」確認一次。",
                 label_enable_signing: "啟用數位簽章自動化",
                 btn_browse_cert: "選擇 PFX 憑證",
                 label_cert_password_env: "憑證密碼的環境變數名稱",
@@ -785,6 +820,15 @@
                 label_task_trigger: "Trigger",
                 opt_trigger_onlogon: "On user logon", opt_trigger_onstart: "On system startup",
                 note_scheduled_task: "Registers this scheduled task via schtasks.exe during install; removed automatically on uninstall.",
+                label_install_password: "Require a password to install (optional)",
+                label_pw_mode_inline: "Type the password here",
+                label_pw_mode_env: "Read it from an environment variable",
+                label_pw_inline: "Install password",
+                ph_pw_inline: "The password this installer will require",
+                label_pw_reveal: "Show password",
+                label_pw_env: "Environment variable holding the install password",
+                ph_pw_env: "e.g. MSWI_INSTALL_PASSWORD",
+                note_install_password: "Encrypts your application files inside the installer; the end user must enter the correct password before installation can continue (this gate appears before the EULA). It exists to stop the installer from being passed around and used by mistake — it is not built to withstand someone determined to break it, so don't use it to protect genuinely sensitive content. \"Type the password here\" is only available in this window and the password is never written to any file; for repeatable or automated builds use the environment variable option instead, which records only the variable name in the config file. The tool cannot check whether you mistyped the password — a typo produces an installer nobody can open — so use \"Show password\" to confirm it before you build.",
                 label_enable_signing: "Enable code-signing automation",
                 btn_browse_cert: "Choose PFX certificate",
                 label_cert_password_env: "Environment variable holding the cert password",
@@ -1251,6 +1295,42 @@
         function toggleSigningFields(checked) {
             document.getElementById('signing_section').style.display = checked ? 'block' : 'none';
         }
+
+        // ---------------- 安裝密碼保護 ----------------
+        // 兩種填法（見 docs/adr/0004）：直接輸入密碼只有這個畫面能用，密碼
+        // 以獨立參數送出、不進表單資料，因為表單資料的欄位集合就是設定檔的
+        // 格式；環境變數那條路則是設定檔唯一支援的方式。
+        function toggleInstallPasswordFields(checked) {
+            document.getElementById('install_password_section').style.display = checked ? 'block' : 'none';
+        }
+
+        function onInstallPasswordModeChange() {
+            const inline = document.getElementById('install_password_mode_inline').checked;
+            document.getElementById('install_password_inline_row').style.display = inline ? 'block' : 'none';
+            document.getElementById('install_password_env_row').style.display = inline ? 'none' : 'block';
+        }
+
+        // 工具沒有辦法驗證使用者有沒有打錯密碼（沒有可以比對的來源），打錯的
+        // 後果是產出一顆沒有人打得開的安裝檔，而且通常要到發布之後才會發現。
+        // 讓使用者自己看一眼是唯一的緩解措施——這個功能的定位本來就不是防
+        // 有心人偷看，硬遮到底反而只換來打錯的風險。
+        function toggleInstallPasswordReveal(checked) {
+            document.getElementById('install_password').type = checked ? 'text' : 'password';
+        }
+
+        // 送出時才讀，讓「切到環境變數模式」這件事本身就代表不使用直接輸入的
+        // 密碼——不必額外清空欄位、也不會因為使用者切來切去而送出殘留內容。
+        function getInlineInstallPassword() {
+            if (!document.getElementById('need_install_password').checked) return '';
+            if (!document.getElementById('install_password_mode_inline').checked) return '';
+            return document.getElementById('install_password').value;
+        }
+
+        function getInstallPasswordEnv() {
+            if (!document.getElementById('need_install_password').checked) return '';
+            if (document.getElementById('install_password_mode_inline').checked) return '';
+            return document.getElementById('install_password_env').value.trim();
+        }
         async function browseCertFile() {
             const path = await pywebview.api.select_cert_file();
             if (path) document.getElementById('cert_path_display').innerText = path;
@@ -1501,6 +1581,12 @@
                 post_install_script: document.getElementById('post_install_script_input').value.trim(),
                 custom_dependencies: collectCustomDependencies(),
                 create_restore_point_before_install: document.getElementById('create_restore_point').checked,
+                // 勾選框的狀態要送出去，後端才分得出「沒啟用」跟「啟用了但
+                // 兩種填法都留空」——後者要明白報錯，不能默默做出一顆沒有
+                // 密碼保護的安裝檔。密碼本身不在這包資料裡，見下面的
+                // start_pack() 呼叫與 docs/adr/0004。
+                need_install_password: document.getElementById('need_install_password').checked,
+                install_password_env: getInstallPasswordEnv(),
                 windows_service: document.getElementById('need_windows_service').checked ? {
                     service_name: document.getElementById('service_name').value.trim(),
                     exe_relative_path: document.getElementById('service_exe_relative_path').value,
@@ -1517,7 +1603,10 @@
                     timestamp_url: document.getElementById('timestamp_url').value.trim(),
                 } : {},
             };
-            const result = await pywebview.api.start_pack(data);
+            // 密碼以第二個參數送出，不是 data 的一個欄位——data 的欄位集合
+            // 就是設定檔的格式，把密碼放進去等於同時讓設定檔能寫明文密碼
+            // （見 docs/adr/0004）。
+            const result = await pywebview.api.start_pack(data, getInlineInstallPassword());
             if (result.status === 'error') { showErrorModal(result.message); }
             else if (result.status === 'processing') {
                 document.getElementById('progressOverlay').style.display = 'flex';

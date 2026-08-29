@@ -527,6 +527,84 @@ class TestConfigHasNoDeadFields(BuildAllTestBase):
         self.assertNotIn("display_name", captured)
 
 
+class TestInstallPasswordSources(BuildAllTestBase):
+    """安裝密碼可以從兩個來源進來（見 docs/adr/0004）：配置精靈直接輸入的
+    `install_password` 參數，或 `install_password_env` 指定的環境變數。
+    兩者對打包結果的影響必須完全相同——差別只在密碼從哪裡取得，加密與
+    設定檔內容不該因為來源不同而分岔。
+    """
+
+    def _build_and_capture(self, **overrides):
+        captured = {"config": {}, "encrypt_calls": [], "cmd": []}
+
+        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+            if "uninstall.py" in cmd:
+                os.makedirs(self.dist_dir, exist_ok=True)
+                with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
+                    f.write(b"FAKE")
+            else:
+                captured["cmd"] = list(cmd)
+                config_path = os.path.join(self.workspace_dir, "installer_config.json")
+                with open(config_path, "r", encoding="utf-8") as f:
+                    captured["config"] = json.load(f)
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        def fake_encrypt(src_dir, dest_path, password):
+            captured["encrypt_calls"].append((src_dir, dest_path, password))
+            with open(dest_path, "wb") as f:
+                f.write(b"ENCRYPTED")
+
+        with mock.patch("builder.install_encryption.encrypt_directory", side_effect=fake_encrypt):
+            self._call_build_all(run_side_effect=fake_run, **overrides)
+        return captured
+
+    def test_inline_password_is_used_for_encryption(self):
+        captured = self._build_and_capture(install_password="hunter2")
+        self.assertEqual(len(captured["encrypt_calls"]), 1)
+        self.assertEqual(captured["encrypt_calls"][0][2], "hunter2")
+        self.assertTrue(captured["config"]["password_protected"])
+
+    def test_env_var_password_is_used_for_encryption(self):
+        with mock.patch.dict(os.environ, {"MY_PW_ENV": "from-the-env"}):
+            captured = self._build_and_capture(install_password_env="MY_PW_ENV")
+        self.assertEqual(len(captured["encrypt_calls"]), 1)
+        self.assertEqual(captured["encrypt_calls"][0][2], "from-the-env")
+        self.assertTrue(captured["config"]["password_protected"])
+
+    def test_both_sources_produce_the_same_packaging_shape(self):
+        """來源不同不該讓打包結果分岔：兩者都改成內嵌加密檔，都不再把明文
+        的來源資料夾塞進 --add-data。"""
+        inline = self._build_and_capture(install_password="hunter2")
+        with mock.patch.dict(os.environ, {"MY_PW_ENV": "hunter2"}):
+            from_env = self._build_and_capture(install_password_env="MY_PW_ENV")
+
+        for captured in (inline, from_env):
+            self.assertTrue(
+                any("app_contents.enc" in arg for arg in captured["cmd"]),
+                "加密後的檔案應該被內嵌",
+            )
+            self.assertFalse(
+                any(f"--add-data={self.app_dir};app_contents" == arg for arg in captured["cmd"]),
+                "有密碼保護時不能再把明文的來源資料夾塞進去，不然保護形同虛設",
+            )
+
+    def test_no_password_leaves_the_payload_unencrypted(self):
+        captured = self._build_and_capture()
+        self.assertEqual(captured["encrypt_calls"], [])
+        self.assertFalse(captured["config"]["password_protected"])
+        self.assertTrue(
+            any(f"--add-data={self.app_dir};app_contents" == arg for arg in captured["cmd"]),
+        )
+
+    def test_the_password_is_not_written_into_the_config(self):
+        """`installer_config.json` 會被打包進安裝檔、跟著送到每一位終端
+        使用者手上。密碼絕對不能出現在裡面——只留一個「這份安裝檔有沒有
+        密碼保護」的布林值。"""
+        captured = self._build_and_capture(install_password="hunter2")
+        self.assertNotIn("hunter2", json.dumps(captured["config"], ensure_ascii=False))
+        self.assertNotIn("install_password", captured["config"])
+
+
 class TestTempArtifactCleanupOnFailure(BuildAllTestBase):
     """真實抓到的問題（F19）：暫存產物（doc_icon.ico、內嵌的前後置腳本、
     下載下來要內嵌的相依元件安裝檔）原本只有在函式順利跑到最後一段

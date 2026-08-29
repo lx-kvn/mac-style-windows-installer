@@ -99,5 +99,93 @@ class TestAdminOnlyOptionsReactToInstallLocation(unittest.TestCase):
             self.assertIn("note_admin_only_disabled", block.group(1))
 
 
+class TestInstallPasswordBlock(unittest.TestCase):
+    """安裝密碼保護的欄位（F14 的 GUI 部分，設計見 docs/adr/0004）。
+
+    這個區塊有兩種填法，只有一種能寫進設定檔。畫面上最容易在後續修改中
+    走偏的是那條界線：只要有人把直接輸入的密碼塞回送出的表單資料裡，設定檔
+    就跟著能寫明文密碼了，而且不會有任何地方報錯。這裡把那條界線釘住。
+    """
+
+    def setUp(self):
+        self.content = _read()
+
+    def test_has_the_enable_checkbox_and_section(self):
+        self.assertIn('id="need_install_password"', self.content)
+        self.assertIn('id="install_password_section"', self.content)
+
+    def test_has_both_input_modes(self):
+        self.assertIn('id="install_password_mode_inline"', self.content)
+        self.assertIn('id="install_password_mode_env"', self.content)
+        self.assertIn('id="install_password"', self.content)
+        self.assertIn('id="install_password_env"', self.content)
+
+    def test_inline_mode_is_the_default(self):
+        tag = re.search(r'<input[^>]*id="install_password_mode_inline"[^>]*>', self.content)
+        self.assertIsNotNone(tag, "找不到「直接輸入密碼」那個選項")
+        self.assertIn("checked", tag.group(0))
+
+    def test_the_password_input_is_masked(self):
+        tag = re.search(r'<input[^>]*id="install_password"[^>]*>', self.content)
+        self.assertIsNotNone(tag, "找不到密碼輸入框")
+        self.assertIn('type="password"', tag.group(0))
+
+    def test_has_a_reveal_toggle(self):
+        """工具無法驗證使用者有沒有打錯，打錯的後果是產出一顆沒人打得開的
+        安裝檔。看得到自己打了什麼是唯一的緩解措施。"""
+        self.assertIn('id="install_password_reveal"', self.content)
+
+    def test_the_password_is_sent_as_a_separate_argument_not_a_form_field(self):
+        """密碼必須以 start_pack() 的第二個參數送出，不能變成表單資料裡的
+        一個欄位——那包資料的欄位集合就是設定檔的格式。"""
+        call = re.search(r"pywebview\.api\.start_pack\(([^)]*)\)", self.content)
+        self.assertIsNotNone(call, "找不到 start_pack 的呼叫")
+        self.assertIn(",", call.group(1), "start_pack 應該收兩個參數")
+
+        payload = re.search(
+            r"async function submitForm\(\).*?const data = \{(.*?)\n            \};",
+            self.content, re.DOTALL,
+        )
+        self.assertIsNotNone(payload, "找不到送出的表單資料")
+        # 比對整個欄位名（行首起算），不能只找子字串——`need_install_password:`
+        # 跟 `install_password_env:` 都包含 `install_password`，兩個都是應該
+        # 存在的欄位。
+        self.assertIsNone(
+            re.search(r"\n\s*install_password:", payload.group(1)),
+            "密碼不該是表單資料的一個欄位——那等於讓設定檔也能寫明文密碼",
+        )
+        self.assertIn(
+            "need_install_password:", payload.group(1),
+            "勾選框的狀態要送出去，後端才能分辨「沒啟用」跟「啟用了但沒填」",
+        )
+
+    def test_strings_exist_in_both_languages(self):
+        for lang in ("zh-TW", "en"):
+            block = re.search(
+                r'"' + re.escape(lang) + r'"\s*:\s*\{(.*?)\n            \},?\n',
+                self.content, re.DOTALL,
+            )
+            self.assertIsNotNone(block, f"找不到 {lang} 的 I18N 區塊")
+            for key in ("label_install_password", "note_install_password"):
+                self.assertIn(key, block.group(1), f"{lang} 缺少 {key}")
+
+    def test_the_note_states_what_this_is_not_for(self):
+        """CONTEXT.md 把這個功能定位成存取控制，明確不是防範暴力破解的資安
+        機制。畫面上要講出來，不然「有密碼＝很安全」這個直覺沒有任何地方
+        會被修正，定位就只活在文件裡。"""
+        note = re.search(r'note_install_password:\s*"(.*?)",\n', self.content, re.DOTALL)
+        self.assertIsNotNone(note, "找不到中文說明文字")
+        self.assertIn("破解", note.group(1))
+
+    def test_the_help_modal_covers_it(self):
+        """說明彈窗是拿來回答「這欄到底是幹嘛的」，新功能不進去，那份清單
+        自己就變成會過期的東西。這裡只認彈窗內文，不是整份檔案任一處。"""
+        start = self.content.find("HELP_MODAL_BODY")
+        end = self.content.find("const I18N", start)
+        self.assertNotEqual(start, -1, "找不到說明彈窗內文")
+        body = self.content[start:end]
+        self.assertIn("密碼", body)
+
+
 if __name__ == "__main__":
     unittest.main()

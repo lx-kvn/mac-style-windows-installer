@@ -111,7 +111,22 @@ python builder_cli.py pack --config app.json [--其他 flag 覆蓋個別欄位..
 | `scheduled_task` | （只能透過 JSON） | 否 | 安裝時額外把應用程式的某支執行檔註冊成排程工作：`{"task_name": "工作名稱", "exe_relative_path": "相對於 app_dir 的執行檔路徑", "trigger": "schtasks /sc 支援的觸發條件，預設 onlogon"}`。`task_name`/`exe_relative_path` 要嘛兩個都填，要嘛都留空；`exe_relative_path` 指定的檔案必須真的存在於 `app_dir`。解除安裝時會自動移除這個排程工作。 |
 | `create_restore_point_before_install` | （只能透過 JSON） | 否 | 開啟後，安裝流程開始寫入檔案前，先嘗試建立一個系統還原點，讓使用者萬一想反悔可以透過 Windows 內建的系統還原整個復原（不是這個工具自己的解除安裝功能，是作業系統層級的還原點）。Windows 8 以後同一天內只會真的建立一次還原點（節流限制），短時間內重複安裝不保證每次都產生新的還原點；建立失敗（例如系統還原功能被使用者關閉）不會中止安裝，只是沒有還原點可用。 |
 | `dependencies_min_version` | （只能透過 JSON） | 否 | 只對內建相依元件（`vcredist_x64`/`dotnet_desktop`）額外要求最低版本，例如 `{"dotnet_desktop": "8.0.0"}`；鍵一定要同時列在 `dependencies` 裡（沒啟用等於這個設定不會生效），也只能是內建的兩個 key（自訂相依元件的版本門檻改用 `custom_dependencies` 裡對應項目的 `registry_check.min_version`）。已安裝但版本低於這裡設定的門檻，會被當成「未安裝」，一樣走 `dependencies` 的偵測/自動安裝流程。 |
-| `install_password_env` | `--install-password-env` | 否 | 設定後，打包出來的安裝檔會把應用程式檔案整包加密，使用者安裝時要先輸入正確密碼（畫面出現在 EULA 之前）才能繼續，密碼錯誤不限制重試次數。密碼本身不放在設定檔裡，只存存放密碼的環境變數名稱（比照 `signing.cert_password_env` 的做法）；打包當下這個環境變數必須有值。靜默安裝（`/S`）另外用 `/PASSWORD=密碼` 帶密碼，缺少或密碼錯誤會直接中止並回傳非 0 exit code，不會跳出任何視窗。定位是存取控制（防止安裝檔被誤傳/亂用），不是防範有心人暴力破解的資安機制。見 CONTEXT.md「安裝密碼保護」一節。 |
+| `install_password_env` | `--install-password-env` | 否 | 設定後，打包出來的安裝檔會把應用程式檔案整包加密，使用者安裝時要先輸入正確密碼（畫面出現在 EULA 之前）才能繼續，密碼錯誤不限制重試次數。密碼本身不放在設定檔裡，只存存放密碼的環境變數名稱（比照 `signing.cert_password_env` 的做法）；打包當下這個環境變數必須有值，而且要裝好 `cryptography` 套件。靜默安裝（`/S`）另外用 `/PASSWORD=密碼` 帶密碼，缺少或密碼錯誤會直接中止並回傳非 0 exit code，不會跳出任何視窗。定位是存取控制（防止安裝檔被誤傳/亂用），不是防範有心人暴力破解的資安機制。見 CONTEXT.md「安裝密碼保護」一節。 |
+
+### 設定檔不支援直接寫入安裝密碼
+
+指定安裝密碼只有 `install_password_env` 這一種寫法。設定檔裡如果出現
+`install_password` 這個欄位（不論值是什麼、甚至留空），`pack` 會直接回報
+欄位驗證失敗，不會默默忽略它。
+
+配置精靈（GUI）另外提供「直接輸入密碼」這個選項，那條路的密碼以獨立參數
+傳遞、不經過設定檔，所以命令列這邊沒有對應的寫法——這是決定，不是遺漏。
+理由是設定檔會被存進專案、傳給同事、上傳到版本控制，密碼寫在裡面等於整個
+保護失效，而這正是繞環境變數一圈要避開的事。完整取捨見
+[`docs/adr/0004`](docs/adr/0004-inline-install-password-is-gui-only.md)。
+
+需要重複打包或自動化流程時，環境變數本來就是比較合適的做法：不用每次重打
+密碼，也能在 CI 裡用祕密管理機制注入。
 
 `eula_texts` 是字典結構，只能透過 JSON 設定檔提供，沒有對應的命令列 flag
 （塞一整包多語言文字進命令列參數不實際）。

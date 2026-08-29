@@ -856,6 +856,120 @@ class TestServiceAndTaskFieldsAreNormalized(PackDataValidationTestBase):
         self.assertEqual(pack_data["scheduled_task"], {})
 
 
+class TestInstallPasswordModes(PackDataValidationTestBase):
+    """安裝密碼保護的兩種填法（見 docs/adr/0004）。
+
+    配置精靈可以直接輸入密碼，也可以填環境變數名稱；設定檔（CLI）只支援
+    後者。兩條路的能力不對等是決定，不是遺漏——`data` 的欄位集合就是設定檔
+    的格式，讓「直接輸入」變成一個一般欄位，等於同時讓設定檔也能寫明文
+    密碼，把當初繞環境變數要避開的風險原封不動放回來。
+
+    直接輸入的密碼因此不進 `data`：`validate_and_build_pack_data()` 只收到
+    一個布林值，知道「這次有沒有用直接輸入」就足以做驗證，不需要看到密碼
+    本身。這個純函式維持「只處理設定值」的性質。
+    """
+
+    def _validate_pw(self, data, has_inline_password=False):
+        return packaging_core.validate_and_build_pack_data(
+            data, self.app_dir, "fake.png", "fake.ico", "",
+            has_inline_password=has_inline_password,
+        )
+
+    def test_not_enabled_is_fine(self):
+        _pack_data, error = self._validate_pw(self._base_data())
+        self.assertIsNone(error)
+
+    def test_inline_password_alone_is_accepted(self):
+        _pack_data, error = self._validate_pw(
+            self._base_data(need_install_password=True), has_inline_password=True,
+        )
+        self.assertIsNone(error)
+
+    def test_env_var_name_alone_is_accepted(self):
+        with mock.patch.dict(os.environ, {"MY_INSTALL_PW": "hunter2"}):
+            _pack_data, error = self._validate_pw(self._base_data(
+                need_install_password=True, install_password_env="MY_INSTALL_PW",
+            ))
+        self.assertIsNone(error)
+
+    def test_enabled_but_nothing_supplied_is_rejected(self):
+        """勾了卻兩邊都沒填——跟「需要註冊檔案關聯」勾了沒填副檔名、
+        「安裝為 Windows 服務」勾了沒填名稱同一種處理。默默放行的話，
+        使用者會以為自己的安裝檔有密碼保護，實際上完全沒有。"""
+        _pack_data, error = self._validate_pw(self._base_data(need_install_password=True))
+        self.assertIsNotNone(error)
+        self.assertIn("密碼", error)
+
+    def test_supplying_both_ways_is_rejected(self):
+        """兩種填法同時給就無從判斷該用哪一個，明白擋下來而不是自己挑一個。"""
+        with mock.patch.dict(os.environ, {"MY_INSTALL_PW": "hunter2"}):
+            _pack_data, error = self._validate_pw(
+                self._base_data(need_install_password=True, install_password_env="MY_INSTALL_PW"),
+                has_inline_password=True,
+            )
+        self.assertIsNotNone(error)
+        self.assertIn("擇一", error)
+
+    def test_env_var_without_a_value_is_still_rejected(self):
+        """既有規則不變：填了名稱但那個環境變數當下沒有值，就擋下來。"""
+        with mock.patch.dict(os.environ, {}, clear=True):
+            _pack_data, error = self._validate_pw(self._base_data(
+                need_install_password=True, install_password_env="NOT_SET_ANYWHERE",
+            ))
+        self.assertIsNotNone(error)
+        self.assertIn("NOT_SET_ANYWHERE", error)
+
+    def test_a_plaintext_password_field_in_the_config_is_rejected(self):
+        """ADR-0004 決定三：設定檔裡出現直接寫密碼的欄位要明白報錯，訊息
+        指向環境變數那個欄位。不採用「不認得的欄位本來就會被忽略」——這一項
+        被忽略的後果是使用者以為有保護、實際上完全沒有，而且要等到把安裝檔
+        發出去才可能發現。"""
+        _pack_data, error = self._validate_pw(self._base_data(install_password="hunter2"))
+        self.assertIsNotNone(error)
+        self.assertIn("install_password_env", error)
+
+    def test_an_empty_plaintext_password_field_is_also_rejected(self):
+        """空字串同樣要擋：使用者已經在設定檔裡寫下這個欄位，代表他以為
+        這條路可行，只是這次剛好留空。默默放行會讓他下次填了值才發現沒用。"""
+        _pack_data, error = self._validate_pw(self._base_data(install_password=""))
+        self.assertIsNotNone(error)
+        self.assertIn("install_password_env", error)
+
+    def test_the_inline_password_never_appears_in_pack_data(self):
+        """密碼不進 `pack_data`，因此不會出現在任何可能被序列化的結構裡。"""
+        pack_data, error = self._validate_pw(
+            self._base_data(need_install_password=True), has_inline_password=True,
+        )
+        self.assertIsNone(error)
+        self.assertNotIn("install_password", pack_data)
+
+
+class TestEncryptionDependencyIsCheckedBeforeAnySideEffect(PackDataValidationTestBase):
+    """ADR-0004 決定四：加密實作依賴 `cryptography`，該 import 在函式內部。
+    `build_all()` 的順序是「清空 dist/build → 編譯 uninstall.exe（數十秒）
+    → 加密」，套件缺少時使用者會白等完整段編譯、產物也已被清空，最後才收到
+    一個 ImportError。
+
+    跟 ADR-0003 第三點（版本號格式驗證前移）同一個原則：純函式的職責就是
+    在任何檔案系統副作用發生之前攔截設定錯誤。
+    """
+
+    def test_missing_package_is_reported_when_password_protection_is_on(self):
+        with mock.patch("packaging_core._encryption_backend_available", return_value=False):
+            _pack_data, error = packaging_core.validate_and_build_pack_data(
+                self._base_data(need_install_password=True), self.app_dir,
+                "fake.png", "fake.ico", "", has_inline_password=True,
+            )
+        self.assertIsNotNone(error)
+        self.assertIn("cryptography", error)
+
+    def test_missing_package_is_ignored_when_password_protection_is_off(self):
+        """沒有要用密碼保護的人不該被一個他用不到的套件擋下來。"""
+        with mock.patch("packaging_core._encryption_backend_available", return_value=False):
+            _pack_data, error = self._validate(self._base_data())
+        self.assertIsNone(error)
+
+
 class TestValidateSigningConfig(unittest.TestCase):
     """_validate_signing_config()：獨立測試，不用像
     TestValidateAndBuildPackData 那樣先準備 app_dir/png_path/main_exe
@@ -904,32 +1018,62 @@ class TestValidateSigningConfig(unittest.TestCase):
         self.assertEqual(signing["timestamp_url"], "http://timestamp.digicert.com")
 
 
-class TestValidateInstallPasswordEnv(unittest.TestCase):
-    """_validate_install_password_env()（安裝密碼保護，見 CONTEXT.md）：
-    比照 _validate_signing_config() 的 cert_password_env 規則——密碼本身
-    不放在設定檔裡，只存環境變數名稱，只檢查環境變數有沒有值，不額外
-    要求密碼長度/複雜度。"""
+class TestValidateInstallPassword(unittest.TestCase):
+    """_validate_install_password()（安裝密碼保護，見 CONTEXT.md 與
+    docs/adr/0004）：獨立測試，不用像 TestInstallPasswordModes 那樣先準備
+    app_dir/png_path/main_exe 等一整包跟密碼完全無關的欄位。
+
+    環境變數那條路的規則比照 _validate_signing_config() 的 cert_password_env
+    ——密碼本身不放在設定檔裡，只存環境變數名稱，只檢查環境變數有沒有值，
+    不額外要求密碼長度/複雜度。這是使用者自己開發環境裡設定的密碼，工具
+    沒有立場替使用者決定「多長才算安全」。
+    """
+
+    def _validate(self, need=False, env_raw="", inline=False, plaintext_field=False):
+        return packaging_core._validate_install_password(need, env_raw, inline, plaintext_field)
 
     def test_empty_value_is_valid_and_feature_off(self):
-        install_password_env, error = packaging_core._validate_install_password_env("")
+        install_password_env, error = self._validate()
         self.assertEqual(install_password_env, "")
         self.assertIsNone(error)
 
     def test_missing_env_var_value_is_rejected(self):
         os.environ.pop("MY_TEST_INSTALL_PW_MISSING_UNIT", None)
-        install_password_env, error = packaging_core._validate_install_password_env(
-            "MY_TEST_INSTALL_PW_MISSING_UNIT"
+        install_password_env, error = self._validate(
+            need=True, env_raw="MY_TEST_INSTALL_PW_MISSING_UNIT",
         )
         self.assertIsNone(install_password_env)
         self.assertIsNotNone(error)
 
     def test_env_var_with_value_passes(self):
         with mock.patch.dict(os.environ, {"MY_TEST_INSTALL_PW_UNIT": "hunter2"}):
-            install_password_env, error = packaging_core._validate_install_password_env(
-                "MY_TEST_INSTALL_PW_UNIT"
+            install_password_env, error = self._validate(
+                need=True, env_raw="MY_TEST_INSTALL_PW_UNIT",
             )
         self.assertEqual(install_password_env, "MY_TEST_INSTALL_PW_UNIT")
         self.assertIsNone(error)
+
+    def test_env_var_name_is_stripped(self):
+        with mock.patch.dict(os.environ, {"MY_TEST_INSTALL_PW_UNIT": "hunter2"}):
+            install_password_env, error = self._validate(
+                need=True, env_raw="  MY_TEST_INSTALL_PW_UNIT  ",
+            )
+        self.assertIsNone(error)
+        self.assertEqual(install_password_env, "MY_TEST_INSTALL_PW_UNIT")
+
+    def test_inline_password_needs_no_env_var(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            install_password_env, error = self._validate(need=True, inline=True)
+        self.assertEqual(install_password_env, "")
+        self.assertIsNone(error)
+
+    def test_plaintext_field_is_rejected_before_anything_else(self):
+        """設定檔裡出現直接寫密碼的欄位時，不管其他欄位怎麼填都先擋下來。"""
+        _install_password_env, error = self._validate(
+            env_raw="WHATEVER", plaintext_field=True,
+        )
+        self.assertIsNotNone(error)
+        self.assertIn("install_password_env", error)
 
 
 class TestValidateDependencyPolicy(unittest.TestCase):

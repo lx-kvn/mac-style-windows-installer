@@ -250,20 +250,68 @@ def _validate_signing_config(signing_raw):
     }, None
 
 
-def _validate_install_password_env(install_password_env_raw):
-    """驗證 install_password_env（安裝密碼保護，見 CONTEXT.md「安裝密碼
-    保護」一節），回傳 (install_password_env_or_empty_string, error_or_None)。
+def _encryption_backend_available():
+    """加密實作（install_encryption.py）需要的 `cryptography` 套件在不在。
 
-    比照 _validate_signing_config() 的 cert_password_env 規則：密碼本身
-    不放在設定檔裡，只存存放密碼的環境變數名稱；只檢查環境變數有沒有
-    值，不額外要求密碼長度/複雜度——這是使用者自己開發環境裡設定的
-    密碼，工具沒有立場替使用者決定「多長才算安全」，也要跟結構幾乎
-    一樣的 cert_password_env 保持同一套規則，不要兩邊不同調。"""
+    那個 import 位於函式內部而非檔案頂端（見 install_encryption.py 的說明：
+    這個模組會被兩個 entry point 匯入，其中一個不一定需要加密功能），所以
+    缺少時不會在匯入階段就發現，而是要跑到真正加密那一步才爆。獨立成一個
+    函式是為了讓測試可以直接換掉它，不需要真的把套件解除安裝。
+    """
+    try:
+        import cryptography  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _validate_install_password(need_install_password, install_password_env_raw,
+                               has_inline_password, has_plaintext_field):
+    """驗證安裝密碼保護的設定，回傳
+    (install_password_env_or_empty_string, error_or_None)。
+
+    兩種填法（見 docs/adr/0004）：配置精靈可以直接輸入密碼，也可以填環境
+    變數名稱；設定檔（CLI）只支援後者。密碼本身不會走到這個函式——
+    `has_inline_password` 只是一個布林值，知道「這次有沒有用直接輸入」就
+    足以做所有驗證，這個純函式因此維持「只處理設定值」的性質。
+
+    `has_plaintext_field`：`data` 裡有沒有出現 `install_password` 這個 key。
+    有的話明白報錯而不是默默忽略——這個專案已經修過好幾次「使用者以為設定
+    生效了、其實被默默忽略」的缺陷，而這一項被忽略的後果特別嚴重：使用者
+    以為自己的安裝檔有密碼保護，實際上完全沒有，還要等到把安裝檔發出去
+    才可能發現。
+    """
+    if has_plaintext_field:
+        return None, (
+            "欄位驗證失敗：<br>設定檔不支援直接寫入安裝密碼（`install_password`）。"
+            "<br>設定檔是一份會被存進專案、傳給別人的普通文字檔，密碼寫在裡面等於"
+            "整個保護失效。請改用 `install_password_env` 填入存放密碼的環境變數名稱；"
+            "想直接輸入密碼請改用配置精靈（GUI）。"
+        )
+
     install_password_env = str(install_password_env_raw or "").strip()
-    if not install_password_env:
-        return "", None
-    if not os.environ.get(install_password_env):
+
+    if has_inline_password and install_password_env:
+        return None, (
+            "欄位驗證失敗：<br>安裝密碼只能擇一指定：直接輸入密碼，或填入存放密碼的"
+            "環境變數名稱，不能兩種同時給。"
+        )
+
+    if need_install_password and not has_inline_password and not install_password_env:
+        return None, (
+            "欄位驗證失敗：<br>已勾選「啟用安裝密碼保護」，請輸入密碼、或填入存放密碼的"
+            "環境變數名稱，或取消勾選。"
+        )
+
+    if install_password_env and not os.environ.get(install_password_env):
         return None, f"欄位驗證失敗：<br>環境變數「{install_password_env}」目前沒有值，請先設定好安裝密碼再打包。"
+
+    if (has_inline_password or install_password_env) and not _encryption_backend_available():
+        return None, (
+            "欄位驗證失敗：<br>安裝密碼保護需要 `cryptography` 套件，目前找不到它。"
+            "<br>請先執行 <code>pip install cryptography</code> 再打包，或取消「啟用安裝密碼保護」。"
+        )
+
     return install_password_env, None
 
 
@@ -390,7 +438,8 @@ def _validate_version_string(version):
     return None
 
 
-def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_path_selected):
+def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_path_selected,
+                                 has_inline_password=False):
     """驗證表單/JSON 資料，並組出要交給 builder.build_all() 的 pack_data。
 
     純函式：不碰執行緒、不呼叫 check_build_environment()/ensure_workspace_files()
@@ -398,6 +447,12 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     pack 子指令）裡，跟這裡回傳的結果合併。這樣驗證邏輯可以直接單元測試，
     不需要真的啟動背景執行緒或呼叫外部指令。GUI 跟 CLI 共用同一份驗證，
     不會有兩邊規則兜不起來的問題。
+
+    has_inline_password：這次是不是用「配置精靈直接輸入密碼」那條路（見
+    docs/adr/0004）。**密碼本身不會傳進來**——`data` 的欄位集合就是設定檔的
+    格式，讓密碼變成一個一般欄位等於同時讓設定檔能寫明文密碼；而這裡要做的
+    驗證只需要知道「有沒有」，不需要看到值。這個純函式因此維持「只處理
+    設定值」的性質。
 
     回傳 (pack_data, None) 表示驗證通過；(None, error_message) 表示驗證失敗，
     error_message 就是原本要包進 {"status": "error", "message": ...} 的內容。
@@ -434,6 +489,14 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     bundle_dependencies_raw = data.get("bundle_dependencies", []) or []
     signing_raw = data.get("signing", {}) or {}
     install_password_env_raw = data.get("install_password_env", "")
+    # need_install_password 是 GUI 那顆「啟用安裝密碼保護」勾選框的狀態，
+    # 跟 need_file_assoc/use_custom_doc_icon 是同一種欄位：勾選框決定要不要
+    # 套用旁邊的欄位。CLI 沒有勾選框，由 builder_cli.py 依
+    # install_password_env 有沒有內容推斷。
+    need_install_password = bool(data.get("need_install_password", False))
+    # 設定檔不支援直接寫密碼（見 docs/adr/0004），出現這個 key 要明白報錯
+    # 而不是默默忽略——所以這裡看的是「有沒有這個 key」，不是它的值。
+    has_plaintext_password_field = "install_password" in data
     windows_service_raw = data.get("windows_service", {}) or {}
     scheduled_task_raw = data.get("scheduled_task", {}) or {}
     dependencies_min_version_raw = data.get("dependencies_min_version", {}) or {}
@@ -623,9 +686,13 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     if error:
         return None, error
 
-    # install_password_env 只跟自己有關，驗證規則收在
-    # _validate_install_password_env()（見上方）。
-    install_password_env, error = _validate_install_password_env(install_password_env_raw)
+    # 安裝密碼保護的驗證規則收在 _validate_install_password()（見上方）。
+    # 密碼本身不會走到這裡：has_inline_password 只是一個布林值，見
+    # docs/adr/0004。
+    install_password_env, error = _validate_install_password(
+        need_install_password, install_password_env_raw, has_inline_password,
+        has_plaintext_password_field,
+    )
     if error:
         return None, error
 

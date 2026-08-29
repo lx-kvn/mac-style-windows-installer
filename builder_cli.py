@@ -214,6 +214,11 @@ def _load_pack_input(args):
     data.setdefault("dependencies_min_version", data.get("dependencies_min_version", {}))
     data.setdefault("create_restore_point_before_install", bool(data.get("create_restore_point_before_install", False)))
     data.setdefault("install_password_env", data.get("install_password_env", ""))
+    # need_install_password 跟 need_file_assoc 同一種欄位：GUI 版是「啟用
+    # 安裝密碼保護」那顆勾選框的狀態，CLI 版沒有勾選框，依 install_password_env
+    # 有沒有內容推斷。設定檔不支援直接寫密碼（見 docs/adr/0004），所以 CLI
+    # 這條路只有環境變數一種來源。
+    data.setdefault("need_install_password", bool(data.get("install_password_env")))
 
     return data, app_dir, png_path, ico_path, doc_icon_path_selected
 

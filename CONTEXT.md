@@ -331,10 +331,35 @@ GUI 端「這次是不是免權限安裝」只在 `isNoAdminInstall()` 算一次
 | 密碼關卡（EULA 之前） | `installer_core.InstallerAPI.is_password_protected()`／`verify_install_password()`、`ui/index.html` 的 `passwordView` |
 | 解密後的複製來源 | `installer_core.InstallerAPI._app_contents_dir()` |
 | `/PASSWORD=` 靜默參數 | `installer_core._parse_cli_args()`／`run_silent_install()` |
+| 配置精靈的欄位 | `ui/config.html` 的 `install_password_section` |
 | CLI 使用說明 | `CLI_USAGE.md` |
 
-**唯一還沒補上的**：`ui/config.html` 沒有對應的輸入欄位，GUI 使用者目前
-無法使用這個功能，只能改走 CLI 的 JSON 設定檔。
+### 指定密碼的兩種填法
+
+密碼有兩個可能的來源，**只有一種能寫進設定檔**：
+
+| 填法 | 配置精靈 | 設定檔（CLI） |
+|---|---|---|
+| 直接輸入密碼 | ✅ 預設 | ❌ 明白報錯 |
+| 填環境變數名稱（`install_password_env`） | ✅ | ✅ |
+
+不對等是決定，不是遺漏，理由見
+[`docs/adr/0004`](docs/adr/0004-inline-install-password-is-gui-only.md)：
+`validate_and_build_pack_data()` 收的那包 `data`，欄位集合就是設定檔的
+格式，而 GUI 跟 CLI 共用同一個驗證函式——讓「直接輸入密碼」變成 `data`
+的一個一般欄位，等於同時讓設定檔也能寫明文密碼。
+
+直接輸入的密碼因此走一條獨立的參數路徑
+（`ConfigAPI.start_pack(data, install_password)` →
+`builder.build_all(install_password=...)`），全程不進 `data`、不進
+`pack_data`。`validate_and_build_pack_data()` 只收到一個布林值
+（`has_inline_password`），知道「這次有沒有用直接輸入」就足以做驗證。
+
+`need_install_password` 是配置精靈那顆勾選框的狀態，跟 `need_file_assoc`／
+`use_custom_doc_icon` 是同一種欄位（勾選框決定要不要套用旁邊的欄位）；
+CLI 沒有勾選框，由 `builder_cli.py` 依 `install_password_env` 有沒有內容
+推斷。有了它，後端才分得出「沒啟用」跟「啟用了但兩種填法都留空」——後者
+要明白報錯，不能默默做出一顆沒有密碼保護的安裝檔。
 
 選填功能：打包時可以設定一組密碼，安裝時使用者要輸入正確密碼
 才能繼續，否則無法取得應用程式檔案。定位是**存取控制**（防止安裝檔被
