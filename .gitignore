@@ -11,5 +11,10 @@ dist/
 # /released skill 打包成品的暫存輸出資料夾（GUI/CLI exe + 安裝檔），發布產物不進版控
 release_output/
 
+# 測試用的建置產物。跟 release_output/ 分開放：那個資料夾只放真正發布過的
+# 版本，測試建置混進去會讓人分不出哪些是真的發布過的。測試建置的檔名不用
+# 版本號形式（用日期），版本欄位固定是「目前版本-dev」，不編造不存在的版本號。
+test_output/
+
 # Claude Code 本機設定/skill，不進版控
 .claude/
