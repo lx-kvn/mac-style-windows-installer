@@ -9,6 +9,7 @@ import sys
 import json
 import shutil
 import tempfile
+import threading
 import unittest
 import zlib
 from unittest import mock
@@ -423,6 +424,101 @@ class TestProcessRunningDetection(unittest.TestCase):
             result = api.trigger_installation(create_desktop_shortcut=False, skip_process_check=True)
 
         self.assertNotEqual(result["status"], "process_running")
+
+
+class TestTriggerInstallationIsNotReentrant(unittest.TestCase):
+    """使用者實測回報的缺陷（2026-08-30）的最後一道防線。
+
+    重現：在切換到「安裝成功」畫面之前抓住應用程式圖示不放，畫面切過去
+    之後再把圖示拖到資料夾上放開——安裝會被觸發第二次。前端那邊的成因是
+    圖示在安裝開始的那一刻就恢復可拖曳，而成功彈窗雖然蓋住了圖示，卻擋
+    不住「已經取得指標捕獲」的拖曳（捕獲中的指標事件不經過命中測試）。
+
+    前端會修，但這裡也要擋：`trigger_installation()` 是 JS API 的公開
+    方法，前端狀態可以被繞過（畫面被改、或未來多一條觸發路徑）。而且比
+    使用者踩到的更嚴重的是進度條進行中那段時間——那時候連彈窗都還沒有，
+    圖示完全裸露，再放一次會讓兩個安裝流程真的並行（pywebview 的 JS API
+    呼叫各自在自己的執行緒上跑；單一實例鎖是行程層級、開機時取得一次，
+    擋的是「開兩個安裝程式」，不是「同一個行程被呼叫兩次」）。
+
+    重試不能被一起擋掉：`process_running`／`file_locked` 之後前端會讓
+    使用者關掉程式再重試，那是既有且正確的流程。
+    """
+
+    def setUp(self):
+        self.api = make_installer_api(app_name="MyApp", selected_path="C:\\FakeApp")
+
+    def test_second_call_after_success_is_rejected(self):
+        with mock.patch.object(
+            self.api, "_trigger_installation_impl", return_value={"status": "success", "message": "ok"},
+        ) as mock_impl:
+            first = self.api.trigger_installation()
+            second = self.api.trigger_installation()
+
+        self.assertEqual(first["status"], "success")
+        self.assertEqual(second["status"], "error")
+        self.assertEqual(mock_impl.call_count, 1, "第二次不該真的再跑一次安裝流程")
+
+    def test_retry_after_failure_is_allowed(self):
+        with mock.patch.object(
+            self.api, "_trigger_installation_impl", return_value={"status": "error", "message": "boom"},
+        ) as mock_impl:
+            self.api.trigger_installation()
+            self.api.trigger_installation()
+        self.assertEqual(mock_impl.call_count, 2, "失敗之後必須還能重試")
+
+    def test_retry_after_process_running_is_allowed(self):
+        """「偵測到主程式執行中」之後，前端會讓使用者關掉程式再重試，
+        這是既有流程（closeRunningAppAndRetry），不能被擋掉。"""
+        with mock.patch.object(
+            self.api, "_trigger_installation_impl", return_value={"status": "process_running", "message": "x"},
+        ) as mock_impl:
+            self.api.trigger_installation()
+            self.api.trigger_installation()
+        self.assertEqual(mock_impl.call_count, 2)
+
+    def test_retry_after_file_locked_is_allowed(self):
+        """「檔案被鎖住」之後的 closeLockingProcessAndRetry 同理。"""
+        with mock.patch.object(
+            self.api, "_trigger_installation_impl", return_value={"status": "file_locked", "message": "x"},
+        ) as mock_impl:
+            self.api.trigger_installation()
+            self.api.trigger_installation()
+        self.assertEqual(mock_impl.call_count, 2)
+
+    def test_concurrent_calls_only_run_the_install_once(self):
+        """進度條進行中再放一次圖示的情境：兩個呼叫在不同執行緒上並行。
+        只有一個可以真的進到安裝流程，另一個要立刻被擋下來。"""
+        started = threading.Event()
+        release = threading.Event()
+        call_count = []
+
+        def slow_impl(*args, **kwargs):
+            call_count.append(1)
+            started.set()
+            release.wait(timeout=5)
+            return {"status": "success", "message": "ok"}
+
+        results = {}
+        with mock.patch.object(self.api, "_trigger_installation_impl", side_effect=slow_impl):
+            first = threading.Thread(target=lambda: results.setdefault("a", self.api.trigger_installation()))
+            first.start()
+            self.assertTrue(started.wait(timeout=5), "第一個呼叫沒有進到安裝流程")
+            # 第一個還卡在安裝流程裡的時候，第二個呼叫進來
+            results["b"] = self.api.trigger_installation()
+            release.set()
+            first.join(timeout=5)
+
+        self.assertEqual(len(call_count), 1, "並行時只該有一個真的跑安裝流程")
+        self.assertEqual(results["b"]["status"], "error")
+
+    def test_the_rejection_message_explains_why(self):
+        with mock.patch.object(
+            self.api, "_trigger_installation_impl", return_value={"status": "success", "message": "ok"},
+        ):
+            self.api.trigger_installation()
+            second = self.api.trigger_installation()
+        self.assertTrue(second.get("message"), "被擋下來時要有可以顯示給使用者看的訊息")
 
 
 class TestUpgradeFlowDoesNotRepeatItself(unittest.TestCase):

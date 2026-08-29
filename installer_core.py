@@ -28,6 +28,7 @@ import shutil
 import tempfile
 import ctypes
 import subprocess
+import threading
 import zlib
 import webview
 from datetime import datetime
@@ -161,6 +162,13 @@ class InstallerAPI:
         # 驗證通過前一律是 None，_app_contents_dir() 靠這個判斷「還沒
         # 驗證密碼就想拿應用程式檔案」這種不該發生的呼叫順序。
         self._decrypted_payload_dir = None
+        # 重入防護，見 trigger_installation()。用鎖而不是單純兩個布林值：
+        # pywebview 的 JS API 呼叫各自在自己的執行緒上跑，「檢查旗標」跟
+        # 「設定旗標」之間如果不是同一個不可分割的動作，兩個呼叫可能都
+        # 通過檢查、然後都進到安裝流程。
+        self._install_lock = threading.Lock()
+        self._install_in_progress = False
+        self._install_completed = False
         self.ui_language = lang_detect.detect_system_language(SUPPORTED_UI_LANGUAGES, DEFAULT_UI_LANGUAGE)
 
         program_files = os.environ.get("ProgramFiles", "C:\\Program Files")
@@ -770,15 +778,51 @@ class InstallerAPI:
             system_entries.remove_registry_entry(self.app_name, self.no_admin_install)
 
     def trigger_installation(self, create_desktop_shortcut=True, skip_process_check=False):
-        """薄包裝：實際安裝邏輯在 _trigger_installation_impl()。這裡只負責
-        「不管這次安裝成功、失敗、還是中途拋出未預期例外，只要之前
+        """薄包裝：實際安裝邏輯在 _trigger_installation_impl()。這裡負責兩件
+        跟安裝本身無關、但每一條出口都要照顧到的事。
+
+        一、不管這次安裝成功、失敗、還是中途拋出未預期例外，只要之前
         close_locking_processes() 為了釋放鎖定強制關過殼層，最後都要補做
-        重啟 explorer.exe / 恢復 AutoRestartShell」，用 try/finally 涵蓋
-        所有出口，不能像原本那樣散在各個 return 分支各自補一次、容易漏掉。
+        重啟 explorer.exe / 恢復 AutoRestartShell，用 try/finally 涵蓋所有
+        出口，不能散在各個 return 分支各自補一次、容易漏掉。
+
+        二、重入防護。真實抓到的缺陷（使用者實測，2026-08-30）：安裝一開始
+        主畫面的應用程式圖示就恢復可拖曳，使用者可以在安裝進行中、或成功
+        彈窗出現之後再放一次，把安裝觸發第二次。前端會擋（見 ui/index.html
+        的安裝狀態），但這裡也要擋——這是 JS API 的公開方法，前端狀態可以
+        被繞過。
+
+        兩種要擋的情況分別對應不同後果：
+          - 安裝**進行中**再被呼叫：兩個安裝流程並行（pywebview 的 JS API
+            呼叫各自在自己的執行緒上跑），同時複製檔案到同一個目錄、同時
+            寫安裝清單、各自可能觸發回滾。單一實例鎖擋不到這個，它是行程
+            層級、在程式啟動時取得一次。
+          - 安裝**已成功**後再被呼叫：密碼保護的安裝會在成功後清掉解密出來
+            的暫存資料夾，第二次走到 _app_contents_dir() 直接拋例外（使用者
+            看到的「尚未通過密碼驗證」就是這個）；沒有密碼保護的安裝更糟，
+            它不會報錯，會安靜地再裝一次。
+
+        失敗、process_running、file_locked 都要放行重試：那是既有且正確的
+        流程（前端的 closeRunningAppAndRetry／closeLockingProcessAndRetry
+        會重新呼叫這個方法）。只有真正成功才latch住。
         """
+        with self._install_lock:
+            if self._install_in_progress:
+                return {"status": "error", "message": "安裝正在進行中，請稍候。"}
+            if self._install_completed:
+                return {
+                    "status": "error",
+                    "message": "這個安裝程式已經完成安裝，如果需要重新安裝請重新開啟安裝程式。",
+                }
+            self._install_in_progress = True
+
         try:
-            return self._trigger_installation_impl(create_desktop_shortcut, skip_process_check)
+            result = self._trigger_installation_impl(create_desktop_shortcut, skip_process_check)
+            if isinstance(result, dict) and result.get("status") == "success":
+                self._install_completed = True
+            return result
         finally:
+            self._install_in_progress = False
             explorer_lock_release.restore_after_lock_release(self._explorer_forced_down_state)
             self._explorer_forced_down_state = None
 

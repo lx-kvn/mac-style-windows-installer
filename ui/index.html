@@ -967,8 +967,50 @@
             }
         }
 
+        // 安裝狀態。'idle' 可以拖、'running' 安裝進行中、'done' 已經裝完。
+        //
+        // 真實抓到的缺陷（使用者實測，2026-08-30）：原本只有 dragAbsorbing
+        // （吸入動畫播放中）跟 installSucceeded（關閉彈窗時判斷要不要啟動
+        // 程式用），兩個都不代表「安裝進行中」。而 absorbIntoDropTarget()
+        // 的收尾是先把 dragAbsorbing 設回 false、才呼叫安裝，所以整段安裝
+        // 期間圖示的狀態跟安裝開始前完全相同，可以再抓起來放第二次。
+        //
+        // 'running' 跟 'done' 的處置一樣（都不准拖），但要分得出來：進行中
+        // 再放一次會讓兩個安裝流程並行；已完成再放一次，密碼保護的安裝會
+        // 因為解密的暫存資料已經被清掉而失敗，沒有密碼保護的則會安靜地
+        // 再裝一次。後端也有對應的重入防護（見 InstallerAPI 的
+        // trigger_installation()）——前端擋的是使用者體驗，後端是最後防線。
+        let installState = 'idle';
+
+        // 終結進行中的拖曳。顯示成功彈窗時一定要呼叫這個，不能只靠彈窗
+        // 蓋住圖示：彈窗確實擋得住新的 pointerdown（實測 elementFromPoint
+        // 在圖示位置回傳的是彈窗本身），但已經 setPointerCapture() 的拖曳
+        // 完全不經過命中測試，pointermove/pointerup 照樣送到圖示上；而且
+        // showModal() 不會隱藏 mainView，安裝目的地圖示的座標仍然是真實
+        // 的，放開時照樣算命中。
+        function cancelDragInProgress() {
+            if (!dragActive) return;
+            if (dragPointerId !== null && dragItem.hasPointerCapture(dragPointerId)) {
+                dragItem.releasePointerCapture(dragPointerId);
+            }
+            dragActive = false;
+            dragItem.classList.remove('grabbing');
+            dragPointerId = null;
+            setDropHover(false);
+            setPickedUp(false);
+            // 走跟「沒放中」同一條彈回路徑，讓手上的圖示回到原位，不要留下
+            // 一個卡在半空中的圖示。
+            dragX.target = 0; dragY.target = 0;
+            if (motionReduced()) {
+                dragX.x = 0; dragY.x = 0; dragX.v = 0; dragY.v = 0;
+                renderDragPosition();
+            } else {
+                ensureDragLoop();
+            }
+        }
+
         dragItem.addEventListener('pointerdown', (e) => {
-            if (dragAbsorbing) return;
+            if (dragAbsorbing || installState !== 'idle') return;
             e.preventDefault();
             dragItem.setPointerCapture(e.pointerId);
             dragPointerId = e.pointerId;
@@ -1142,6 +1184,10 @@
 
         function resetInstallUiAfterCancelOrFailure() {
             document.getElementById('installProgressWrap').style.display = 'none';
+            // 安裝失敗、主程式執行中、檔案被鎖住這幾條都會退回主畫面讓使用者
+            // 重試（closeRunningAppAndRetry／closeLockingProcessAndRetry），
+            // 狀態要清回 'idle'，不能把正當的重試一起擋掉。
+            installState = 'idle';
         }
 
         function cancelProcessRunningModal() {
@@ -1187,6 +1233,9 @@
         }
 
         async function attemptInstall(createDesktopShortcut, skipProcessCheck) {
+            // 狀態要在呼叫後端之前就設好，否則從這裡到後端真的開始動作之間
+            // 還有一段空窗，使用者可以在那段時間再放一次。
+            installState = 'running';
             lastCreateDesktopShortcut = createDesktopShortcut;
             pathPreview.dataset.beforeInstall = pathPreview.innerText;
             document.getElementById('installProgressWrap').style.display = 'block';
@@ -1197,7 +1246,11 @@
             const result = await pywebview.api.trigger_installation(createDesktopShortcut, !!skipProcessCheck);
 
             if (result.status === 'success') {
+                installState = 'done';
                 installSucceeded = true;
+                // 使用者可能在成功畫面出現之前就已經抓著圖示了。彈窗蓋不住
+                // 那種拖曳（見 cancelDragInProgress() 的說明），要主動終結。
+                cancelDragInProgress();
                 showModal(t('install_success_title'), '', false, true);
                 renderInstallWarnings(result.warnings);
                 pathPreview.innerText = t('install_complete_path');
@@ -1226,6 +1279,10 @@
         // 圖示後按 Enter/空白鍵，都走這同一個函式——鍵盤不是另一條捷徑，是
         // 同一個拖曳目標的另一種操作方式，兩邊行為不會分岔。
         async function triggerInstallFromDragItem() {
+            // 滑鼠與鍵盤共用這個函式（見 tests/test_ui_accessibility.py），
+            // 所以守門也放在這裡：只擋 pointerdown 的話，鍵盤那條路徑仍然
+            // 可以在安裝完成後再觸發一次。
+            if (installState !== 'idle') return;
             const createDesktopShortcut = document.getElementById('desktopShortcutCheck').checked;
             await attemptInstall(createDesktopShortcut);
         }
