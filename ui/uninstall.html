@@ -155,10 +155,42 @@
            confirmView 專屬的例外（見規格文件 §8.29）。 */
         .icon-wrapper {
             width: 100px; height: 100px; display: flex; justify-content: center; align-items: center;
-            cursor: grab; transition: transform 0.2s;
+            cursor: grab;
         }
         .icon-wrapper img { width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
-        .icon-wrapper:active { cursor: grabbing; transform: scale(0.95); }
+
+        /* 拖曳解除安裝（自繪 + 彈簧）。跟安裝端共用 ui/drag_to_target.js，
+           這裡是那套手勢需要的版面結構——尺寸沿用 confirmView 專屬的 100px
+           （見上面的說明，跟 index.html 的 90px 不同是既有的例外）。
+
+           原本這裡是 `.icon-wrapper:active { transform: scale(0.95) }`，
+           搭配瀏覽器內建拖放。改成自繪之後那條規則必須拿掉：位移由 JS 每幀
+           寫進同一個 transform，CSS 再插手就是兩個主人在搶。按下的回饋改由
+           .drag-inner 的放大負責（跟安裝端同一套）。 */
+        .icon-slot { position: relative; width: 100px; height: 100px; }
+        .icon-slot .icon-wrapper { position: absolute; top: 0; left: 0; }
+        #dragAppIcon { z-index: 5; transition: none; touch-action: none; will-change: transform; }
+        #dragAppIcon.grabbing { cursor: grabbing; }
+        .drag-inner {
+            width: 100%; height: 100%; display: flex; justify-content: center; align-items: center;
+            will-change: transform; transform-origin: center;
+            transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1), filter 160ms cubic-bezier(0.23, 1, 0.32, 1);
+        }
+        /* 原位殘影做成剪影：只留形狀，顏色與細節全部拿掉，讓它明確是個
+           「這裡原本有東西」的標記，而不是第二個看起來可以拖的圖示 */
+        #dragGhost { z-index: 1; opacity: 0; pointer-events: none; filter: brightness(0) saturate(0); }
+        #dragGhost.shown { opacity: 0.16; }
+        /* 真實抓到的無障礙問題：這顆要拖到垃圾桶上才會觸發解除安裝的圖示，
+           是整個解除安裝流程唯一的觸發點（依 ADR-0002 決定四，不另外提供
+           「跳過拖曳」按鈕），但它原本沒有 tabindex、沒有 role、也沒有任何
+           鍵盤事件——**整個解除安裝介面完全無法用鍵盤操作**。安裝端早就
+           解決過這件事，這裡比照補上，焦點框跟 .nice-btn 同一套視覺。 */
+        #dragAppIcon:focus-visible { outline: 2px solid #0071e3; outline-offset: 2px; }
+        /* 系統要求減少動態效果時，只收掉「介面自己在動」的部分；使用者拖著
+           圖示走的位移是直接操作，關掉反而會讓人不知道自己拖到哪裡 */
+        @media (prefers-reduced-motion: reduce) {
+            .drag-inner { transition: none; }
+        }
         .arrow-box { height: 90px; display: flex; align-items: center; }
         .arrow-svg { width: 28px; height: 28px; }
         /* 垃圾桶本身：桶身＋蓋子兩張圖疊在同一個相對定位容器內，維持素材原始
@@ -239,8 +271,16 @@
     <div class="nice-view" id="confirmView">
         <div class="workspace">
             <div class="icon-box">
-                <div class="icon-wrapper" id="dragAppIcon" draggable="true">
-                    <img src="app_icon.png" alt="App">
+                <div class="icon-slot">
+                    <!-- 原位殘影：拖曳本體被拿起後留在原地的替身，同時是沒有
+                         命中時彈回去的目的地 -->
+                    <div class="icon-wrapper" id="dragGhost" aria-hidden="true">
+                        <img src="app_icon.png" alt="">
+                    </div>
+                    <div class="icon-wrapper" id="dragAppIcon" tabindex="0" role="button"
+                         onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); triggerUninstallFromDragItem(); }">
+                        <div class="drag-inner"><img src="app_icon.png" alt="App"></div>
+                    </div>
                 </div>
             </div>
             <div class="arrow-box">
@@ -309,6 +349,9 @@
         <button class="nice-btn" onclick="onCancel()" data-i18n="btn_ok">了解</button>
     </div>
 
+    <!-- 拖曳手勢的實作，跟安裝端共用同一份（見 ADR-0002 與該檔案的說明）。
+         必須排在下面那段之前：createDragToTarget() 在那裡就會被呼叫。 -->
+    <script src="drag_to_target.js"></script>
     <script>
         document.addEventListener('contextmenu', (e) => e.preventDefault());
 
@@ -463,37 +506,64 @@
         // 取消／關閉沿用左上角既有的 X 關閉鈕即可，不用另外重複一份）。
         // 放開在垃圾桶範圍內＝呼叫 onDelete()；拖出範圍或沒有放上去＝蓋子
         // 彈簧自然收回，不做任何刪除動作。
-        (function setupTrashDragDrop() {
-            const dragAppIcon = document.getElementById('dragAppIcon');
-            const trashDropTarget = document.getElementById('trashDropTarget');
+        // ---------------- 拖曳解除安裝（自繪 + 彈簧）----------------
+        // 手勢本體收在 ui/drag_to_target.js，跟安裝端共用同一套。
+        //
+        // 這裡原本用的是瀏覽器內建的 HTML5 拖放（draggable="true" +
+        // dragstart／dragenter／dragleave／drop）——也就是安裝端在 ADR-0002
+        // 已經換掉的那套機制。ADR-0002 的理由對這裡一字不改地成立：拖曳時
+        // 跟著游標移動的那張影像由作業系統繪製，網頁端無法控制它的外觀、
+        // 縮放、透明度，也無法在放開時介入，所以做不到按下的即時回饋、
+        // 沒命中的彈回、命中的吸入——而拖曳解除安裝跟拖曳安裝是同一個核心
+        // 識別動作的兩端，不該只有一邊有這些。
+        //
+        // 附帶收穫：舊實作的圖示沒有 tabindex／role／鍵盤事件，整個解除
+        // 安裝介面完全無法用鍵盤操作。共用之後跟安裝端一樣可以用鍵盤。
+        //
+        // 兩端真正不同的只有目的地的回應：安裝端是資料夾「吞一下」，這裡是
+        // 垃圾桶掀蓋／闔蓋，用 onHoverChange／onAbsorb 參數化。
+        const uninstallDragItem = document.getElementById('dragAppIcon');
+        const trashDropTarget = document.getElementById('trashDropTarget');
 
-            dragAppIcon.addEventListener('dragstart', (e) => {
-                e.dataTransfer.setData('text/plain', 'delete-trigger');
-            });
+        // 解除安裝狀態，理由同安裝端（見 ui/index.html 的 installState）：
+        // 進行中或已完成都不該再被拖一次。這裡的畫面切換（showView）雖然會
+        // 把整個 confirmView 藏起來，但那是副作用不是設計——已經取得指標
+        // 捕獲的拖曳不經過命中測試，不能只靠畫面被藏起來擋。
+        let uninstallState = 'idle';
 
-            trashDropTarget.addEventListener('dragenter', (e) => {
-                e.preventDefault();
-                trashDropTarget.classList.add('drag-over');
-                trashLidSpring.setOpen(true);
-            });
-            trashDropTarget.addEventListener('dragover', (e) => { e.preventDefault(); });
-            trashDropTarget.addEventListener('dragleave', () => {
-                trashDropTarget.classList.remove('drag-over');
+        const uninstallDragController = createDragToTarget({
+            item: uninstallDragItem,
+            inner: uninstallDragItem.querySelector('.drag-inner'),
+            ghost: document.getElementById('dragGhost'),
+            target: trashDropTarget,
+            targetSlot: trashDropTarget.querySelector('.trash-can'),
+            canDrag: () => uninstallState === 'idle',
+            onHoverChange: (on) => { trashLidSpring.setOpen(on); },
+            onAbsorb: () => {
+                // 圖示被吸進垃圾桶的同時把蓋子闔上——東西進去了，蓋子就該蓋回
+                // 去。蓋子的角度本來就由彈簧驅動（見 createAngleSpring()），
+                // 這裡只要把目標角度切回關閉，它會從目前角度與速度接續過去。
                 trashLidSpring.setOpen(false);
-            });
-            trashDropTarget.addEventListener('drop', (e) => {
-                e.preventDefault();
-                trashDropTarget.classList.remove('drag-over');
-                trashLidSpring.setOpen(false);
-                if (e.dataTransfer.getData('text/plain') === 'delete-trigger') {
-                    onDelete();
-                }
-            });
-        })();
+            },
+            onHit: () => { triggerUninstallFromDragItem(); },
+        });
+
+        // 滑鼠拖曳與鍵盤（Enter／空白鍵）走同一個函式，兩邊行為不會分岔。
+        function triggerUninstallFromDragItem() {
+            if (uninstallState !== 'idle') return;
+            onDelete();
+        }
 
         let appName = "";
 
         function showView(id) {
+            // 切走畫面時終結進行中的拖曳。把 confirmView 藏起來確實會讓
+            // 圖示消失，但那擋不住已經取得指標捕獲的拖曳——捕獲中的指標
+            // 事件完全不經過命中測試。不主動終結的話，使用者手上會留著一個
+            // 看不見卻還活著的拖曳，切回來時圖示卡在半空中。
+            if (typeof uninstallDragController !== 'undefined') {
+                uninstallDragController.cancel();
+            }
             document.querySelectorAll('.nice-view').forEach(v => v.classList.remove('active'));
             document.getElementById(id).classList.add('active');
         }
@@ -529,6 +599,10 @@
                 showView('lockingProcessesView');
                 return;
             }
+            // 從這裡開始不再是「還可以改變主意」的狀態，圖示不該再被拖
+            // 一次。反悔倒數期間也算——那段時間畫面已經切到 progressView，
+            // 但狀態要一致，才不會靠「圖示剛好看不到」這種副作用擋。
+            uninstallState = 'running';
             startUninstallWithGrace();
         }
 
@@ -559,6 +633,7 @@
         // 用 textContent 而不是 innerHTML 填內容：警告字串裡含檔案路徑、
         // 服務名稱、例外訊息，不該被當成 HTML 解析。
         function showUninstallDone(result) {
+            uninstallState = 'done';
             const warnings = result.warnings || [];
             document.getElementById('doneMessage').innerText = warnings.length
                 ? t('done_message_with_warnings', { name: appName })
@@ -664,6 +739,7 @@
             if (graceTimeoutId !== null) clearTimeout(graceTimeoutId);
             document.getElementById('undoBtn').style.display = 'none';
             document.getElementById('progressFill').style.width = '0%';
+            uninstallState = 'idle';
             showView('confirmView');
         }
 
