@@ -35,8 +35,16 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INDEX_HTML = os.path.join(REPO_ROOT, "ui", "index.html")
 
 
+DRAG_MODULE = os.path.join(REPO_ROOT, "ui", "drag_to_target.js")
+
+
 def _read():
     with open(INDEX_HTML, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def _read_module():
+    with open(DRAG_MODULE, "r", encoding="utf-8") as f:
         return f.read()
 
 
@@ -70,15 +78,24 @@ class TestDragIsGatedByInstallState(unittest.TestCase):
     def setUp(self):
         self.content = _read()
 
-    def test_pointerdown_checks_the_install_state(self):
-        match = re.search(
-            r"dragItem\.addEventListener\('pointerdown',.*?\n        \}\);",
-            self.content, re.DOTALL,
+    def test_the_drag_is_gated_by_the_install_state(self):
+        """手勢本體抽到 ui/drag_to_target.js 之後，守門分成兩段，兩段都要
+        在：安裝端把「現在能不能拖」的判斷交給共用模組（canDrag），共用
+        模組在 pointerdown 真的去問它。少任何一段，安裝進行中／完成後圖示
+        都還是抓得起來。"""
+        match = re.search(r"canDrag:\s*([^\n,]+)", self.content)
+        self.assertIsNotNone(match, "ui/index.html 沒有把可否拖曳的判斷交給共用模組")
+        self.assertIn("installState", match.group(1))
+
+        module = _read_module()
+        pointerdown = re.search(
+            r"item\.addEventListener\('pointerdown',.*?\n    \}\);",
+            module, re.DOTALL,
         )
-        self.assertIsNotNone(match, "找不到 pointerdown 監聽器")
+        self.assertIsNotNone(pointerdown, "ui/drag_to_target.js 找不到 pointerdown 監聽器")
         self.assertIn(
-            "installState", match.group(0),
-            "pointerdown 沒有檢查安裝狀態，安裝進行中/完成後圖示還是抓得起來",
+            "canDrag()", pointerdown.group(0),
+            "共用模組的 pointerdown 沒有問呼叫端能不能拖",
         )
 
     def test_the_shared_trigger_also_checks_the_install_state(self):
@@ -128,10 +145,17 @@ class TestInFlightDragIsTerminatedWhenTheModalOpens(unittest.TestCase):
 
     def test_it_releases_the_pointer_capture(self):
         """捕獲中的指標事件不經過命中測試，覆蓋層擋不住它——一定要主動
-        `releasePointerCapture()`，不能只靠彈窗蓋住圖示。"""
+        `releasePointerCapture()`，不能只靠彈窗蓋住圖示。實際的釋放在共用
+        模組的 cancel() 裡。"""
+        module = _read_module()
+        body = re.search(r"function cancel\(\) \{.*?\n    \}", module, re.DOTALL)
+        self.assertIsNotNone(body, "ui/drag_to_target.js 找不到 cancel()")
+        self.assertIn("releasePointerCapture", body.group(0))
+
+    def test_the_page_delegates_to_the_shared_cancel(self):
         body = _function_body(self.content, "cancelDragInProgress")
         self.assertIsNotNone(body, "找不到 cancelDragInProgress()")
-        self.assertIn("releasePointerCapture", body)
+        self.assertIn(".cancel()", body)
 
     def test_the_success_path_terminates_the_drag(self):
         body = _function_body(self.content, "attemptInstall")

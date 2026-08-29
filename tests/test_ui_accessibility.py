@@ -26,8 +26,18 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INDEX_HTML = os.path.join(REPO_ROOT, "ui", "index.html")
 
 
+DRAG_MODULE = os.path.join(REPO_ROOT, "ui", "drag_to_target.js")
+
+
 def _read_index_html():
     with open(INDEX_HTML, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def _read_drag_module():
+    """自繪拖曳的實作。安裝端與解除安裝端共用同一份（見 ADR-0002），
+    所以「機制換掉了沒有」這類契約要對這個檔案檢查，不是對 HTML。"""
+    with open(DRAG_MODULE, "r", encoding="utf-8") as f:
         return f.read()
 
 
@@ -233,15 +243,25 @@ class TestDragToInstallInteraction(unittest.TestCase):
     def test_drag_is_driven_by_pointer_events(self):
         """滑鼠、觸控筆、觸控都走同一套 pointer 事件；pointercancel 是
         系統中途接管手勢（例如觸控被捲動搶走）時的收尾，漏了會讓圖示卡在
-        半路。"""
+        半路。
+
+        手勢本體已經抽到 ui/drag_to_target.js 跟解除安裝端共用，所以檢查
+        對象是那個檔案——但 index.html 必須真的載入它，否則抽出去的實作
+        根本沒有生效。"""
         content = _read_index_html()
+        self.assertIn(
+            'src="drag_to_target.js"', content,
+            "ui/index.html 沒有載入共用的拖曳實作",
+        )
+
+        module = _read_drag_module()
         for event_name in ("pointerdown", "pointermove", "pointerup", "pointercancel"):
             self.assertTrue(
-                ("'" + event_name + "'") in content,
-                "ui/index.html 沒有處理 {} 事件".format(event_name),
+                ("'" + event_name + "'") in module,
+                "ui/drag_to_target.js 沒有處理 {} 事件".format(event_name),
             )
         self.assertTrue(
-            "setPointerCapture" in content,
+            "setPointerCapture" in module,
             "沒有用 setPointerCapture，游標移出圖示範圍時拖曳會斷掉",
         )
 

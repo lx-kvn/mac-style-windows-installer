@@ -92,18 +92,22 @@ class TestUiAssetsAreRegisteredForPackaging(unittest.TestCase):
             if os.path.isfile(os.path.join(UI_DIR, name))
         }
 
-    def test_every_html_is_registered_in_the_prerequisite_check(self):
+    def test_every_implementation_file_is_registered_in_the_prerequisite_check(self):
         """`build_config_tool._REQUIRED_FILES` 是編譯兩顆工具 exe 之前的
-        存在性檢查。HTML 是介面實作，缺一份就編不出可用的工具，必須在檢查
-        清單裡；漏登記的話會編出一顆跑起來才發現少東西的 exe。"""
+        存在性檢查。介面實作（HTML 與 JS）缺一份就編不出可用的工具，必須在
+        檢查清單裡；漏登記的話會編出一顆跑起來才發現東西不對的 exe——共用的
+        拖曳實作缺了尤其陰險，畫面照樣畫得出來，只是圖示完全拖不動。
+
+        判斷依據是副檔名（實作 vs 靜態資源），不是一份寫死的檔名清單——
+        那正是 ensure_workspace_files() 原本踩過的坑。"""
         registered = {label for label, _path in build_config_tool._REQUIRED_FILES}
         missing = [
             f"ui/{name}" for name in self._ui_files()
-            if name.endswith(".html") and f"ui/{name}" not in registered
+            if name.endswith((".html", ".js")) and f"ui/{name}" not in registered
         ]
         self.assertEqual(
             missing, [],
-            f"這些 HTML 沒有登記在 build_config_tool._REQUIRED_FILES：{missing}",
+            f"這些介面實作沒有登記在 build_config_tool._REQUIRED_FILES：{missing}",
         )
 
     def test_every_ui_file_has_a_declared_overwrite_policy(self):

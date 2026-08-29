@@ -434,6 +434,10 @@
         </div>
     </div>
 
+    <!-- 拖曳手勢的實作，跟解除安裝端共用同一份（見 ADR-0002 與該檔案的
+         說明）。必須排在下面那段之前：createDragToTarget() 在那裡就會被
+         呼叫。 -->
+    <script src="drag_to_target.js"></script>
     <script>
         document.addEventListener('contextmenu', (e) => e.preventDefault());
 
@@ -853,127 +857,25 @@
         });
 
         // ---------------- 拖曳安裝（自繪 + 彈簧）----------------
-        // 不使用瀏覽器內建的拖曳（draggable 屬性那一套），因為那條路徑被拖著
-        // 跑的影像是作業系統畫的，外觀完全不受控，也做不出按下的即時回饋、
-        // 沒放中的彈回、放進去的吸入。改成自己用 pointer 事件搬圖示，位移交給
-        // 彈簧——彈簧的動畫可以在任何一刻被使用者接手，這是「彈回途中還抓得
-        // 住」的前提，換成固定長度的 CSS 動畫就做不到。
-        //
-        // 下面這幾個數字是在互動原型上實際拖過幾十次調出來的觀感值，不是推導
-        // 出來的常數，往後要微調直接改這裡。
-        const SPRING_BOUNCE = 0.30;     // 0 = 完全不過衝，越大越晃
-        const SPRING_RESPONSE = 0.25;   // 彈簧的自然週期（秒）。彈簧沒有固定長度，
-                                        // 這個值是「多快到位」，不是「動畫幾秒」
-        const PICKUP_SCALE = 1.06;      // 拿起來就是離開桌面靠近眼睛，所以變大
-        const ABSORB_MS = 320;          // 命中後被吸進資料夾的時間
-        const SWALLOW_MS = 300;         // 資料夾吞下去的那一口有多長
+        // 手勢本體收在 ui/drag_to_target.js，安裝端與解除安裝端共用同一套
+        // （為什麼是自繪而不是瀏覽器內建拖放，見 ADR-0002 與該檔案的說明）。
+        // 這裡只留安裝端專屬的部分：資料夾「吞一下」那個回應動畫，以及
+        // 安裝狀態的守門。
+
+        // 資料夾吞下去的那一口。解除安裝端的目的地是垃圾桶、回應動作不同
+        // （掀蓋、闔蓋），所以這兩個數值留在這裡，不放進共用檔案。
+        const SWALLOW_MS = 300;         // 那一口有多長
         const SWALLOW_SQUASH = 0.94;    // 壓到比原始大小更小的那個底
-        const HIT_TOLERANCE = 25;       // 命中判定往外撐幾 px（重疊即命中的容差）
-        const MAGNET_STRENGTH = 0.20;   // 靠近資料夾時被拉過去的程度
-        const MAGNET_RANGE = 150;       // 這個距離內磁吸才開始作用
-        const EASE_OUT = 'cubic-bezier(0.23, 1, 0.32, 1)';
-        // 更強的 ease-out：幾乎在第一幀就衝出去，後段收得很慢。用在「已經成定局」
-        // 的動作（圖示被吸進去、資料夾被壓下去）——這類動作開頭慢半拍就會拖沓，
-        // 使用者要的是它趕快演完，不是欣賞它加速。
-        const EASE_SNAP = 'cubic-bezier(0.16, 1, 0.3, 1)';
 
         const dragInner = dragItem.querySelector('.drag-inner');
         const dragGhost = document.getElementById('dragGhost');
         const dropSlot = dropTarget.querySelector('.icon-wrapper');
-        const reduceMotionQuery = window.matchMedia
-            ? window.matchMedia('(prefers-reduced-motion: reduce)')
-            : { matches: false };
-        function motionReduced() { return reduceMotionQuery.matches; }
-
-        // 彈簧：用「回彈 / 多快到位」兩個參數換算成一般的彈簧方程式。X 跟 Y
-        // 各自獨立一條，合成單一條會在兩軸速度不同時失去同步。
-        function makeSpring() { return { x: 0, v: 0, target: 0 }; }
-        function stepSpring(sp, dt) {
-            const zeta = 1 - SPRING_BOUNCE;
-            const w = (2 * Math.PI) / SPRING_RESPONSE;
-            const k = w * w;
-            const c = 2 * zeta * w;
-            let remaining = dt;
-            while (remaining > 0) {
-                // 固定子步長積分，掉幀時彈簧才不會發散
-                const h = Math.min(remaining, 1 / 240);
-                sp.v += (-k * (sp.x - sp.target) - c * sp.v) * h;
-                sp.x += sp.v * h;
-                remaining -= h;
-            }
-        }
-        function springAtRest(sp) {
-            return Math.abs(sp.x - sp.target) < 0.05 && Math.abs(sp.v) < 0.05;
-        }
-
-        const dragX = makeSpring();
-        const dragY = makeSpring();
-        let dragActive = false;
-        let dragPointerId = null;
-        let dragStartPoint = { x: 0, y: 0 };
-        let dragBaseOffset = { x: 0, y: 0 };
-        let dragHistory = [];
-        let dragHovering = false;
-        let dragAbsorbing = false;
-        let dragRaf = null;
-        let dragLastFrame = 0;
-
-        function renderDragPosition() {
-            dragItem.style.transform =
-                'translate3d(' + dragX.x.toFixed(2) + 'px, ' + dragY.x.toFixed(2) + 'px, 0)';
-        }
-
-        function setPickedUp(on) {
-            dragInner.style.transform = 'scale(' + (on ? PICKUP_SCALE : 1) + ')';
-            dragInner.style.filter = on ? 'drop-shadow(0 14px 22px rgba(0,0,0,0.20))' : 'none';
-            dragGhost.classList.toggle('shown', on);
-        }
-
-        // 命中判定：重疊即命中，容差把資料夾的判定範圍往外撐。不採用依放開
-        // 速度往前推算落點的做法——那適合可以反悔的動作，安裝會實際寫進使用者
-        // 的系統，不該因為手一抖甩過去就觸發。
-        function dragIsOverDropTarget() {
-            const a = dragItem.getBoundingClientRect();
-            const b = dropSlot.getBoundingClientRect();
-            return !(a.right < b.left - HIT_TOLERANCE || a.left > b.right + HIT_TOLERANCE ||
-                     a.bottom < b.top - HIT_TOLERANCE || a.top > b.bottom + HIT_TOLERANCE);
-        }
-
-        function setDropHover(on) {
-            if (dragHovering === on) return;
-            dragHovering = on;
-            dropTarget.classList.toggle('drag-over', on);
-        }
-
-        function dragLoop(now) {
-            const dt = Math.min((now - dragLastFrame) / 1000, 1 / 30);
-            dragLastFrame = now;
-            if (!dragActive) { stepSpring(dragX, dt); stepSpring(dragY, dt); }
-            renderDragPosition();
-            if (dragActive || !(springAtRest(dragX) && springAtRest(dragY))) {
-                dragRaf = requestAnimationFrame(dragLoop);
-            } else {
-                dragX.x = dragX.target; dragY.x = dragY.target;
-                dragX.v = 0; dragY.v = 0;
-                renderDragPosition();
-                dragRaf = null;
-                if (!dragAbsorbing) setPickedUp(false);
-            }
-        }
-        function ensureDragLoop() {
-            if (dragRaf === null) {
-                dragLastFrame = performance.now();
-                dragRaf = requestAnimationFrame(dragLoop);
-            }
-        }
 
         // 安裝狀態。'idle' 可以拖、'running' 安裝進行中、'done' 已經裝完。
         //
-        // 真實抓到的缺陷（使用者實測，2026-08-30）：原本只有 dragAbsorbing
-        // （吸入動畫播放中）跟 installSucceeded（關閉彈窗時判斷要不要啟動
-        // 程式用），兩個都不代表「安裝進行中」。而 absorbIntoDropTarget()
-        // 的收尾是先把 dragAbsorbing 設回 false、才呼叫安裝，所以整段安裝
-        // 期間圖示的狀態跟安裝開始前完全相同，可以再抓起來放第二次。
+        // 真實抓到的缺陷（使用者實測，2026-08-30）：原本只有「吸入動畫播放中」
+        // 跟 installSucceeded（關閉彈窗時判斷要不要啟動程式用），兩個都不代表
+        // 「安裝進行中」，所以整段安裝期間圖示都還抓得起來，可以放第二次。
         //
         // 'running' 跟 'done' 的處置一樣（都不准拖），但要分得出來：進行中
         // 再放一次會讓兩個安裝流程並行；已完成再放一次，密碼保護的安裝會
@@ -982,162 +884,34 @@
         // trigger_installation()）——前端擋的是使用者體驗，後端是最後防線。
         let installState = 'idle';
 
-        // 終結進行中的拖曳。顯示成功彈窗時一定要呼叫這個，不能只靠彈窗
-        // 蓋住圖示：彈窗確實擋得住新的 pointerdown（實測 elementFromPoint
-        // 在圖示位置回傳的是彈窗本身），但已經 setPointerCapture() 的拖曳
-        // 完全不經過命中測試，pointermove/pointerup 照樣送到圖示上；而且
-        // showModal() 不會隱藏 mainView，安裝目的地圖示的座標仍然是真實
-        // 的，放開時照樣算命中。
-        function cancelDragInProgress() {
-            if (!dragActive) return;
-            if (dragPointerId !== null && dragItem.hasPointerCapture(dragPointerId)) {
-                dragItem.releasePointerCapture(dragPointerId);
-            }
-            dragActive = false;
-            dragItem.classList.remove('grabbing');
-            dragPointerId = null;
-            setDropHover(false);
-            setPickedUp(false);
-            // 走跟「沒放中」同一條彈回路徑，讓手上的圖示回到原位，不要留下
-            // 一個卡在半空中的圖示。
-            dragX.target = 0; dragY.target = 0;
-            if (motionReduced()) {
-                dragX.x = 0; dragY.x = 0; dragX.v = 0; dragY.v = 0;
-                renderDragPosition();
-            } else {
-                ensureDragLoop();
-            }
-        }
-
-        dragItem.addEventListener('pointerdown', (e) => {
-            if (dragAbsorbing || installState !== 'idle') return;
-            e.preventDefault();
-            dragItem.setPointerCapture(e.pointerId);
-            dragPointerId = e.pointerId;
-            dragActive = true;
-            dragItem.classList.add('grabbing');
-            // 從畫面上「現在」的位置接手，所以彈回途中也抓得住，而且不會跳位
-            dragBaseOffset = { x: dragX.x, y: dragY.x };
-            dragStartPoint = { x: e.clientX, y: e.clientY };
-            dragX.v = 0; dragY.v = 0;
-            dragHistory = [{ x: e.clientX, y: e.clientY, t: performance.now() }];
-            setPickedUp(true);
-            ensureDragLoop();
-        });
-
-        dragItem.addEventListener('pointermove', (e) => {
-            if (!dragActive || e.pointerId !== dragPointerId) return;
-            let px = dragBaseOffset.x + (e.clientX - dragStartPoint.x);
-            let py = dragBaseOffset.y + (e.clientY - dragStartPoint.y);
-
-            if (MAGNET_STRENGTH > 0) {
-                // 磁吸：越靠近資料夾越往它靠。這段不再完全跟手，所以強度壓得
-                // 很低，只當成臨門一腳的暗示，不是幫使用者對準的主力（對準靠
-                // 的是上面那個命中容差）。
-                const a = dragItem.getBoundingClientRect();
-                const b = dropSlot.getBoundingClientRect();
-                const cx = a.left + a.width / 2, cy = a.top + a.height / 2;
-                const tx = b.left + b.width / 2, ty = b.top + b.height / 2;
-                const d = Math.hypot(tx - cx, ty - cy);
-                if (d < MAGNET_RANGE) {
-                    const pull = (1 - d / MAGNET_RANGE) * MAGNET_STRENGTH;
-                    px += (tx - cx) * pull;
-                    py += (ty - cy) * pull;
+        const dragController = createDragToTarget({
+            item: dragItem,
+            inner: dragInner,
+            ghost: dragGhost,
+            target: dropTarget,
+            targetSlot: dropSlot,
+            canDrag: () => installState === 'idle',
+            onHit: () => { triggerInstallFromDragItem(); },
+            onAbsorb: ({ durationMs, reduced }) => {
+                // 放開的當下資料夾已經是放大狀態（拖曳中的 1.08），從那裡直接
+                // 開始縮，經過原始大小時不停，一路壓到比原始大小更小，再彈回
+                // 原始大小——像被壓了一下然後回彈，而不是先漲大再收回。
+                //
+                // 這裡不用 delay：放大是 CSS class 給的，一旦把 class 收掉又
+                // 還沒輪到動畫接手，中間那段時間沒有任何一方在管這個 transform，
+                // 資料夾會先瞬間縮回原大小、乾等、再跳回放大開始演，看起來就是
+                // 卡住。動畫必須從第一幀就接管。
+                dropSlot.style.transition = 'none';
+                if (reduced) {
+                    dropSlot.style.transition = '';
+                    return;
                 }
-            }
-
-            dragX.x = px; dragX.target = px;
-            dragY.x = py; dragY.target = py;
-            renderDragPosition();
-            dragHistory.push({ x: e.clientX, y: e.clientY, t: performance.now() });
-            if (dragHistory.length > 6) dragHistory.shift();
-            setDropHover(dragIsOverDropTarget());
-        });
-
-        function endDragGesture(e) {
-            if (!dragActive || (e && e.pointerId !== dragPointerId)) return;
-            dragActive = false;
-            dragItem.classList.remove('grabbing');
-            if (dragPointerId !== null && dragItem.hasPointerCapture(dragPointerId)) {
-                dragItem.releasePointerCapture(dragPointerId);
-            }
-            dragPointerId = null;
-
-            const first = dragHistory[0];
-            const last = dragHistory[dragHistory.length - 1];
-            const dt = Math.max((last.t - first.t) / 1000, 0.001);
-            const vx = (last.x - first.x) / dt;
-            const vy = (last.y - first.y) / dt;
-
-            const hit = dragIsOverDropTarget();
-
-            if (hit) {
-                // 命中時不在這裡收掉放大狀態——放大是 CSS class 控制的，
-                // 收回的 transition 會跟接下來的吸入動畫搶同一個 transform，
-                // 兩股力道疊在一起就是那種抽搐感。改由 absorbIntoDropTarget()
-                // 從目前的放大狀態接手，一路演到結束。
-                absorbIntoDropTarget();
-                return;
-            }
-            setDropHover(false);
-            // 沒放中：彈回原位，並把手上的速度交接給彈簧，拖曳與動畫之間才不會
-            // 有一個看得出來的接縫
-            dragX.target = 0; dragY.target = 0;
-            setPickedUp(false);
-            if (motionReduced()) {
-                dragX.x = 0; dragY.x = 0; dragX.v = 0; dragY.v = 0;
-                renderDragPosition();
-            } else {
-                dragX.v = vx; dragY.v = vy;
-                ensureDragLoop();
-            }
-        }
-        dragItem.addEventListener('pointerup', endDragGesture);
-        dragItem.addEventListener('pointercancel', endDragGesture);
-
-        // 命中：圖示被吸進資料夾，資料夾同時很輕地回應一下，接著才真的開始
-        // 安裝。圖示不會縮到完全消失——那看起來像憑空蒸發，不像被裝進去。
-        function absorbIntoDropTarget() {
-            dragAbsorbing = true;
-            const a = dragItem.getBoundingClientRect();
-            const b = dropSlot.getBoundingClientRect();
-            const dx = (b.left + b.width / 2) - (a.left + a.width / 2);
-            const dy = (b.top + b.height / 2) - (a.top + a.height / 2);
-            const duration = motionReduced() ? 0 : ABSORB_MS;
-
-            dragInner.style.filter = 'none';
-            dragInner.animate(
-                [{ transform: 'scale(' + PICKUP_SCALE + ')' }, { transform: 'scale(0.34)' }],
-                { duration: duration, easing: EASE_SNAP, fill: 'forwards' }
-            );
-            const flight = dragItem.animate(
-                [
-                    { transform: 'translate3d(' + dragX.x + 'px, ' + dragY.x + 'px, 0)', opacity: 1 },
-                    { transform: 'translate3d(' + (dragX.x + dx) + 'px, ' + (dragY.x + dy) + 'px, 0)', opacity: 0 }
-                ],
-                { duration: duration, easing: EASE_SNAP, fill: 'forwards' }
-            );
-            // 資料夾吞下去的那一口：放開的當下資料夾已經是放大狀態（拖曳中的
-            // 1.08），從那裡直接開始縮，經過原始大小時不停，一路壓到比原始
-            // 大小更小，再彈回原始大小——像被壓了一下然後回彈，而不是先漲大
-            // 再收回。
-            //
-            // 這裡不用 delay：放大是 CSS class 給的，一旦把 class 收掉又還沒
-            // 輪到動畫接手，中間那段時間沒有任何一方在管這個 transform，資料夾
-            // 會先瞬間縮回原大小、乾等、再跳回放大開始演，看起來就是卡住。
-            // 動畫必須從第一幀就接管。
-            dropSlot.style.transition = 'none';
-            dragHovering = false;
-            dropTarget.classList.remove('drag-over');
-            if (motionReduced()) {
-                dropSlot.style.transition = '';
-            } else {
                 const swallow = dropSlot.animate(
                     [
                         // 壓下去這段一開始就衝到底：這個動作已成定局，開頭慢半拍
                         // 只會顯得拖沓
-                        { transform: 'scale(1.08)', offset: 0, easing: EASE_SNAP },
-                        { transform: 'scale(' + SWALLOW_SQUASH + ')', offset: 0.35, easing: EASE_OUT },
+                        { transform: 'scale(1.08)', offset: 0, easing: DRAG_EASE_SNAP },
+                        { transform: 'scale(' + SWALLOW_SQUASH + ')', offset: 0.35, easing: DRAG_EASE_OUT },
                         { transform: 'scale(1.012)', offset: 0.72 },
                         { transform: 'scale(1)', offset: 1 }
                     ],
@@ -1147,25 +921,17 @@
                     swallow.cancel();
                     dropSlot.style.transition = '';
                 });
-            }
+            },
+        });
 
-            flight.finished.catch(() => {}).then(() => {
-                // 圖示回到原位並恢復可見：安裝失敗或被取消時會退回主畫面，
-                // 那時候圖示本來就該還在原本的地方
-                dragItem.getAnimations().forEach((anim) => anim.cancel());
-                dragInner.getAnimations().forEach((anim) => anim.cancel());
-                dragX.x = 0; dragY.x = 0; dragX.v = 0; dragY.v = 0;
-                dragX.target = 0; dragY.target = 0;
-                renderDragPosition();
-                setPickedUp(false);
-                dragAbsorbing = false;
-                // 圖示剛剛才淡出，瞬間又出現在原位會突兀，讓它淡回來
-                if (!motionReduced()) {
-                    dragItem.animate([{ opacity: 0 }, { opacity: 1 }],
-                        { duration: 240, easing: EASE_OUT });
-                }
-                triggerInstallFromDragItem();
-            });
+        // 終結進行中的拖曳。顯示成功彈窗時一定要呼叫，不能只靠彈窗蓋住圖示：
+        // 彈窗確實擋得住新的 pointerdown（實測 elementFromPoint 在圖示位置
+        // 回傳的是彈窗本身），但已經取得指標捕獲的拖曳完全不經過命中測試，
+        // 而且 showModal() 不會隱藏 mainView，安裝目的地圖示的座標仍然是
+        // 真實的，放開時照樣算命中。實際的釋放與彈回在 drag_to_target.js
+        // 的 cancel()。
+        function cancelDragInProgress() {
+            dragController.cancel();
         }
 
         window.updateInstallProgress = function (percent, message) {
