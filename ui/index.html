@@ -292,7 +292,11 @@
         <input type="password" class="password-input" id="passwordInput" data-i18n-placeholder="password_input_placeholder" placeholder="密碼" autocomplete="off">
         <div class="password-error" id="passwordError" data-i18n="password_wrong_error">密碼錯誤，請重新輸入</div>
         <div class="password-actions">
-            <button class="nice-btn secondary" onclick="declinePassword()" data-i18n="btn_decline">不同意</button>
+            <!-- 這裡用「取消」不是「不同意」：密碼關卡沒有什麼可以同意或
+                 不同意的，使用者只是沒有密碼、或不想繼續。「不同意」是 EULA
+                 那一關的用詞（下面 declineEula() 那顆），當初被連同版面一起
+                 複製過來。 -->
+            <button class="nice-btn secondary" onclick="declinePassword()" data-i18n="btn_cancel">取消</button>
             <button class="nice-btn" onclick="submitPassword()" data-i18n="btn_password_submit">確定</button>
         </div>
     </div>
