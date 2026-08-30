@@ -274,7 +274,7 @@ def _path_removal_target(manifest, current_dir):
 
 
 def remove_from_path(install_path, no_admin_install=False):
-    system_entries.remove_from_path(install_path, no_admin_install, registry=winreg)
+    return system_entries.remove_from_path(install_path, no_admin_install, registry=winreg)
 
 
 def _load_uninstall_context(argv):

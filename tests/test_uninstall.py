@@ -745,8 +745,54 @@ class TestLoadUninstallContext(unittest.TestCase):
 
 ## 登錄表項目/捷徑/PATH 的實際移除邏輯（含 no_admin_install 的 HKCU/HKLM
 ## 判斷）已經拆到 system_entries.py，對應測試搬到
-## tests/test_system_entries.py。這裡的 remove_registry_entry()/
-## remove_shortcut()/remove_from_path() 只是薄薄一層委派，不再重複測試。
+## tests/test_system_entries.py。這裡只驗證委派層本身沒有把結果弄丟。
+
+
+class TestThinDelegatesPassTheResultThrough(unittest.TestCase):
+    """uninstall.py 的 remove_registry_entry()／remove_shortcut()／
+    remove_from_path() 只是把呼叫轉給 system_entries 的同名函式，唯一的
+    責任就是把回傳值原樣交回去。
+
+    真實抓到的缺陷（使用者實測，2026-08-30）：`remove_from_path()` 這一層
+    漏了 `return`，永遠回傳 `None`。system_entries 那邊即使成功移除，
+    解除安裝畫面仍然無條件顯示「從環境變數 PATH 移除安裝路徑失敗」，
+    而 PATH 其實已經清乾淨了——是一個純粹的假警報。
+
+    這個缺陷之所以能通過整套測試，是因為兩邊的測試剛好都繞過了這一層：
+    tests/test_system_entries.py 直接測底層函式，而這個檔案裡驗證失敗清單
+    的測試把 `uninstall.remove_from_path` 整個換掉並指定 return_value，
+    委派層的真實程式碼從來沒有被執行過。原本這裡還留著一段「只是薄薄一層
+    委派，不再重複測試」的註解，正是那個判斷讓缺陷有機會存在。委派層再薄
+    也是實際會執行的程式碼，回傳值的傳遞就是它的契約。
+    """
+
+    def _assert_passes_through(self, wrapper_name, backend_name, call):
+        wrapper = getattr(un, wrapper_name)
+        for value in (True, False):
+            with mock.patch.object(un.system_entries, backend_name, return_value=value):
+                self.assertIs(
+                    call(wrapper), value,
+                    f"uninstall.{wrapper_name}() 沒有把 system_entries.{backend_name}() "
+                    f"的回傳值 {value} 交回呼叫端",
+                )
+
+    def test_remove_registry_entry_passes_the_result_through(self):
+        self._assert_passes_through(
+            "remove_registry_entry", "remove_registry_entry",
+            lambda f: f("MyApp"),
+        )
+
+    def test_remove_shortcut_passes_the_result_through(self):
+        self._assert_passes_through(
+            "remove_shortcut", "remove_shortcut",
+            lambda f: f("MyApp"),
+        )
+
+    def test_remove_from_path_passes_the_result_through(self):
+        self._assert_passes_through(
+            "remove_from_path", "remove_from_path",
+            lambda f: f("C:\Apps\MyApp"),
+        )
 
 
 class TestCliLogPath(unittest.TestCase):
