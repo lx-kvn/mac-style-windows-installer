@@ -168,5 +168,66 @@ class TestInFlightDragIsTerminatedWhenTheModalOpens(unittest.TestCase):
         )
 
 
+class TestDestinationIconIsLockedOnceInstallStarts(unittest.TestCase):
+    """安裝開始後，安裝目的地圖示也不能再被點開資料夾選擇對話框。
+
+    使用者回報（2026-08-30）：拖曳那一側已經擋掉了，但安裝目的地圖示仍然
+    點得下去，可以在安裝進行中叫出資料夾選擇對話框改路徑。改掉的路徑不會
+    套用到正在跑的那次安裝（後端拿到的路徑在 `trigger_installation()` 呼叫
+    當下就固定了），所以這不會造成安裝結果錯亂，但畫面會顯示一個與實際安裝
+    位置不符的路徑，也與「安裝已經開始，這一輪的選擇已經定案」的認知相違。
+
+    守門放在 `chooseInstallFolder()` 這個滑鼠與鍵盤共用的入口，理由與
+    `triggerInstallFromDragItem()` 相同：只擋 click 的話，鍵盤那條路徑
+    （Enter／空白鍵）仍然打得開對話框。
+    """
+
+    def setUp(self):
+        self.content = _read()
+
+    def test_choose_install_folder_is_gated_by_the_install_state(self):
+        body = _function_body(self.content, "chooseInstallFolder")
+        self.assertIsNotNone(body, "找不到 chooseInstallFolder()")
+        self.assertIn(
+            "installState", body,
+            "安裝目的地圖示的共用入口沒有檢查安裝狀態，安裝進行中仍然叫得出"
+            "資料夾選擇對話框",
+        )
+
+    def test_the_state_is_only_changed_through_one_setter(self):
+        """狀態變數與畫面上的可點擊性必須一起改，否則兩者會漂移（改了狀態
+        卻忘了改畫面，圖示看起來還能點）。因此不允許直接指派 `installState`
+        ——一律走 `setInstallState()`。"""
+        self.assertIn("function setInstallState", self.content)
+        stray = [
+            m for m in re.finditer(r"installState\s*=\s*'", self.content)
+            if "function setInstallState" not in self.content[
+                max(0, m.start() - 400):m.start()
+            ]
+        ]
+        self.assertEqual(
+            [], [m.group(0) for m in stray],
+            "有直接指派 installState 的地方，狀態與畫面會漂移",
+        )
+
+    def test_the_setter_marks_the_destination_icon_for_assistive_tech(self):
+        body = _function_body(self.content, "setInstallState")
+        self.assertIsNotNone(body, "找不到 setInstallState()")
+        self.assertIn(
+            "aria-disabled", body,
+            "鎖住的只是行為，讀螢幕軟體仍然會把安裝目的地圖示念成可按的按鈕",
+        )
+        self.assertIn("dropTarget", body)
+
+    def test_the_locked_destination_icon_looks_unclickable(self):
+        """行為擋掉但游標仍是手指、按下去仍然縮一下，會讓使用者以為是當掉
+        而不是不能點。"""
+        self.assertRegex(
+            self.content,
+            r"#drop-target\[aria-disabled=\"true\"\]",
+            "沒有針對鎖定狀態的樣式規則",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -126,6 +126,10 @@
            自己確實按到了。拖曳中的放大（.drag-over）走同一條 transition，
            原本的 0.2s 在拖曳過程中會慢半拍，一起縮短到 160ms。 */
         #drop-target:active .icon-wrapper { transform: scale(0.96); }
+        /* 安裝開始後安裝目的地圖示不再可用。只擋行為、外觀不變的話，游標仍是
+           手指、按下去仍然縮一下，使用者會以為是當掉而不是不能點。 */
+        #drop-target[aria-disabled="true"] .icon-wrapper { cursor: default; }
+        #drop-target[aria-disabled="true"]:active .icon-wrapper { transform: none; }
         /* 安裝目的地圖示同樣原本只有滑鼠 click 事件，補上鍵盤操作後也要
            有焦點框。外框畫在內部的 .icon-wrapper 上而不是整個 .icon-box
            上，讓它跟 #drag-item 一樣只框住圖示本身，不會把底下的標籤與
@@ -850,6 +854,12 @@
         // 點安裝目的地圖示、以及用鍵盤選到它後按 Enter/空白鍵，都走這同一個
         // 函式，兩邊行為不會分岔。
         async function chooseInstallFolder() {
+            // 安裝一旦開始，這一輪的安裝位置就已經定案（後端拿到的路徑在
+            // trigger_installation() 呼叫當下就固定了）。此時再讓使用者選一次
+            // 不會改變實際的安裝位置，只會讓畫面顯示一個與實際安裝位置不符的
+            // 路徑。守門放在這裡而不是 click 事件上，是因為鍵盤（Enter／空白鍵）
+            // 也走這個函式，只擋 click 的話鍵盤那條路徑仍然打得開對話框。
+            if (installState !== 'idle') return;
             const newPath = await pywebview.api.select_folder();
             if (newPath) { pathPreview.innerText = newPath; pathPreview.setAttribute('title', newPath); }
         }
@@ -884,7 +894,20 @@
         // 因為解密的暫存資料已經被清掉而失敗，沒有密碼保護的則會安靜地
         // 再裝一次。後端也有對應的重入防護（見 InstallerAPI 的
         // trigger_installation()）——前端擋的是使用者體驗，後端是最後防線。
-        let installState = 'idle';
+        let installState;
+
+        // 狀態變數與畫面上的可點擊性必須一起改，否則兩者會漂移（改了狀態卻
+        // 忘了改畫面，安裝目的地圖示看起來還能點）。因此不直接指派
+        // installState，一律走這個函式。
+        //
+        // 使用 aria-disabled 而不是移除 tabindex：移除之後鍵盤使用者選不到
+        // 它，也就得不到「這個東西現在不能用」的回饋，只會覺得元素憑空消失。
+        // aria-disabled 保留可聚焦性，同時讓讀螢幕軟體念出停用狀態。
+        function setInstallState(next) {
+            installState = next;
+            dropTarget.setAttribute('aria-disabled', next === 'idle' ? 'false' : 'true');
+        }
+        setInstallState('idle');
 
         const dragController = createDragToTarget({
             item: dragItem,
@@ -955,7 +978,7 @@
             // 安裝失敗、主程式執行中、檔案被鎖住這幾條都會退回主畫面讓使用者
             // 重試（closeRunningAppAndRetry／closeLockingProcessAndRetry），
             // 狀態要清回 'idle'，不能把正當的重試一起擋掉。
-            installState = 'idle';
+            setInstallState('idle');
         }
 
         function cancelProcessRunningModal() {
@@ -1003,7 +1026,7 @@
         async function attemptInstall(createDesktopShortcut, skipProcessCheck) {
             // 狀態要在呼叫後端之前就設好，否則從這裡到後端真的開始動作之間
             // 還有一段空窗，使用者可以在那段時間再放一次。
-            installState = 'running';
+            setInstallState('running');
             lastCreateDesktopShortcut = createDesktopShortcut;
             pathPreview.dataset.beforeInstall = pathPreview.innerText;
             document.getElementById('installProgressWrap').style.display = 'block';
@@ -1014,7 +1037,7 @@
             const result = await pywebview.api.trigger_installation(createDesktopShortcut, !!skipProcessCheck);
 
             if (result.status === 'success') {
-                installState = 'done';
+                setInstallState('done');
                 installSucceeded = true;
                 // 使用者可能在成功畫面出現之前就已經抓著圖示了。彈窗蓋不住
                 // 那種拖曳（見 cancelDragInProgress() 的說明），要主動終結。
