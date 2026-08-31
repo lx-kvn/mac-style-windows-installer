@@ -50,6 +50,7 @@ from datetime import datetime
 import dependency_defs
 import version_info
 import install_encryption
+import sdk_tools
 
 CONFIG_FILE_NAME = "installer_config.json"
 
@@ -123,7 +124,7 @@ def _download_file(url, dest_path, timeout=60, expected_sha256=None):
         raise
 
 
-def _sign_executable(exe_path, signing):
+def _sign_executable(exe_path, signing, find_tool=None, run=None, log=None):
     """用 signtool 幫編譯出來的 exe 簽數位簽章（見 signing 設定欄位）。
 
     這裡不負責生出憑證——那要跟憑證機構購買或用公司行號申請，這個函式做的
@@ -134,17 +135,27 @@ def _sign_executable(exe_path, signing):
     密碼透過 cert_password_env 指定的環境變數名稱讀取，不放在設定檔明文裡；
     packaging_core.py 的 validate_and_build_pack_data() 已經確認過打包當下
     這個環境變數確實有值，這裡直接讀取即可。
+
+    signtool 的檢索改走 sdk_tools.find_tool()，與 MSIX 模式的 makeappx
+    共用同一套來源優先序（見 docs/adr/0008 決定四）。原本的實作只檢索
+    PATH，而 Windows SDK 安裝後不會把這些工具加進 PATH——對已正確安裝
+    SDK 的使用者，該實作會回報找不到，並要求他們去做一件不會成功的事。
+
+    find_tool／run 是測試接縫（比照 file_assoc.py 的 registry 參數），
+    預設分別是 sdk_tools.find_tool 與 subprocess.run。log 收到本次實際
+    採用的工具來源與版本，三個來源並存時，這行是診斷「兩台機器打包結果
+    不同」的唯一依據（docs/adr/0008 決定五末段）。
     """
-    signtool = shutil.which("signtool")
-    if not signtool:
-        raise Exception(
-            "找不到 signtool（需要安裝 Windows SDK 或 Visual Studio，並確認它在 PATH 裡），無法簽署數位簽章。"
-        )
+    find_tool = find_tool or sdk_tools.find_tool
+    run = run or subprocess.run
+    located = find_tool("signtool.exe")
+    if log:
+        log(located.describe())
     password = os.environ.get(signing["cert_password_env"], "")
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    result = subprocess.run(
+    result = run(
         [
-            signtool, "sign",
+            located.path, "sign",
             "/f", signing["cert_path"],
             "/p", password,
             "/fd", "sha256",
@@ -169,12 +180,16 @@ def build_all(
     custom_dependencies=None, bundle_dependencies=None, signing=None, custom_install_dir="",
     windows_service=None, scheduled_task=None, dependencies_min_version=None,
     create_restore_point_before_install=False, install_password_env="", install_password="",
-    workspace_dir=".", progress_callback=None,
+    workspace_dir=".", sdk_tools_settings=None, progress_callback=None,
 ):
     """流水線：產生配置 -> 編譯反安裝檔 -> 編譯主安裝檔
 
     workspace_dir：ui/、installer_core.py、uninstall.py 必須實際存在的工作目錄，
     也是 dist/、build/、installer_config.json 等中間產物的落地位置。
+
+    sdk_tools_settings：這一次建置要用的 SDK 工具設定（signtool 從哪裡來，
+    見 sdk_tools.py）。None 代表讀取這台機器的持久設定；呼叫端傳入的則是
+    「持久設定疊上這次的命令列覆蓋」的結果，效力只及於這一次執行。
 
     exe_name / app_name / folder_name 是三個不同的東西：
       - exe_name：安裝檔本身的檔名（例如 Setup_MyApp），只在編譯這個步驟用到，
@@ -509,7 +524,15 @@ def build_all(
         # 使用者特地設定了簽章，簽不成不該悄悄放行產出未簽章的檔案——
         # 直接讓整個 pack 流程失敗，而不是打包「成功」但實際上沒簽章。
         report(99, "正在簽署數位簽章...", cap=99, time_constant=2)
-        _sign_executable(dist_installer, signing)
-        _sign_executable(built_uninstall, signing)
+        def locate_signtool(name):
+            return sdk_tools.find_tool(name, settings=sdk_tools_settings)
+
+        # log 只掛在第一次呼叫：兩次簽的是同一支 signtool，來源那行印兩次
+        # 只是重複。
+        _sign_executable(
+            dist_installer, signing, find_tool=locate_signtool,
+            log=lambda message: report(99, message, cap=99, time_constant=2),
+        )
+        _sign_executable(built_uninstall, signing, find_tool=locate_signtool)
 
     report(100, f"編譯完成，輸出位置：{dist_installer}", cap=100, time_constant=1)

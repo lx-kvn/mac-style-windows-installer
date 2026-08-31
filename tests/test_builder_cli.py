@@ -6,6 +6,7 @@
 邏輯：JSON 載入、CLI flag 覆蓋規則、need_file_assoc/use_custom_doc_icon
 的推斷、環境檢查失敗/驗證失敗的 exit code 與輸出。
 """
+import argparse
 import io
 import os
 import sys
@@ -19,6 +20,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import builder_cli
+import sdk_tools
 
 
 class TestCmdInit(unittest.TestCase):
@@ -267,3 +269,116 @@ class TestCmdPack(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestFetchSdkToolsCommand(unittest.TestCase):
+    """`fetch-sdk-tools` 子指令（ADR-0008 決定一：明確要求才下載）。
+
+    取得動作做成獨立子指令而非 pack 的旗標：它是一次性的環境準備動作，
+    混進打包指令會使「打包流程不自動下載」這項決定在某些呼叫方式下自相
+    矛盾。這裡測的是「指令有沒有把使用者的意思正確轉成 fetch_tools() 的
+    參數」，實際下載由 tests/test_sdk_tools.py 涵蓋。
+    """
+
+    def test_pack_does_not_fetch_anything(self):
+        """打包流程不得自行取得 SDK 工具，這是決定一的核心。"""
+        parser = builder_cli.build_arg_parser()
+        args = parser.parse_args(["pack", "--app-dir", "x"])
+        self.assertFalse(any("fetch" in name for name in vars(args)))
+
+    def test_invokes_fetch_tools_and_returns_zero(self):
+        with mock.patch("sdk_tools.fetch_tools") as fetch:
+            fetch.return_value = sdk_tools.FetchResult(r"C:\cache\1.0", "1.0", {})
+            with contextlib.redirect_stdout(io.StringIO()):
+                exit_code = builder_cli.main(["fetch-sdk-tools"])
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(fetch.call_count, 1)
+
+    def test_cache_dir_flag_is_passed_through_as_a_setting_override(self):
+        with mock.patch("sdk_tools.fetch_tools") as fetch:
+            fetch.return_value = sdk_tools.FetchResult(r"C:\ci\1.0", "1.0", {})
+            with contextlib.redirect_stdout(io.StringIO()):
+                builder_cli.main(["fetch-sdk-tools", "--cache-dir", r"C:\ci"])
+        settings = fetch.call_args.kwargs["settings"]
+        self.assertEqual(settings[sdk_tools.SETTING_CACHE_DIR], r"C:\ci")
+
+    def test_force_flag_is_passed_through(self):
+        with mock.patch("sdk_tools.fetch_tools") as fetch:
+            fetch.return_value = sdk_tools.FetchResult(r"C:\cache\1.0", "1.0", {})
+            with contextlib.redirect_stdout(io.StringIO()):
+                builder_cli.main(["fetch-sdk-tools", "--force"])
+        self.assertTrue(fetch.call_args.kwargs["force"])
+
+    def test_failure_returns_nonzero_and_reports_the_reason(self):
+        with mock.patch("sdk_tools.fetch_tools", side_effect=Exception("網路斷了")):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                exit_code = builder_cli.main(["fetch-sdk-tools"])
+        self.assertEqual(exit_code, 1)
+        self.assertIn("網路斷了", err.getvalue())
+
+
+class TestPackSdkToolsOverrides(unittest.TestCase):
+    """pack 的 --sdk-tools-dir／--sdk-tools-cache-dir。
+
+    需求性質與既有的 --workspace-dir 相同：CI 需要在不改動這台機器的持久
+    設定的前提下，指定這一次建置要用哪裡的工具。
+    """
+
+    def test_flags_override_the_persisted_settings(self):
+        merged = sdk_tools.settings_with_overrides(
+            tools_dir=r"C:\flag-tools",
+            cache_dir=r"C:\flag-cache",
+            settings={sdk_tools.SETTING_TOOLS_DIR: r"C:\persisted", "workspace_dir": r"C:\ws"},
+        )
+        self.assertEqual(merged[sdk_tools.SETTING_TOOLS_DIR], r"C:\flag-tools")
+        self.assertEqual(merged[sdk_tools.SETTING_CACHE_DIR], r"C:\flag-cache")
+
+    def test_absent_flags_leave_the_persisted_settings_alone(self):
+        merged = sdk_tools.settings_with_overrides(
+            settings={sdk_tools.SETTING_TOOLS_DIR: r"C:\persisted", "workspace_dir": r"C:\ws"},
+        )
+        self.assertEqual(merged[sdk_tools.SETTING_TOOLS_DIR], r"C:\persisted")
+        self.assertEqual(merged["workspace_dir"], r"C:\ws")
+
+    def test_merging_does_not_mutate_the_caller_settings(self):
+        original = {sdk_tools.SETTING_TOOLS_DIR: r"C:\persisted"}
+        sdk_tools.settings_with_overrides(tools_dir=r"C:\flag", settings=original)
+        self.assertEqual(original[sdk_tools.SETTING_TOOLS_DIR], r"C:\persisted")
+
+    def test_pack_hands_the_overrides_to_build_all(self):
+        parser = builder_cli.build_arg_parser()
+        args = parser.parse_args([
+            "pack", "--app-dir", "x",
+            "--sdk-tools-dir", r"C:\tools", "--sdk-tools-cache-dir", r"C:\cache",
+        ])
+        self.assertEqual(args.sdk_tools_dir, r"C:\tools")
+        self.assertEqual(args.sdk_tools_cache_dir, r"C:\cache")
+
+
+class TestHelpTextRenders(unittest.TestCase):
+    """真實抓到的缺陷：`--help` 直接拋 ValueError。
+
+    argparse 會把 help 字串當成格式字串做 `%` 展開，說明文字裡寫
+    `%LOCALAPPDATA%` 這種路徑就會被當成格式指示詞而爆掉。這個錯誤只在
+    使用者實際打 `--help` 時才發生，任何測「指令有沒有做對事」的測試
+    都碰不到它。
+    """
+
+    def test_top_level_help_renders(self):
+        builder_cli.build_arg_parser().format_help()
+
+    def test_every_subcommand_help_renders(self):
+        parser = builder_cli.build_arg_parser()
+        subparsers = [
+            action for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction)
+        ]
+        self.assertTrue(subparsers, "找不到子指令，這個測試的前提不成立")
+        names = []
+        for action in subparsers:
+            for name, sub in action.choices.items():
+                sub.format_help()
+                names.append(name)
+        for expected in ("init", "list-files", "pack", "fetch-sdk-tools"):
+            self.assertIn(expected, names)

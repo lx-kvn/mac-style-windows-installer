@@ -477,6 +477,29 @@ log 機制（`%TEMP%\<app_name>_silent_install_log.txt` 或 `/LOG=` 指定
   各自獨立呼叫，保留成方法而非直接呼叫 `self._upgrade.xxx()`，維持
   既有呼叫點不動）。
 
+## SDK 工具（SDK Tools）
+
+`makeappx.exe`（打包 MSIX）與 `signtool.exe`（簽數位簽章）這兩支同屬
+Windows SDK 的執行檔。在這個專案裡「SDK 工具」專指這兩支，不泛指
+Windows SDK 的其他內容。定位與取得收斂在 `sdk_tools.py`，是它們唯一的
+取得入口。理由與五項決定見
+[ADR-0008](docs/adr/0008-sdk-build-tools-are-fetched-on-explicit-request-only.md)。
+
+- **來源（source）** — 一次檢索結果的出處，四者之一，優先序即依「使用者
+  表達該意圖的明確程度」排列：`manual`（設定 `sdk_tools_dir`）→ `cache`
+  （執行過取得指令而下載的快取）→ `path`（PATH 上找到的）→ `system`
+  （系統上碰巧裝著的 Windows SDK）。`find_tool()` 回傳的 `ToolLocation`
+  帶著來源與版本，`describe()` 是印進建置訊息的那一行。
+- **取得指令（fetch-sdk-tools）** — CLI 的獨立子指令，下載固定版本的
+  `Microsoft.Windows.SDK.BuildTools` NuGet 套件並驗證 SHA-256。打包流程
+  不會自行執行它：判準不是「打包時是否連網」，而是下載物在打包機器上
+  是被內嵌還是被**執行**，而打包機器通常存放簽章憑證。
+- **快取（cache）** — 取得指令解壓出來的位置，在 `%LOCALAPPDATA%` 底下、
+  路徑含版本號、持久保存。不放編譯工作目錄（那裡每次建置開頭即清空）。
+
+注意兩個版本號不同且不可互推：NuGet 套件的版本（`10.0.26100.4948`）與
+解壓後內部工具組目錄的版本（`bin/10.0.26100.0/`）。
+
 ## 傳統引擎與 MSIX 引擎（尚未實作）
 
 打包時二選一的兩種「安裝檔內部運作方式」。兩者的產出物都是一顆

@@ -31,7 +31,7 @@ pip install pyinstaller pywebview pywin32 cryptography
 
 ---
 
-## 三個子指令
+## 四個子指令
 
 ### `init`：產生範本設定檔
 
@@ -71,6 +71,42 @@ python builder_cli.py pack --config app.json [--其他 flag 覆蓋個別欄位..
 驗證失敗或編譯過程出錯，訊息會印到 stderr，process exit code 非零；
 成功的話印出安裝檔的完整路徑，exit code 是 0。
 
+另有兩個與 `--workspace-dir` 同一性質的旗標（描述「這台機器上的東西在
+哪」，不描述要打包成什麼產品，因此是旗標而不是設定檔欄位；效力只及於
+這一次執行，不寫進持久設定）：
+
+- `--sdk-tools-dir`：手動指定 `makeappx`／`signtool` 所在目錄，覆蓋這次
+  建置的自動檢索。指到解壓出來的套件根目錄或 Windows SDK 的安裝位置都
+  可以，不必指到最底層的架構子目錄。
+- `--sdk-tools-cache-dir`：覆蓋 `fetch-sdk-tools` 的快取位置，供 CI 把
+  該目錄納入自己的快取機制。
+
+### `fetch-sdk-tools`：取得 Windows SDK 工具
+
+```
+python builder_cli.py fetch-sdk-tools [--cache-dir 目錄] [--force]
+```
+
+`signing`（Setup.exe 的數位簽章）需要 `signtool`，未來的 MSIX 輸出還會
+需要 `makeappx`，兩者同屬 Windows SDK。**Windows SDK 安裝後不會把這些
+工具加進 PATH**，而且也不需要為此安裝數 GB 的 SDK：這個子指令會下載一份
+固定版本的 `Microsoft.Windows.SDK.BuildTools` NuGet 套件（約 22 MB）、
+驗證 SHA-256、解壓到使用者層級的持久位置，之後打包流程自己找得到。解壓
+出來的工具直接執行即可，不需要安裝程序、不需要系統管理員權限。
+
+**打包流程不會自行執行這件事。** 判準不是「打包時是否連網」（`bundle_dependencies`
+本來就會下載），而是下載物在打包機器上是被內嵌還是被**執行**——後者的
+最壞情況是打包機器遭入侵，而打包機器通常存放簽章憑證。所以這是一個需要
+你明確下達的指令，打包時找不到工具只會中止並把這行指令印給你複製。
+
+- `--cache-dir`：覆蓋快取位置（供 CI 納入自己的快取機制）。預設在
+  `%LOCALAPPDATA%\mac-style-windows-installer\sdk-tools\<版本>` 底下。
+- `--force`：即使快取已存在也重新下載。
+
+工具的來源優先序是**手動指定 → 這個指令下載的快取 → PATH → 系統上裝的
+Windows SDK**，依「你表達這個意圖有多明確」排列。建置過程會印出本次
+實際採用的來源與版本，用來診斷「兩台機器打包結果不同」這類問題。
+
 ---
 
 ## 欄位對照表
@@ -106,7 +142,7 @@ python builder_cli.py pack --config app.json [--其他 flag 覆蓋個別欄位..
 | `bundle_dependencies` | `--bundle-dependencies` | 否 | 逗號分隔，列在 `dependencies`（或 `custom_dependencies`）裡的相依元件 key，打包當下就把安裝檔下載下來內嵌進 Setup.exe，安裝時不需要再連網下載（安裝檔會變大）。沒列在這裡的相依元件維持原本「安裝時才連網下載」的行為。見規格文件 §8.24 |
 | `no_admin_install` | `--no-admin-install` / `--no-no-admin-install` | 否 | 開啟後整個安裝檔（含解除安裝）完全不要求系統管理員權限，不會跳出 UAC 提示：預設安裝路徑改成 `%LOCALAPPDATA%\Programs\<folder_name>`，解除安裝登錄表、PATH、捷徑都改寫到使用者層級（HKCU、`%APPDATA%`/`%USERPROFILE%\Desktop`）而不是系統層級。適合單一使用者自己安裝、不需要讓電腦上其他使用者共用的情境。見規格文件 §8.25 |
 | `pre_install_script` / `post_install_script` | `--pre-install-script` / `--post-install-script` | 否 | 相對於 `app_dir` 的路徑，指向一支要在安裝前/安裝後自動靜默執行的腳本或執行檔（例如 `.bat`/`.exe`/`.ps1`）。前置腳本失敗會中止整個安裝並回報錯誤；後置腳本失敗只記錄警告，不影響安裝結果（此時主程式已經裝好）。見規格文件 §8.26 |
-| `signing` | （只能透過 JSON） | 否 | 設定後打包時自動用 `signtool` 幫 Setup.exe/uninstall.exe 簽數位簽章：`{"cert_path": "憑證檔案(.pfx)路徑", "cert_password_env": "存放密碼的環境變數名稱", "timestamp_url": "時間戳記伺服器（選填，預設 DigiCert）"}`。密碼不放在設定檔明文裡，只存環境變數名稱；打包當下這個環境變數必須有值，簽章失敗會讓整個 `pack` 流程失敗。需要事先安裝 Windows SDK 或 Visual Studio 取得 `signtool`，並自行準備憑證（本工具不提供、也無法生成憑證）。見規格文件 §8.27 |
+| `signing` | （只能透過 JSON） | 否 | 設定後打包時自動用 `signtool` 幫 Setup.exe/uninstall.exe 簽數位簽章：`{"cert_path": "憑證檔案(.pfx)路徑", "cert_password_env": "存放密碼的環境變數名稱", "timestamp_url": "時間戳記伺服器（選填，預設 DigiCert）"}`。密碼不放在設定檔明文裡，只存環境變數名稱；打包當下這個環境變數必須有值，簽章失敗會讓整個 `pack` 流程失敗。`signtool` 用 `fetch-sdk-tools` 子指令取得即可（也可以用系統上既有的 Windows SDK，或用 `--sdk-tools-dir` 指定），憑證要自行準備（本工具不提供、也無法生成憑證）。見規格文件 §8.27 |
 | `windows_service` | （只能透過 JSON） | 否 | 安裝時額外把應用程式的某支執行檔註冊成 Windows 服務：`{"service_name": "服務名稱", "exe_relative_path": "相對於 app_dir 的執行檔路徑", "start_type": "auto/demand/disabled 其中之一，預設 auto"}`。`service_name`/`exe_relative_path` 要嘛兩個都填，要嘛都留空；`exe_relative_path` 指定的檔案必須真的存在於 `app_dir`。解除安裝時會自動移除這個服務。 |
 | `scheduled_task` | （只能透過 JSON） | 否 | 安裝時額外把應用程式的某支執行檔註冊成排程工作：`{"task_name": "工作名稱", "exe_relative_path": "相對於 app_dir 的執行檔路徑", "trigger": "schtasks /sc 支援的觸發條件，預設 onlogon"}`。`task_name`/`exe_relative_path` 要嘛兩個都填，要嘛都留空；`exe_relative_path` 指定的檔案必須真的存在於 `app_dir`。解除安裝時會自動移除這個排程工作。 |
 | `create_restore_point_before_install` | （只能透過 JSON） | 否 | 開啟後，安裝流程開始寫入檔案前，先嘗試建立一個系統還原點，讓使用者萬一想反悔可以透過 Windows 內建的系統還原整個復原（不是這個工具自己的解除安裝功能，是作業系統層級的還原點）。Windows 8 以後同一天內只會真的建立一次還原點（節流限制），短時間內重複安裝不保證每次都產生新的還原點；建立失敗（例如系統還原功能被使用者關閉）不會中止安裝，只是沒有還原點可用。 |

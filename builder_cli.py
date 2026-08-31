@@ -9,10 +9,14 @@ builder_cli.py
 參數，不是表單）跟「進度怎麼呈現」（印到 stdout，不是
 `window.evaluate_js()`）不一樣。
 
-兩個子指令：
+子指令：
   - `init`：產生一份帶預設值的範本 JSON 設定檔。
   - `pack`：讀 JSON（`--config`，選填）→ 用命令列參數覆蓋個別欄位
     （CLI 優先於 JSON）→ 驗證 → 編譯。
+  - `fetch-sdk-tools`：取得簽章／MSIX 打包需要的 Windows SDK 工具。這是
+    獨立的一次性環境準備動作，`pack` 不會自行執行它——打包流程不在使用者
+    未明確要求的情況下，把一個剛從網路取得的執行檔跑在打包機器上
+    （見 docs/adr/0008）。
 
 完整欄位說明、範例見 CLI_USAGE.md。
 """
@@ -24,6 +28,8 @@ import sys
 
 import builder
 import packaging_core
+import packaging_settings
+import sdk_tools
 
 # init 產生的範本：每個欄位都是 validate_and_build_pack_data() /
 # builder.build_all() 認得的鍵名，值是說明性的預留位置，不是真的能直接拿去
@@ -107,6 +113,17 @@ def build_arg_parser():
     pack_p = sub.add_parser("pack", help="驗證設定並編譯出安裝檔")
     pack_p.add_argument("--config", default=None, help="JSON 設定檔路徑（選填，沒給就完全靠底下的 flag）")
     pack_p.add_argument("--workspace-dir", default=None, help="編譯工作目錄，預設用 packaging_core.get_workspace_dir()")
+    # 這兩個與 --workspace-dir 同一種性質：描述「這台機器上的東西在哪」，
+    # 不描述要打包成什麼產品，因此是旗標／工具偏好，不是打包設定檔欄位。
+    # 旗標的效力只及於這一次執行，不寫進持久設定。
+    pack_p.add_argument(
+        "--sdk-tools-dir", dest="sdk_tools_dir", default=None,
+        help="手動指定 makeappx／signtool 所在目錄，覆蓋這次建置的自動檢索",
+    )
+    pack_p.add_argument(
+        "--sdk-tools-cache-dir", dest="sdk_tools_cache_dir", default=None,
+        help=f"覆蓋 {sdk_tools.FETCH_SUBCOMMAND} 的快取位置（供 CI 納入自己的快取機制）",
+    )
 
     # 路徑類欄位：不是 data 字典的一部分，是 validate_and_build_pack_data()
     # 額外的位置參數（GUI 版是靠檔案選擇對話框取得），這裡直接讓使用者填路徑字串。
@@ -148,7 +165,45 @@ def build_arg_parser():
         help="逗號分隔，列在 dependencies 裡的相依元件 key，打包時內嵌進安裝檔（不用安裝時再連網下載）",
     )
 
+    fetch_p = sub.add_parser(
+        sdk_tools.FETCH_SUBCOMMAND,
+        help=f"取得 {'、'.join(sdk_tools.REQUIRED_TOOLS)}（下載固定版本的 {sdk_tools.PACKAGE_ID} 並驗證雜湊）",
+    )
+    fetch_p.add_argument(
+        "--cache-dir", dest="cache_dir", default=None,
+        # %% 是必要的：argparse 會把 help 字串當格式字串做 % 展開，
+        # 直接寫 %LOCALAPPDATA% 會讓 --help 本身拋 ValueError。
+        help="覆蓋快取位置（供 CI 納入自己的快取機制），預設在 %%LOCALAPPDATA%% 底下",
+    )
+    fetch_p.add_argument(
+        "--force", action="store_true",
+        help="即使快取已存在也重新下載",
+    )
+
     return parser
+
+
+def cmd_fetch_sdk_tools(args):
+    """取得 SDK 工具（ADR-0008 決定一：使用者明確要求才下載）。
+
+    這個指令是使用者對「在這台機器上執行一個從網路取得的執行檔」表達同意
+    的地方。工具能做的是讓它成為一次明確的動作，無法確保使用者理解該動作
+    的後果（見該 ADR 的已知限制）。
+    """
+    settings = sdk_tools.settings_with_overrides(
+        cache_dir=args.cache_dir, settings=packaging_settings.load_settings(),
+    )
+    print(f"來源：{sdk_tools.PACKAGE_URL}")
+    print(f"下載後會驗證 SHA-256 是否為 {sdk_tools.PACKAGE_SHA256}。")
+    try:
+        result = sdk_tools.fetch_tools(settings=settings, force=args.force, log=print)
+    except Exception as e:
+        print(f"取得 SDK 工具失敗：{e}", file=sys.stderr)
+        return 1
+    for tool, path in sorted(result.tools.items()):
+        print(f"  {tool}: {path}")
+    print(f"完成。版本 {result.version}，位置：{result.cache_dir}")
+    return 0
 
 
 def cmd_init(args):
@@ -289,6 +344,11 @@ def cmd_pack(args):
             create_restore_point_before_install=pack_data.get("create_restore_point_before_install", False),
             install_password_env=pack_data.get("install_password_env", ""),
             workspace_dir=workspace_dir,
+            sdk_tools_settings=sdk_tools.settings_with_overrides(
+                tools_dir=args.sdk_tools_dir,
+                cache_dir=args.sdk_tools_cache_dir,
+                settings=packaging_settings.load_settings(),
+            ),
             progress_callback=progress_handler,
         )
     except Exception as e:
@@ -309,6 +369,8 @@ def main(argv=None):
         return cmd_list_files(args)
     if args.command == "pack":
         return cmd_pack(args)
+    if args.command == sdk_tools.FETCH_SUBCOMMAND:
+        return cmd_fetch_sdk_tools(args)
     parser.print_help()
     return 1
 
