@@ -476,3 +476,40 @@ log 機制（`%TEMP%\<app_name>_silent_install_log.txt` 或 `/LOG=` 指定
   方法（後兩個因為 `trigger_installation()`/`close_window()` 有多處
   各自獨立呼叫，保留成方法而非直接呼叫 `self._upgrade.xxx()`，維持
   既有呼叫點不動）。
+
+## 傳統引擎與 MSIX 引擎（尚未實作）
+
+打包時二選一的兩種「安裝檔內部運作方式」。兩者的產出物都是一顆
+`Setup_XXX.exe`、都顯示拖曳安裝介面，差別只在應用程式檔案實際落地的
+方式，終端使用者不需要知道自己拿到的是哪一種：
+
+- **傳統引擎**——目前唯一存在的方式。`Setup.exe` 自己複製檔案、寫登錄表、
+  產生 `uninstall.exe`，落地的每一筆寫入都記進 `install_manifest.json`，
+  解除安裝的乾淨程度取決於這份清單記得夠不夠完整。
+- **MSIX 引擎**——`Setup.exe` 內嵌一份已簽章的 `.msix`，顯示完拖曳介面
+  之後把落地工作交給 Windows 的套件引擎，由系統保證解除安裝乾淨。選用
+  這個引擎時，同一次打包額外產出一顆獨立的 `.msix`（給 winget、企業側載、
+  App Installer 雙擊安裝用），該檔案本來就是編 `Setup.exe` 之前的中間
+  產物。
+
+兩者在使用者介面上的可見差異只有兩處：拖曳目的地的資料夾圖示不同
+（傳統引擎是 `ui/folder_icon.png`，箭頭；MSIX 引擎是
+`ui/windows_folder_icon.png`，系統標記，且不可點選——MSIX 的安裝位置由
+系統決定，沒有選擇餘地），以及 MSIX 引擎沒有垃圾桶解除安裝介面（見
+[ADR-0006](docs/adr/0006-msix-mode-has-no-custom-uninstall-ui.md)）。
+
+「模式」這個詞在本專案指的就是這兩者的選擇，不指其他任何二選一的設定。
+
+## 套件身分名稱（Package Identity Name，尚未實作）
+
+MSIX 套件清單中，系統用來判定「兩包套件是否為同一個應用程式」的唯一
+依據。與 `app_name`（顯示名稱）是不同的概念，兩者不可互相推導：`app_name`
+是給人看的、可以隨時改；套件身分名稱一經發布即不可變更，改了系統就當成
+另一個不相關的應用程式，不執行升級而是並存安裝。理由與欄位設計見
+[ADR-0007](docs/adr/0007-package-identity-name-is-an-explicit-required-field.md)。
+
+另有一個容易與之混淆的欄位：套件清單的**發行者**，其值必須與簽章憑證上
+記載的名稱完全一致（格式為憑證的識別名稱寫法，例如
+`CN=某某, O=某某, C=TW`），對不上時系統直接拒絕安裝。這與現有的
+`publisher` 欄位（自由文字，寫進 exe 的 VERSIONINFO 當公司名）也是不同
+的東西。
