@@ -25,6 +25,7 @@ import subprocess
 import packaging_settings
 import dependency_defs
 import install_engine
+import msix_settings
 import windows_service
 
 # installer_core.py/uninstall.py 這兩支 entry point 實際 import 的專案內部
@@ -772,6 +773,23 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     if report.has_blocking:
         return None, report.error_message()
     if engine == install_engine.MSIX:
+        # 相容性通過之後才檢查 msix 區塊的必填欄位。順序是刻意的：先回答
+        # 「這個引擎適不適合你」，再要求「把必填欄位補齊」——對方可能看完
+        # 相容性結果就決定不用這個引擎，此時要他補欄位是白費工。
+        #
+        # 這裡只取驗證結果，不接收正規化後的值：那些值是要交給套件清單
+        # 產生器的，而那個東西還不存在，下一行就中止了。先把它們放進
+        # pack_data 只會讓人以為清單產生已經在運作。清單產生器完成、下面
+        # 那個中止拿掉之後，這裡改成把 msix_settings.validate() 的第一個
+        # 回傳值連同 to_quad_version(version) 的結果一起放進 pack_data["msix"]。
+        _, msix_error = msix_settings.validate(data.get("msix"))
+        problems = [msix_error] if msix_error else []
+        try:
+            msix_settings.to_quad_version(version)
+        except msix_settings.InvalidVersion as e:
+            problems.append(str(e))
+        if problems:
+            return None, "欄位驗證失敗：<br>" + "<br>".join(problems)
         return None, install_engine.MSIX_NOT_IMPLEMENTED
     # report.notices（第四類，不擋建置、只需說明的項目）目前沒有接收端：
     # 它只在 MSIX 引擎下產生，而 MSIX 引擎在上一行就中止了。MSIX 引擎實作

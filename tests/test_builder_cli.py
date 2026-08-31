@@ -55,7 +55,7 @@ class TestCmdInit(unittest.TestCase):
             template = json.load(f)
         for key in (
             "windows_service", "scheduled_task", "create_restore_point_before_install",
-            "dependencies_min_version", "install_engine",
+            "dependencies_min_version", "install_engine", "msix",
         ):
             self.assertIn(key, template, f"範本缺少欄位：{key}")
 

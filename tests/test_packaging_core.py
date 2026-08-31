@@ -1354,9 +1354,14 @@ class TestInstallEngineSelection(PackDataValidationTestBase):
         self.assertIn("格式本身的限制", error)
 
     def test_msix_with_a_clean_config_still_stops_because_the_engine_is_unimplemented(self):
-        """設定寫著 MSIX 卻默默產出一顆傳統安裝檔，比直接報錯糟得多。"""
+        """設定寫著 MSIX 卻默默產出一顆傳統安裝檔，比直接報錯糟得多。
+
+        msix 區塊要填齊：identity_name 依 ADR-0007 是必填且不由 app_name
+        推導，缺了會先被欄位檢查擋下來，測不到這裡要測的東西。
+        """
         pack_data, error = self._validate(self._base_data(
             install_engine="msix", no_admin_install=True,
+            msix={"identity_name": "MyCompany.DemoApp", "certificate_subject": "CN=Demo"},
         ))
         self.assertIsNone(pack_data)
         self.assertEqual(error, install_engine.MSIX_NOT_IMPLEMENTED)
@@ -1378,3 +1383,61 @@ class TestInstallEngineSelection(PackDataValidationTestBase):
         ))
         self.assertIsNone(error)
         self.assertEqual(pack_data["custom_install_dir"], r"C:\MyApp")
+
+
+class TestMsixSettingsBlock(PackDataValidationTestBase):
+    """MSIX 模式下 `msix` 區塊的驗證在流程裡的接法。
+
+    欄位規則本身在 tests/test_msix_settings.py 測，這裡測接線與順序。
+    """
+
+    def _msix(self, **overrides):
+        block = {
+            "identity_name": "MyCompany.DemoApp",
+            "certificate_subject": "CN=Demo",
+        }
+        block.update(overrides)
+        return self._base_data(install_engine="msix", no_admin_install=True, msix=block)
+
+    def test_traditional_engine_ignores_the_msix_block_entirely(self):
+        """既有設定檔沒有 msix 區塊，也不該因為這個檢查而失敗。"""
+        _, error = self._validate(self._base_data())
+        self.assertIsNone(error)
+
+    def test_traditional_engine_does_not_validate_a_broken_msix_block(self):
+        _, error = self._validate(self._base_data(msix={"identity_name": "!!"}))
+        self.assertIsNone(error)
+
+    def test_msix_engine_requires_the_block(self):
+        _, error = self._validate(self._base_data(install_engine="msix", no_admin_install=True))
+        self.assertIn("identity_name", error)
+        self.assertIn("certificate_subject", error)
+
+    def test_a_complete_block_gets_past_the_field_checks(self):
+        """通過欄位檢查之後擋下來的應該是「引擎尚未實作」，不是欄位問題。"""
+        _, error = self._validate(self._msix())
+        self.assertEqual(error, install_engine.MSIX_NOT_IMPLEMENTED)
+
+    def test_a_prerelease_version_is_rejected_in_msix_mode(self):
+        """第二輪決議第十項：傳統模式維持現狀（ADR-0003 允許後綴），
+        MSIX 模式報錯。"""
+        _, error = self._validate(self._msix())
+        self.assertEqual(error, install_engine.MSIX_NOT_IMPLEMENTED)
+        data = self._msix()
+        data["version"] = "1.0.0-rc1"
+        _, error = self._validate(data)
+        self.assertIn("升級", error)
+
+    def test_the_same_prerelease_version_still_works_in_traditional_mode(self):
+        pack_data, error = self._validate(self._base_data(version="1.0.0-rc1"))
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["version"], "1.0.0-rc1")
+
+    def test_incompatible_settings_are_reported_before_missing_msix_fields(self):
+        """先問「這個引擎適不適合你」，再問「請把必填欄位補齊」——對方可能
+        看完相容性結果就決定不用這個引擎了，此時要求他補欄位是白費工。"""
+        _, error = self._validate(self._base_data(
+            install_engine="msix", no_admin_install=False,
+        ))
+        self.assertIn("尚未支援", error)
+        self.assertNotIn("identity_name", error)

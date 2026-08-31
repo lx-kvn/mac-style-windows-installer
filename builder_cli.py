@@ -39,6 +39,15 @@ TEMPLATE = {
     # 「傳統引擎與 MSIX 引擎」）。沒填即為 traditional，既有的設定檔
     # 因此不受影響。
     "install_engine": "traditional",
+    # msix：只有 install_engine 為 msix 時才會被檢查，傳統引擎完全不看。
+    # identity_name 一經發布即不可變更（見 docs/adr/0007），這裡放的是提示性
+    # 預留值，不是可以直接拿去用的預設值。certificate_subject 必須與簽章憑證
+    # 上記載的名稱完全一致。min_windows_version 留空即採預設 10.0.17763.0。
+    "msix": {
+        "identity_name": "YourCompany.YourApp",
+        "certificate_subject": "CN=Your Company, O=Your Company, C=TW",
+        "min_windows_version": "",
+    },
     "app_dir": "C:\\path\\to\\your\\app\\folder",
     "png_icon": "C:\\path\\to\\drag_icon.png",
     "ico_icon": "C:\\path\\to\\cover_icon.ico",
