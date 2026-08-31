@@ -26,6 +26,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import cert_subject
 import install_engine
 import packaging_core
 
@@ -1441,3 +1442,89 @@ class TestMsixSettingsBlock(PackDataValidationTestBase):
         ))
         self.assertIn("尚未支援", error)
         self.assertNotIn("identity_name", error)
+
+
+class TestCertificateSubjectIsReadWhenAvailable(PackDataValidationTestBase):
+    """第二輪決議第十一項在驗證流程裡的接法。
+
+    憑證讀取是可注入的參數（比照 file_assoc.py 的 registry seam）：測試
+    不需要真的產生一張憑證，也不依賴這台機器上有沒有 .pfx。實際的字串
+    形式由 tests/test_cert_subject.py 涵蓋。
+    """
+
+    CERT = "C=TW, O=Demo Org, CN=Demo Co"
+
+    def setUp(self):
+        super().setUp()
+        self.pfx = os.path.join(self.app_dir, "cert.pfx")
+        with open(self.pfx, "wb") as f:
+            f.write(b"fake pfx")
+        os.environ["MSWI_TEST_CERT_PW"] = "pw"
+        self.addCleanup(os.environ.pop, "MSWI_TEST_CERT_PW", None)
+
+    def _data(self, **msix_overrides):
+        block = {"identity_name": "MyCompany.DemoApp"}
+        block.update(msix_overrides)
+        return self._base_data(
+            install_engine="msix", no_admin_install=True, msix=block,
+            signing={
+                "cert_path": self.pfx,
+                "cert_password_env": "MSWI_TEST_CERT_PW",
+                "timestamp_url": "http://timestamp.example/",
+            },
+        )
+
+    def _validate_with_reader(self, data, reader):
+        return packaging_core.validate_and_build_pack_data(
+            data, self.app_dir, "fake.png", "fake.ico", "",
+            read_cert_subject=reader,
+        )
+
+    def test_the_certificate_is_read_when_signing_is_configured(self):
+        calls = []
+
+        def reader(path, password):
+            calls.append((path, password))
+            return self.CERT
+
+        _, error = self._validate_with_reader(self._data(), reader)
+        self.assertEqual(error, install_engine.MSIX_NOT_IMPLEMENTED)
+        self.assertEqual(calls, [(self.pfx, "pw")])
+
+    def test_a_mismatch_is_reported(self):
+        _, error = self._validate_with_reader(
+            self._data(certificate_subject="CN=Someone Else"), lambda p, pw: self.CERT,
+        )
+        self.assertIn("不一致", error)
+
+    def test_no_signing_config_means_no_read_and_the_field_stays_required(self):
+        """雲端代簽情境：憑證不在本機，設定裡也沒有 signing。"""
+        calls = []
+        data = self._base_data(
+            install_engine="msix", no_admin_install=True,
+            msix={"identity_name": "MyCompany.DemoApp"},
+        )
+        _, error = self._validate_with_reader(data, lambda p, pw: calls.append(p))
+        self.assertEqual(calls, [])
+        self.assertIn("certificate_subject", error)
+
+    def test_an_unreadable_certificate_does_not_crash_the_build(self):
+        """讀不到憑證不該中止：使用者仍可自己填 certificate_subject，
+        而簽章本身失敗與否是後面 _sign_executable() 的事。"""
+        def reader(path, password):
+            raise cert_subject.CertificateReadError("密碼不對")
+
+        _, error = self._validate_with_reader(
+            self._data(certificate_subject="CN=Whatever"), reader,
+        )
+        self.assertEqual(error, install_engine.MSIX_NOT_IMPLEMENTED)
+
+    def test_the_traditional_engine_never_reads_the_certificate(self):
+        calls = []
+        data = self._base_data(signing={
+            "cert_path": self.pfx, "cert_password_env": "MSWI_TEST_CERT_PW",
+            "timestamp_url": "http://timestamp.example/",
+        })
+        _, error = self._validate_with_reader(data, lambda p, pw: calls.append(p))
+        self.assertIsNone(error)
+        self.assertEqual(calls, [])

@@ -143,12 +143,17 @@ def _validate_min_windows_version(value):
         )
 
 
-def validate(block):
+def validate(block, cert_subject=None):
     """驗證並正規化 `msix` 區塊，回傳 (normalized, error_message)。
 
     錯誤一次列出全部，與引擎相容性檢查（`install_engine.py`）的作法一致：
     切換到 MSIX 引擎通常會一次缺好幾個欄位，逐條回報會讓使用者每補一個就
     重跑一次建置。
+
+    `cert_subject`：從簽章憑證讀出的發行者字串（`cert_subject.py`），憑證
+    不在本機時為 None。第二輪決議第十一項要求兩種來源都支援——兩截式流程的
+    第一個步驟即產出含發行者宣告的套件清單，而該步驟先於簽章發生，雲端代簽
+    情境下工具在該時點拿不到憑證，因此不能只做自動讀取。
     """
     if block is None:
         block = {}
@@ -162,11 +167,25 @@ def validate(block):
         problems.append(identity_error)
 
     certificate_subject = str(block.get("certificate_subject", "") or "").strip()
-    if not certificate_subject:
+    if not certificate_subject and cert_subject:
+        # 憑證讀得到就自動填入，使用者不必自己去查憑證上的字串長什麼樣——
+        # 那個字串的形式（順序、分隔符、引號規則）並不直覺，見 cert_subject.py。
+        certificate_subject = cert_subject
+    elif not certificate_subject:
         problems.append(
             "msix.certificate_subject 是必填的：它會寫進套件清單的發行者欄位，"
             "而該值必須與簽章憑證上記載的名稱完全一致（例如 CN=某某, O=某某, C=TW），"
             "不一致時系統直接拒絕安裝，且錯誤訊息不會指向這個原因。"
+        )
+    elif cert_subject and certificate_subject != cert_subject:
+        # 逐字比對，不做大小寫或空白的正規化：系統比對時也不做，抹平差異
+        # 只會讓打包通過而把失敗推遲到終端使用者安裝的時候。
+        problems.append(
+            "msix.certificate_subject 與簽章憑證上記載的名稱不一致，"
+            "這樣簽出來的套件系統會直接拒絕安裝，而且它的錯誤訊息不會指向這個原因。\n"
+            f"    設定裡寫的：{certificate_subject}\n"
+            f"    憑證上實際是：{cert_subject}\n"
+            "    （把設定改成憑證上那一個，或清空這個欄位讓工具自動填入。）"
         )
 
     min_version, min_version_error = _validate_min_windows_version(

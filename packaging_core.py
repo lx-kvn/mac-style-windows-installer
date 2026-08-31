@@ -24,6 +24,7 @@ import subprocess
 
 import packaging_settings
 import dependency_defs
+import cert_subject
 import install_engine
 import msix_settings
 import windows_service
@@ -472,8 +473,28 @@ def _validate_version_string(version):
     return None
 
 
+def _read_signing_cert_subject(signing, reader=None):
+    """簽章憑證讀得到的話，回傳它的發行者字串，否則回傳 None。
+
+    `reader` 是測試接縫（比照 `file_assoc.py` 的 registry 參數），預設是
+    `cert_subject.read_from_pfx`。
+
+    讀不到就當作「憑證不在本機」處理，不中止流程：那正是雲端代簽的正常
+    情形，而使用者仍然可以自己填 `msix.certificate_subject`。憑證本身有
+    問題（密碼不對之類）會在後面真的要簽章時失敗，那裡的訊息比這裡精確。
+    """
+    if not signing:
+        return None
+    reader = reader or cert_subject.read_from_pfx
+    password = os.environ.get(signing.get("cert_password_env", ""), "")
+    try:
+        return reader(signing.get("cert_path", ""), password)
+    except Exception:
+        return None
+
+
 def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_path_selected,
-                                 has_inline_password=False):
+                                 has_inline_password=False, read_cert_subject=None):
     """驗證表單/JSON 資料，並組出要交給 builder.build_all() 的 pack_data。
 
     純函式：不碰執行緒、不呼叫 check_build_environment()/ensure_workspace_files()
@@ -782,7 +803,10 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
         # pack_data 只會讓人以為清單產生已經在運作。清單產生器完成、下面
         # 那個中止拿掉之後，這裡改成把 msix_settings.validate() 的第一個
         # 回傳值連同 to_quad_version(version) 的結果一起放進 pack_data["msix"]。
-        _, msix_error = msix_settings.validate(data.get("msix"))
+        _, msix_error = msix_settings.validate(
+            data.get("msix"),
+            cert_subject=_read_signing_cert_subject(signing, read_cert_subject),
+        )
         problems = [msix_error] if msix_error else []
         try:
             msix_settings.to_quad_version(version)

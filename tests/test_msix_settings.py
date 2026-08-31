@@ -194,3 +194,60 @@ class NormalizedOutputTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CertificateSubjectAutoFillTest(unittest.TestCase):
+    """第二輪決議第十一項：憑證可取得時自動讀取並填入，並執行一致性檢查。
+
+    兩者都要支援而非僅取其一，原因來自決議三：兩截式流程的第一個步驟即
+    產出含發行者宣告的套件清單，而該步驟先於簽章發生——雲端代簽情境下
+    憑證不在本機，工具在該時點必須已知發行者為何。
+    """
+
+    CERT = "C=TW, O=Demo Org, CN=Demo Co"
+
+    def test_an_unset_field_is_filled_in_from_the_certificate(self):
+        normalized, error = msix_settings.validate(
+            {"identity_name": "A.B"}, cert_subject=self.CERT,
+        )
+        self.assertIsNone(error)
+        self.assertEqual(normalized["certificate_subject"], self.CERT)
+
+    def test_a_matching_value_passes(self):
+        _, error = msix_settings.validate(
+            {"identity_name": "A.B", "certificate_subject": self.CERT},
+            cert_subject=self.CERT,
+        )
+        self.assertIsNone(error)
+
+    def test_a_mismatching_value_is_rejected_at_packaging_time(self):
+        """不一致時系統拒絕安裝，且其錯誤訊息不指向此原因——所以要在打包
+        階段就攔下來，不能等到終端使用者安裝失敗。"""
+        _, error = msix_settings.validate(
+            {"identity_name": "A.B", "certificate_subject": "CN=Someone Else"},
+            cert_subject=self.CERT,
+        )
+        self.assertIsNotNone(error)
+        self.assertIn("CN=Someone Else", error)
+        self.assertIn(self.CERT, error)
+
+    def test_the_comparison_is_exact_not_normalized(self):
+        """大小寫與空白的差異一樣會讓系統拒絕安裝，工具不該幫忙抹平——
+        抹平之後打包會通過，失敗改在終端使用者那邊發生。"""
+        _, error = msix_settings.validate(
+            {"identity_name": "A.B", "certificate_subject": "c=tw, o=Demo Org, cn=Demo Co"},
+            cert_subject=self.CERT,
+        )
+        self.assertIsNotNone(error)
+
+    def test_without_a_certificate_the_field_stays_required(self):
+        """雲端代簽情境：憑證不在本機，使用者自己填。"""
+        _, error = msix_settings.validate({"identity_name": "A.B"}, cert_subject=None)
+        self.assertIn("certificate_subject", error)
+
+    def test_without_a_certificate_a_user_supplied_value_is_accepted_as_is(self):
+        normalized, error = msix_settings.validate(
+            {"identity_name": "A.B", "certificate_subject": "CN=Whatever"}, cert_subject=None,
+        )
+        self.assertIsNone(error)
+        self.assertEqual(normalized["certificate_subject"], "CN=Whatever")
