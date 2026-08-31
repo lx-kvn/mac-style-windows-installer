@@ -109,6 +109,9 @@ jobs:
       - name: 移除剛才部署的套件
         if: always()
         shell: pwsh
+        # 移除是清理動作，不是要回答的問題：它失敗不該讓後面幾個問題
+        # 沒機會被問到（CI run 33422386563 就是這樣整條停擺的）。
+        continue-on-error: true
         run: python .github\scripts\msix_deployment_probe.py remove --identity-name "$env:PROBE_IDENTITY"
 
       # runas /trustlevel:0x20000 會以「基本使用者」的受限權杖執行，去掉系統
@@ -133,6 +136,9 @@ jobs:
       - name: 移除套件
         if: always()
         shell: pwsh
+        # 移除是清理動作，不是要回答的問題：它失敗不該讓後面幾個問題
+        # 沒機會被問到（CI run 33422386563 就是這樣整條停擺的）。
+        continue-on-error: true
         run: python .github\scripts\msix_deployment_probe.py remove --identity-name "$env:PROBE_IDENTITY"
 
       - name: 「Q4 圖示尺寸不符」——打包簽章（圖示只有 16x16）
@@ -176,6 +182,9 @@ jobs:
       - name: 移除套件
         if: always()
         shell: pwsh
+        # 移除是清理動作，不是要回答的問題：它失敗不該讓後面幾個問題
+        # 沒機會被問到（CI run 33422386563 就是這樣整條停擺的）。
+        continue-on-error: true
         run: python .github\scripts\msix_deployment_probe.py remove --identity-name "$env:PROBE_IDENTITY"
 
       # 第三輪 spike 只驗證了 winrt-* 單獨打包。本專案的 bootstrapper 還會

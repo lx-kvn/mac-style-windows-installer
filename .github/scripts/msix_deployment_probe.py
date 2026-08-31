@@ -136,12 +136,38 @@ def deploy(package_path):
 
 
 def remove(package_full_name):
+    """移除套件。
+
+    與列舉一樣，綁定把 WinRT 的多載拆成不同名稱：`remove_package_async`
+    只收一個參數，帶 `RemovalOptions` 的版本另有其名。實測（CI run
+    33422386563）以兩個參數呼叫 `remove_package_async` 會得到
+    `TypeError: Invalid parameter count`，因此這裡逐一嘗試並印出綁定實際
+    提供了哪些——那本身也是這次探針要記錄的事實。
+    """
     from winrt.windows.management.deployment import PackageManager, RemovalOptions
 
     manager = PackageManager()
-    operation = manager.remove_package_async(package_full_name, RemovalOptions.NONE)
-    result = operation.get()
-    return getattr(result, "error_text", "") or ""
+    available = [n for n in dir(manager) if n.startswith("remove_package")]
+    print(f"    綁定實際提供的移除方法：{available}")
+
+    attempts = [
+        ("remove_package_with_options_async", (package_full_name, RemovalOptions.NONE)),
+        ("remove_package_async", (package_full_name,)),
+        ("remove_package_async", (package_full_name, RemovalOptions.NONE)),
+    ]
+    for name, args in attempts:
+        method = getattr(manager, name, None)
+        if method is None:
+            continue
+        try:
+            operation = method(*args)
+        except TypeError as e:
+            print(f"    {name}{tuple(type(a).__name__ for a in args)} 不可用：{e}")
+            continue
+        print(f"    使用 {name}() 成功，參數數量 {len(args)}")
+        result = operation.get()
+        return getattr(result, "error_text", "") or ""
+    raise RuntimeError(f"找不到可用的移除方法，綁定提供的是：{available}")
 
 
 def list_current_user_packages(manager):
