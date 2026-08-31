@@ -35,6 +35,10 @@ import sdk_tools
 # builder.build_all() 認得的鍵名，值是說明性的預留位置，不是真的能直接拿去
 # 編譯的設定（JSON 沒有註解語法，只能靠這種方式提示使用者要填什麼）。
 TEMPLATE = {
+    # install_engine：安裝檔內部用哪一種方式落地檔案（見 CONTEXT.md
+    # 「傳統引擎與 MSIX 引擎」）。沒填即為 traditional，既有的設定檔
+    # 因此不受影響。
+    "install_engine": "traditional",
     "app_dir": "C:\\path\\to\\your\\app\\folder",
     "png_icon": "C:\\path\\to\\drag_icon.png",
     "ico_icon": "C:\\path\\to\\cover_icon.ico",
@@ -73,6 +77,7 @@ TEMPLATE = {
 
 # 純量欄位：CLI flag 名稱 -> data 字典鍵名，CLI 有帶值就覆蓋 JSON 對應欄位。
 _SCALAR_OVERRIDE_FIELDS = [
+    ("install_engine", "install_engine"),
     ("app_name", "app_name"),
     ("folder_name", "folder_name"),
     ("version", "version"),

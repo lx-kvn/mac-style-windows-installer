@@ -1015,6 +1015,63 @@ uap5:AppExecutionAlias`，而該別名啟動的是**其所屬應用程式項目�
 呈現，無任何外部依賴），列入該 ADR 是因為它與其餘三項在同一次討論中定案、
 且實作時屬同一段程式碼，分開記錄會使實作者漏看其中一項。
 
+## 第九輪定案決議（2026-08-31）：設定欄位與指令命名
+
+定案第二輪決議第十一、十二項與第五輪決議第一、二項所涉欄位的名稱。命名
+依循兩項從現有程式碼歸納出的既有慣例：**成組的功能用巢狀物件**（`signing`、
+`windows_service`、`scheduled_task` 皆是，不採前綴攤平）、**子指令用短橫線**
+（`init`、`list-files`、`pack`、`fetch-sdk-tools`）。
+
+```json
+{
+  "install_engine": "traditional",
+
+  "msix": {
+    "identity_name": "MyCompany.MyApp",
+    "certificate_subject": "CN=My Company, O=My Company, C=TW",
+    "min_windows_version": "10.0.17763.0",
+    "icons": { "tile": "", "taskbar": "", "store": "" }
+  }
+}
+```
+
+- **`install_engine`**（值為 `traditional`／`msix`）——不命名為 `engine`，
+  理由是設定檔其餘欄位皆為應用程式本身的資料，單獨一個 `engine` 無法看出
+  所指為何。`CONTEXT.md` 所稱的「模式」即為此欄位的二選一。**此項已實作**，
+  見 `install_engine.py`。
+- **`msix.identity_name`**——[ADR-0007](../adr/0007-package-identity-name-is-an-explicit-required-field.md)
+  的套件身分名稱。不命名為 `package_name`，理由是它對應的正是清單中的
+  `Identity/@Name`，而「package name」易與顯示名稱混淆。
+- **`msix.certificate_subject`**——第二輪決議第十一項的發行者。此處有一項
+  取捨：該值填入清單的 `Publisher` 欄位，理應同名，但頂層已有一個
+  `publisher`（VERSIONINFO 的公司名，自由文字），同名而不同義的兩個欄位置於
+  同一份設定檔是後續缺陷的來源。採 `certificate_subject` 的效益是名稱本身
+  即說明了規則——其值必須與憑證上記載的一致，不一致時系統拒絕安裝且錯誤
+  訊息不指向此原因。代價是與 MSIX 官方文件的欄位名對不上，讀該文件者需多
+  一次轉換。
+- **`msix.icons`**（`tile`／`taskbar`／`store`）——第五輪決議第一項的三張
+  圖示個別覆蓋，不填即沿用 `png_icon`。不採清單原名（`Square150x150Logo`
+  等），理由是後者精確但要求使用者先理解 MSIX 的結構。
+- **`msix.min_windows_version`**——第五輪決議第二項，預設
+  `10.0.17763.0`（依據見第六輪查證結果第一項）。
+
+### 兩截式的指令
+
+```
+mswi-cli pack-msix --config app.json                          → 未簽章的 .msix
+（呼叫端自行簽章）
+mswi-cli pack --config app.json --signed-msix dist/MyApp.msix → Setup_XXX.exe
+```
+
+一體式即為 `pack` 不帶 `--signed-msix`：憑證為本機檔案時，由工具串接三個
+步驟一次完成（第二輪決議第三項）。
+
+### MSIX 簽章不另立設定，共用現有的 `signing`
+
+理由與 [ADR-0008](../adr/0008-sdk-build-tools-are-fetched-on-explicit-request-only.md)
+決定四同一條：不在新的維度上重新製造剛消除的分歧。需要兩張不同憑證的情形，
+走兩截式自行簽署 `.msix` 即可——該路徑本即為此設計。
+
 ## 動工前仍需先有答案的問題
 
 第一輪所列五項中，第 1、5 項已於第二輪解決，第 2 項的技術部分已於第三輪
@@ -1093,6 +1150,15 @@ spike 驗證（見「已完成之待辦」）。以下為仍待解決者：
   不自動下載，改為偵測不到時提供可直接執行的取得指令；固定版本並驗證
   雜湊；快取獨立且持久；既有 exe 簽章共用同一套；來源優先序依使用者
   意圖的明確程度排列。
+- **設定欄位與指令的命名**（第一輪第 4 項、待辦第 6 項）——已於第九輪
+  定案，見「第九輪定案決議」：`install_engine` 與 `msix` 巢狀區塊的四個
+  欄位、兩截式的 `pack-msix`／`pack --signed-msix`，以及 MSIX 簽章共用
+  現有的 `signing` 而不另立設定。
+- **引擎選擇與 MSIX 相容性檢查**（待辦第 2 項）——已於 2026-08-31 實作
+  完成，見 `install_engine.py` 與 `tests/test_install_engine.py`：四類分類
+  的欄位歸屬、第二類與第三類可區分的訊息語氣、第四類的說明訊息、一次
+  列出全部違規項，以及「MSIX 引擎尚未實作」這道最終攔截（設定寫著 MSIX
+  卻默默產出一顆傳統安裝檔，比直接報錯糟得多）。
 - **`no_admin_install=false`（預設值）在 MSIX 模式的處置**（第七輪第一項
   引出）——已於第八輪定案，見「第八輪定案決議」與
   [ADR-0009](../adr/0009-msix-engine-first-version-is-per-user-scope-only.md)：
@@ -1123,20 +1189,21 @@ spike 驗證（見「已完成之待辦」）。以下為仍待解決者：
    進度 callback 是否實際觸發、伺服器版 Windows 能否部署、降權能否部署
    （以上見「第三輪 spike 結果」第九項），以及尺寸與宣告不符的圖示是否
    會被系統拒絕部署（見第五輪決議第一項——該項的成立以此為條件）。
-2. 依第八輪定案決議第二項的三支處置與 ADR-0009 決定四的「一次列出全部
-   違規項」，實作 MSIX 模式的類別檢查。此項先於清單產生的實作。
+2. 依第五輪決議第一項所需，補上圖示驗證（正方形、邊長不小於 150 像素）。
+   此項的成立以第 1 項的圖示前提為條件。
 3. 依第六輪查證結果第一項的兩項連帶約束，於文件記載終端使用者端的環境
    條件（Windows 10 2004 之前的 Enterprise／Education／LTSC 版需先開啟
    側載）。此項屬文件工作，不阻擋實作。
 4. spike 全數通過後，依第二輪決議第十五項的接縫設計，以先寫測試的順序
    實作第一版（範圍限於第二輪決議第七項的第一類功能）。**第一塊已完成
-   （SDK 工具的定位與取得，見「已完成之待辦」）**，其餘部分待第 2 項的
-   定案與第 6 項的欄位命名確定後接續。
+   （SDK 工具的定位與取得，以及引擎選擇與相容性檢查，見「已完成之待辦」）**，
+   其餘部分見第 7 項。
 5. 產生 MSIX 專用的資料夾圖示成品（`ui/windows_folder_icon.png` 已備妥，
    對比度是否再行調整待實際畫面確認後決定）。
-6. 決定第二輪決議第十一、十二項與第五輪決議第一、二項所涉設定欄位的
-   名稱（第十三項的 `sdk_tools_dir`／`sdk_tools_cache_dir` 已隨實作定案）。
-7. 補上第五輪決議第一項所需的圖示驗證（正方形、邊長不小於 150 像素）。
+6. 依第九輪定案的命名，於 `builder_cli.py init` 的範本與 `CLI_USAGE.md`
+   補上 `msix` 區塊的各欄位（`install_engine` 已完成）。
+7. 實作 MSIX 套件清單的產生（第九輪已定案欄位來源與命名，尚缺多語系與
+   檔案關聯的宣告形式，見「動工前仍需先有答案的問題」第 3 項）。
 8. 於使用說明書與 `CLI_USAGE.md` 記載兩種引擎的差異、限制與不可變更的
    欄位。
 

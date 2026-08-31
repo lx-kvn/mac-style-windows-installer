@@ -26,6 +26,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import install_engine
 import packaging_core
 
 
@@ -1310,3 +1311,70 @@ class TestBuiltInDependencyKeysFollowDependencyDefs(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestInstallEngineSelection(PackDataValidationTestBase):
+    """`install_engine` 欄位與 MSIX 相容性檢查在驗證流程裡的接法。
+
+    分類規則本身在 tests/test_install_engine.py 測，這裡只測「有沒有真的
+    接上」與「接的位置對不對」——ADR-0007 決定三所立的慣例是這類檢查要在
+    `validate_and_build_pack_data()` 這個純函式裡執行，於流程產生任何副作用
+    （清空 dist/、build/）之前攔截。
+    """
+
+    def test_existing_configs_without_the_field_are_unaffected(self):
+        """既有設定檔沒有這個欄位，行為必須完全不變。"""
+        pack_data, error = self._validate(self._base_data())
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["install_engine"], install_engine.TRADITIONAL)
+
+    def test_unknown_engine_value_is_rejected(self):
+        pack_data, error = self._validate(self._base_data(install_engine="msi"))
+        self.assertIsNone(pack_data)
+        self.assertIn("install_engine", error)
+
+    def test_msix_with_incompatible_settings_reports_every_one_of_them(self):
+        """ADR-0009 決定四：一次列出全部，不是第一個錯就停。
+
+        腳本檔案要真的存在：引擎相容性檢查排在一般欄位驗證之後，
+        腳本不存在會先被一般驗證擋下來，測不到這裡要測的東西。
+        """
+        with open(os.path.join(self.app_dir, "before.bat"), "w") as f:
+            f.write("@echo off")
+        pack_data, error = self._validate(self._base_data(
+            install_engine="msix",
+            no_admin_install=False,
+            custom_install_dir=r"C:\MyApp",
+            pre_install_script="before.bat",
+        ))
+        self.assertIsNone(pack_data)
+        for field in ("custom_install_dir", "pre_install_script"):
+            self.assertIn(field, error)
+        self.assertIn("尚未支援", error)
+        self.assertIn("格式本身的限制", error)
+
+    def test_msix_with_a_clean_config_still_stops_because_the_engine_is_unimplemented(self):
+        """設定寫著 MSIX 卻默默產出一顆傳統安裝檔，比直接報錯糟得多。"""
+        pack_data, error = self._validate(self._base_data(
+            install_engine="msix", no_admin_install=True,
+        ))
+        self.assertIsNone(pack_data)
+        self.assertEqual(error, install_engine.MSIX_NOT_IMPLEMENTED)
+
+    def test_compatibility_errors_come_before_the_unimplemented_notice(self):
+        """相容性結果比「引擎還沒做好」有用：下游專案要先知道自己的設定
+        能不能用，才決定要不要等這個引擎。"""
+        _, error = self._validate(self._base_data(
+            install_engine="msix", no_admin_install=False,
+        ))
+        self.assertNotEqual(error, install_engine.MSIX_NOT_IMPLEMENTED)
+        self.assertIn("尚未支援", error)
+
+    def test_the_traditional_engine_ignores_msix_restrictions(self):
+        pack_data, error = self._validate(self._base_data(
+            install_engine="traditional",
+            no_admin_install=False,
+            custom_install_dir=r"C:\MyApp",
+        ))
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["custom_install_dir"], r"C:\MyApp")

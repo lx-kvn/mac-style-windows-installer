@@ -55,7 +55,7 @@ class TestCmdInit(unittest.TestCase):
             template = json.load(f)
         for key in (
             "windows_service", "scheduled_task", "create_restore_point_before_install",
-            "dependencies_min_version",
+            "dependencies_min_version", "install_engine",
         ):
             self.assertIn(key, template, f"範本缺少欄位：{key}")
 
@@ -382,3 +382,19 @@ class TestHelpTextRenders(unittest.TestCase):
                 names.append(name)
         for expected in ("init", "list-files", "pack", "fetch-sdk-tools"):
             self.assertIn(expected, names)
+
+
+class TestInstallEngineFlag(unittest.TestCase):
+    """`--install-engine`：跟其他欄位一樣，CLI 旗標可以覆蓋 JSON 的值。"""
+
+    def test_flag_overrides_the_json_value(self):
+        parser = builder_cli.build_arg_parser()
+        args = parser.parse_args(["pack", "--app-dir", "x", "--install-engine", "msix"])
+        data, _, _, _, _ = builder_cli._load_pack_input(args)
+        self.assertEqual(data["install_engine"], "msix")
+
+    def test_absent_flag_leaves_the_field_alone(self):
+        parser = builder_cli.build_arg_parser()
+        args = parser.parse_args(["pack", "--app-dir", "x"])
+        data, _, _, _, _ = builder_cli._load_pack_input(args)
+        self.assertNotIn("install_engine", data)

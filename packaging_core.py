@@ -24,6 +24,7 @@ import subprocess
 
 import packaging_settings
 import dependency_defs
+import install_engine
 import windows_service
 
 # installer_core.py/uninstall.py 這兩支 entry point 實際 import 的專案內部
@@ -489,6 +490,13 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     回傳 (pack_data, None) 表示驗證通過；(None, error_message) 表示驗證失敗，
     error_message 就是原本要包進 {"status": "error", "message": ...} 的內容。
     """
+    # 引擎的解讀放最前面：它決定後面哪些欄位算得上有效，而且值本身
+    # 填錯時（打成 msi 之類）沒有必要先把其餘欄位驗完。
+    try:
+        engine = install_engine.normalize(data)
+    except install_engine.UnknownEngine as e:
+        return None, f"欄位驗證失敗：<br>{e}"
+
     app_name = data.get("app_name", "").strip()
     folder_name = data.get("folder_name", "").strip() or app_name
     version = data.get("version", "").strip()
@@ -751,4 +759,23 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     pack_data["install_password_env"] = install_password_env
     pack_data["windows_service"] = windows_service_normalized
     pack_data["scheduled_task"] = scheduled_task_normalized
+    pack_data["install_engine"] = engine
+
+    # 引擎相容性檢查放在最後，理由是它回報的是「這份設定與這個引擎不相容」，
+    # 而使用者要判斷的是「切換引擎划不划算」——那個判斷需要一份先通過了
+    # 一般欄位驗證的設定，否則列出來的清單裡會混著「值填錯了」這種跟
+    # 引擎無關的項目。
+    #
+    # 相容性結果先於「引擎尚未實作」回報：下游專案要先知道自己的設定
+    # 能不能用，才決定要不要等這個引擎（見 docs/adr/0009）。
+    report = install_engine.check_settings(engine, data)
+    if report.has_blocking:
+        return None, report.error_message()
+    if engine == install_engine.MSIX:
+        return None, install_engine.MSIX_NOT_IMPLEMENTED
+    # report.notices（第四類，不擋建置、只需說明的項目）目前沒有接收端：
+    # 它只在 MSIX 引擎下產生，而 MSIX 引擎在上一行就中止了。MSIX 引擎實作
+    # 完成、上面那個中止拿掉之後，這裡把 notices 交給 build_all() 的
+    # progress_callback 印進建置紀錄。先放一個永遠是空清單的欄位進 pack_data
+    # 只會讓人以為它已經在運作。
     return pack_data, None
