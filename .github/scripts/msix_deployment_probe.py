@@ -22,6 +22,8 @@
 `is_registered = False` 的結果，與「成功」難以區分（第三輪 spike 第四項）。
 """
 import argparse
+import ctypes
+import ctypes.wintypes as wintypes
 import os
 import struct
 import sys
@@ -54,7 +56,7 @@ MANIFEST = """<?xml version="1.0" encoding="utf-8"?>
   <Identity Name="{identity}" Publisher="{publisher}" Version="1.0.0.0"
             ProcessorArchitecture="x64" />
   <Properties>
-    <DisplayName>MSWI Deployment Probe</DisplayName>
+    <DisplayName>{display_name}</DisplayName>
     <PublisherDisplayName>MSWI Probe</PublisherDisplayName>
     <Logo>store.png</Logo>
   </Properties>
@@ -62,44 +64,160 @@ MANIFEST = """<?xml version="1.0" encoding="utf-8"?>
     <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0"
                         MaxVersionTested="10.0.26100.0" />
   </Dependencies>
-  <Resources><Resource Language="en-us" /></Resources>
+  <Resources>{resources}</Resources>
   <Capabilities><rescap:Capability Name="runFullTrust" /></Capabilities>
   <Applications>
     <Application Id="App" Executable="app.exe" EntryPoint="windows.fullTrustApplication">
-      <uap:VisualElements DisplayName="MSWI Probe" Description="MSWI deployment probe"
+      <uap:VisualElements DisplayName="{display_name}" Description="MSWI deployment probe"
                           BackgroundColor="transparent"
-                          Square150x150Logo="tile.png" Square44x44Logo="small.png" />
+                          Square150x150Logo="tile.png" Square44x44Logo="small.png" />{extensions}
     </Application>
   </Applications>
 </Package>
 """
 
 
-def make_package_dir(target, identity, publisher, icon_size):
+FILE_ASSOC_TEMPLATE = """
+      <Extensions>
+        <uap:Extension Category="windows.fileTypeAssociation">
+          <uap:FileTypeAssociation Name="{group}">
+            <uap:DisplayName>MSWI Probe Document</uap:DisplayName>{logo}
+            <uap:SupportedFileTypes>
+              <uap:FileType>{extension}</uap:FileType>
+            </uap:SupportedFileTypes>
+          </uap:FileTypeAssociation>
+        </uap:Extension>
+      </Extensions>"""
+
+# 多語系顯示名稱要靠資源檔：清單沒有內嵌多語言字串的機制，只能以
+# ms-resource: 參照 makepri 編出來的 resources.pri。
+RESW_TEMPLATE = """<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <data name="AppDisplayName" xml:space="preserve">
+    <value>{value}</value>
+  </data>
+</root>
+"""
+
+
+def make_package_dir(target, identity, publisher, icon_size=150,
+                     file_assoc=None, assoc_logo=False, localized=False):
     """造出一個可以交給 makeappx 的目錄。
 
     `icon_size` 決定三張圖示實際的像素尺寸。宣告的位置固定是
     Square150x150Logo／Square44x44Logo／Logo，因此傳入 150 以外的值即為
-    「尺寸與宣告不符」的情形——第五輪決議第一項的成立以「這種情形不會被
-    系統拒絕」為前提，本探針即為驗證該前提。
+    「尺寸與宣告不符」的情形。
+
+    `file_assoc` 給一個副檔名（例如 ".mswiprobe"）即宣告檔案關聯；
+    `assoc_logo` 決定要不要一併宣告 <uap:Logo>——兩者的差別正是要問的
+    問題：不宣告時殼層實際會用哪個圖示。
+
+    `localized=True` 時顯示名稱改用 ms-resource: 參照，資源檔另由
+    write_resw_sources() 產生、由 makepri 編成 resources.pri。
     """
+    import shutil
     os.makedirs(target, exist_ok=True)
     # 借用系統的 notepad.exe 當替身，比照 test-packaging-options.yml 的既有
     # 做法：這裡不需要這支 exe 真的能做什麼，只需要它是一個合法的 PE 檔案。
-    import shutil
     shutil.copy(os.path.join(os.environ.get("WINDIR", r"C:\Windows"),
                              "System32", "notepad.exe"),
                 os.path.join(target, "app.exe"))
     for name in ("tile.png", "small.png", "store.png"):
         write_png(os.path.join(target, name), icon_size, icon_size)
+    if file_assoc:
+        write_png(os.path.join(target, "doc.png"), 150, 150, rgba=(0xD9, 0x53, 0x4F, 0xFF))
+
+    extensions = ""
+    if file_assoc:
+        extensions = FILE_ASSOC_TEMPLATE.format(
+            group=file_assoc.lstrip(".").lower(),
+            extension=file_assoc,
+            logo=(nl_indent() + "<uap:Logo>doc.png</uap:Logo>") if assoc_logo else "",
+        )
+
+    if localized:
+        display_name = "ms-resource:AppDisplayName"
+        resources = "".join(
+            f'<Resource Language="{lang}" />' for lang in LOCALIZED_LANGUAGES
+        )
+    else:
+        display_name = "MSWI Probe"
+        resources = '<Resource Language="en-us" />'
+
     with open(os.path.join(target, "AppxManifest.xml"), "w", encoding="utf-8") as f:
-        f.write(MANIFEST.format(identity=identity, publisher=xml_escape(publisher)))
+        f.write(MANIFEST.format(
+            identity=identity, publisher=xml_escape(publisher),
+            display_name=display_name, resources=resources, extensions=extensions,
+        ))
+    return target
+
+
+def nl_indent():
+    """檔案關聯樣板裡 <uap:Logo> 那一行的縮排前綴。"""
+    return "\n            "
+
+
+# 第一個是預設語言（清單中 <Resource> 的第一筆即為預設）。
+LOCALIZED_LANGUAGES = ("en-us", "zh-tw")
+LOCALIZED_VALUES = {"en-us": "Probe English Name", "zh-tw": "探針中文名稱"}
+
+
+def write_resw_sources(target):
+    """依 makepri 期望的資料夾結構寫出各語言的 .resw。
+
+    一併放一張圖片進資源目錄：官方指出資源檔若沒有索引到任何圖片，
+    顯示名稱會直接顯示成 `ms-resource:AppDisplayName` 這串原始文字而不是
+    翻譯後的名稱。這個陷阱是否真的存在，正是本輪要問的。
+    """
+    for lang in LOCALIZED_LANGUAGES:
+        folder = os.path.join(target, "strings", lang)
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, "Resources.resw"), "w", encoding="utf-8") as f:
+            f.write(RESW_TEMPLATE.format(value=LOCALIZED_VALUES[lang]))
     return target
 
 
 def xml_escape(value):
     return (value.replace("&", "&amp;").replace("<", "&lt;")
             .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+# --- 檔案關聯的圖示：系統實際會用哪一個 -----------------------------------
+#
+# 規劃文件裡有一個沒有答案的問題：MSIX 的檔案關聯宣告中 <uap:Logo> 是選填，
+# 沒填時檔案總管顯示什麼？官方文件只說「通用的預設圖示，或關聯程式的圖示，
+# 視 Windows 版本與設定而定」，這個差別決定本專案要不要在 MSIX 模式要求
+# 使用者另外提供 PNG 版的關聯圖示。
+#
+# 不靠肉眼看檔案總管——SHGetFileInfoW 搭配 SHGFI_ICONLOCATION 會直接回報
+# 「這個副檔名的檔案，殼層會去哪個檔案的第幾號資源取圖示」，headless 環境
+# 一樣問得到，而且答案是明確的路徑而非一張圖。
+SHGFI_ICONLOCATION = 0x000001000
+SHGFI_USEFILEATTRIBUTES = 0x000000010
+FILE_ATTRIBUTE_NORMAL = 0x00000080
+
+
+class _SHFILEINFOW(ctypes.Structure):
+    _fields_ = [
+        ("hIcon", wintypes.HANDLE),
+        ("iIcon", ctypes.c_int),
+        ("dwAttributes", wintypes.DWORD),
+        ("szDisplayName", wintypes.WCHAR * 260),
+        ("szTypeName", wintypes.WCHAR * 80),
+    ]
+
+
+def shell_icon_for_extension(extension):
+    """回傳 (圖示來源路徑, 索引)——殼層對這個副檔名實際使用的圖示位置。"""
+    info = _SHFILEINFOW()
+    shell32 = ctypes.WinDLL("shell32.dll")
+    result = shell32.SHGetFileInfoW(
+        f"probe{extension}", FILE_ATTRIBUTE_NORMAL, ctypes.byref(info),
+        ctypes.sizeof(info), SHGFI_ICONLOCATION | SHGFI_USEFILEATTRIBUTES,
+    )
+    if not result:
+        return ("", -1)
+    return (info.szDisplayName, info.iIcon)
 
 
 def deploy(package_path):
@@ -221,6 +339,16 @@ def main():
     pkg.add_argument("--identity", required=True)
     pkg.add_argument("--publisher", required=True)
     pkg.add_argument("--icon-size", type=int, default=150)
+    pkg.add_argument("--file-assoc", default=None, help="宣告這個副檔名的檔案關聯，例如 .mswiprobe")
+    pkg.add_argument("--assoc-logo", action="store_true", help="檔案關聯一併宣告 <uap:Logo>")
+    pkg.add_argument("--localized", action="store_true", help="顯示名稱改用 ms-resource: 參照")
+
+    icons = sub.add_parser("shell-icon", help="問殼層：這個副檔名的檔案用哪個圖示")
+    icons.add_argument("--ext", required=True)
+    icons.add_argument("--label", default="")
+
+    name = sub.add_parser("package-display-name", help="讀出已部署套件的顯示名稱")
+    name.add_argument("--identity-name", required=True)
 
     dep = sub.add_parser("deploy", help="部署一份套件")
     dep.add_argument("--package", required=True)
@@ -238,9 +366,49 @@ def main():
         return 0
 
     if args.command == "make-package-dir":
-        make_package_dir(args.target, args.identity, args.publisher, args.icon_size)
-        print(f"已造出套件目錄 {args.target}（圖示實際尺寸 {args.icon_size}x{args.icon_size}）")
+        make_package_dir(
+            args.target, args.identity, args.publisher, args.icon_size,
+            file_assoc=args.file_assoc, assoc_logo=args.assoc_logo,
+            localized=args.localized,
+        )
+        if args.localized:
+            write_resw_sources(args.target)
+        print(
+            f"已造出套件目錄 {args.target}（圖示 {args.icon_size}x{args.icon_size}"
+            f"，檔案關聯 {args.file_assoc or '無'}"
+            f"，關聯圖示 {'有' if args.assoc_logo else '無'}"
+            f"，多語系名稱 {'是' if args.localized else '否'}）"
+        )
         return 0
+
+    if args.command == "shell-icon":
+        path, index = shell_icon_for_extension(args.ext)
+        label = args.label or args.ext
+        print(f"=== 殼層對 {args.ext} 使用的圖示（{label}）===")
+        if not path:
+            print("    查不到——SHGetFileInfoW 沒有回報圖示位置")
+        else:
+            print(f"    來源：{path}")
+            print(f"    索引：{index}")
+        return 0
+
+    if args.command == "package-display-name":
+        from winrt.windows.management.deployment import PackageManager
+
+        manager = PackageManager()
+        for package in list_current_user_packages(manager):
+            if package.id.name == args.identity_name:
+                display = package.display_name
+                print(f"=== 已部署套件 {args.identity_name} 的顯示名稱 ===")
+                print(f"    display_name = {display!r}")
+                if str(display).startswith("ms-resource:"):
+                    print("    結果：顯示名稱沒有被解析，直接留著 ms-resource: 原始字串——"
+                          "官方所述的陷阱確實存在，資源檔的產生方式需要調整。")
+                else:
+                    print("    結果：顯示名稱已正確解析為翻譯後的字串。")
+                return 0
+        print(f"找不到已部署的套件 {args.identity_name}")
+        return 1
 
     if args.command == "remove":
         full_name = find_package(args.identity_name)

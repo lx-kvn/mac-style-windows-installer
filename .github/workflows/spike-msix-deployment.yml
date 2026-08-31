@@ -187,6 +187,101 @@ jobs:
         continue-on-error: true
         run: python .github\scripts\msix_deployment_probe.py remove --identity-name "$env:PROBE_IDENTITY"
 
+      # --- 第二輪探針：規劃第十二輪要問的三件事 -------------------------
+      #
+      # Q6 檔案關聯不宣告 <uap:Logo> 時，殼層實際用哪個圖示？官方文件只說
+      #    「通用預設圖示，或關聯程式的圖示，視版本與設定而定」，而這個
+      #    差別決定本專案要不要在 MSIX 模式要求使用者另外提供 PNG。
+      # Q7 宣告了 PNG Logo 的對照組，確認機制本身有效。
+      # Q8 多語系顯示名稱（ms-resource: + makepri）能不能正確解析——官方
+      #    指出資源檔若沒索引到圖片，名稱會顯示成 ms-resource:AppDisplayName
+      #    這串原始文字，該陷阱是否存在要問清楚。
+      - name: 「Q6 關聯無 Logo」——打包、部署、問殼層用哪個圖示
+        shell: pwsh
+        run: |
+          $publisher = (Get-Content publisher.txt -Raw).Trim()
+          $makeappx = python -c "import sdk_tools; print(sdk_tools.find_tool('makeappx.exe').path)"
+          $signtool = python -c "import sdk_tools; print(sdk_tools.find_tool('signtool.exe').path)"
+
+          Write-Host '--- 部署之前，先問殼層現在用什麼（基準）---'
+          python .github\scripts\msix_deployment_probe.py shell-icon --ext .mswiprobe --label 部署前
+
+          python .github\scripts\msix_deployment_probe.py make-package-dir `
+            --target pkg_assoc_nologo --identity "$env:PROBE_IDENTITY" `
+            --publisher "$publisher" --file-assoc .mswiprobe
+          & $makeappx pack /d pkg_assoc_nologo /p probe_assoc_nologo.msix /o
+          if ($LASTEXITCODE -ne 0) { throw 'makeappx 失敗' }
+          & $signtool sign /fd sha256 /f probe.pfx /p "$env:PROBE_CERT_PASSWORD" probe_assoc_nologo.msix
+          if ($LASTEXITCODE -ne 0) { throw 'signtool 失敗' }
+          python .github\scripts\msix_deployment_probe.py deploy `
+            --package probe_assoc_nologo.msix --expect success --label 關聯無Logo
+          python .github\scripts\msix_deployment_probe.py shell-icon --ext .mswiprobe --label 關聯無Logo
+
+      - name: 移除套件
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: python .github\scripts\msix_deployment_probe.py remove --identity-name "$env:PROBE_IDENTITY"
+
+      - name: 「Q7 關聯有 PNG Logo」——對照組
+        shell: pwsh
+        run: |
+          $publisher = (Get-Content publisher.txt -Raw).Trim()
+          $makeappx = python -c "import sdk_tools; print(sdk_tools.find_tool('makeappx.exe').path)"
+          $signtool = python -c "import sdk_tools; print(sdk_tools.find_tool('signtool.exe').path)"
+          python .github\scripts\msix_deployment_probe.py make-package-dir `
+            --target pkg_assoc_logo --identity "$env:PROBE_IDENTITY" `
+            --publisher "$publisher" --file-assoc .mswiprobe --assoc-logo
+          & $makeappx pack /d pkg_assoc_logo /p probe_assoc_logo.msix /o
+          if ($LASTEXITCODE -ne 0) { throw 'makeappx 失敗' }
+          & $signtool sign /fd sha256 /f probe.pfx /p "$env:PROBE_CERT_PASSWORD" probe_assoc_logo.msix
+          if ($LASTEXITCODE -ne 0) { throw 'signtool 失敗' }
+          python .github\scripts\msix_deployment_probe.py deploy `
+            --package probe_assoc_logo.msix --expect success --label 關聯有Logo
+          python .github\scripts\msix_deployment_probe.py shell-icon --ext .mswiprobe --label 關聯有Logo
+
+      - name: 移除套件
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: python .github\scripts\msix_deployment_probe.py remove --identity-name "$env:PROBE_IDENTITY"
+
+      - name: 「Q8 多語系顯示名稱」——makepri + ms-resource
+        shell: pwsh
+        run: |
+          $publisher = (Get-Content publisher.txt -Raw).Trim()
+          $makeappx = python -c "import sdk_tools; print(sdk_tools.find_tool('makeappx.exe').path)"
+          $signtool = python -c "import sdk_tools; print(sdk_tools.find_tool('signtool.exe').path)"
+          $makepri  = python -c "import sdk_tools; print(sdk_tools.find_tool('makepri.exe').path)"
+          Write-Host "makepri : $makepri"
+
+          python .github\scripts\msix_deployment_probe.py make-package-dir `
+            --target pkg_localized --identity "$env:PROBE_IDENTITY" `
+            --publisher "$publisher" --localized
+
+          Push-Location pkg_localized
+          & $makepri createconfig /cf priconfig.xml /dq en-US_zh-TW /o
+          if ($LASTEXITCODE -ne 0) { Pop-Location; throw 'makepri createconfig 失敗' }
+          & $makepri new /pr . /cf priconfig.xml /of resources.pri /o
+          if ($LASTEXITCODE -ne 0) { Pop-Location; throw 'makepri new 失敗' }
+          Remove-Item priconfig.xml -ErrorAction SilentlyContinue
+          Pop-Location
+
+          & $makeappx pack /d pkg_localized /p probe_localized.msix /o
+          if ($LASTEXITCODE -ne 0) { throw 'makeappx 失敗' }
+          & $signtool sign /fd sha256 /f probe.pfx /p "$env:PROBE_CERT_PASSWORD" probe_localized.msix
+          if ($LASTEXITCODE -ne 0) { throw 'signtool 失敗' }
+          python .github\scripts\msix_deployment_probe.py deploy `
+            --package probe_localized.msix --expect success --label 多語系名稱
+          python .github\scripts\msix_deployment_probe.py package-display-name `
+            --identity-name "$env:PROBE_IDENTITY"
+
+      - name: 移除套件
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: python .github\scripts\msix_deployment_probe.py remove --identity-name "$env:PROBE_IDENTITY"
+
       # 第三輪 spike 只驗證了 winrt-* 單獨打包。本專案的 bootstrapper 還會
       # 帶著 pywebview（安裝介面）與 pywin32（捷徑），三者併進同一顆 exe
       # 是否仍然正常，是路線 B 的一項未驗證前提。
