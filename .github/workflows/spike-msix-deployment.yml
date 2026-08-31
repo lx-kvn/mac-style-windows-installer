@@ -1,0 +1,224 @@
+name: Spike - MSIX Deployment
+
+# 這個 workflow 是探針，不是功能測試。MSIX 引擎尚未實作，本工具目前產不出
+# .msix，所以這裡驗的是「Windows 做不做得到」，不是「我們的產出對不對」。
+#
+# 回答 docs/proposals/MSIX輸出規劃.md「待辦事項」第 1 項所列的四個問題，
+# 外加第三輪 spike 第九項留下的打包相容性問題：
+#
+#   Q1 進度 callback 在真實部署中是否實際觸發
+#   Q2 伺服器版 Windows（這台 runner）能否部署 MSIX
+#   Q3 降權執行時能否部署（MSIX「不需管理員權限」這項特性）
+#   Q4 尺寸與宣告不符的圖示是否會被系統拒絕部署
+#   Q5 winrt-* 與 pywebview/pywin32 併進同一顆 PyInstaller exe 是否相容
+#
+# 為什麼不併進 test-packaging-options.yml：那支 workflow 驗的是本工具產出的
+# 安裝檔在真實系統上的效果，而這裡連產出都還不存在。併進去會讓那支 workflow
+# 一次做兩件事，等引擎完成還要再拆一次。引擎做好之後，真正的 MSIX 驗證併回
+# test-packaging-options.yml，這支就可以刪掉。
+#
+# 為什麼只能在 CI 上做：部署一份自簽套件需要該憑證先被信任，而 ADR-0005
+# 決定三指出，用完即丟的 runner 正是信任測試憑證的適當環境——它的信任存放區
+# 不具持續性。在開發者自己的機器上做同一件事，會留下一張長期被信任的自簽憑證。
+on:
+  workflow_dispatch:
+
+jobs:
+  spike:
+    runs-on: windows-latest
+
+    # 理由同 build.yml：runner 預設主控台/檔案編碼是英文語系（cp1252），
+    # 這個專案到處是中文訊息，不強制 UTF-8 會整批 UnicodeEncodeError。
+    env:
+      PYTHONUTF8: "1"
+      PROBE_IDENTITY: MswiCi.DeploymentProbe
+      PROBE_CERT_PASSWORD: mswi-ci-ephemeral-runner-only
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: 安裝相依（winrt-* 版本固定，比照第三輪 spike 實測過的組合）
+        run: |
+          python -m pip install --upgrade pip
+          pip install cryptography
+          pip install winrt-runtime==3.2.1 winrt-Windows.Management.Deployment==3.2.1 winrt-Windows.Foundation==3.2.1 winrt-Windows.Foundation.Collections==3.2.1 winrt-Windows.ApplicationModel==3.2.1
+
+      - name: 記錄這台 runner 的作業系統版本
+        shell: pwsh
+        run: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          Write-Host "Caption      : $($os.Caption)"
+          Write-Host "Version      : $($os.Version)"
+          Write-Host "BuildNumber  : $($os.BuildNumber)"
+          Write-Host "ProductType  : $($os.ProductType)  (1=Workstation, 2=DC, 3=Server)"
+          Write-Host "App Installer: $([bool](Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue))"
+
+      # 順便吃自己的狗糧：SDK 工具用本專案的 fetch-sdk-tools 取得，
+      # 等於在 CI 上實地驗證 ADR-0008 的取得流程。
+      - name: 取得 SDK 工具（makeappx／signtool）
+        run: python builder_cli.py fetch-sdk-tools
+
+      - name: 產生自簽測試憑證
+        shell: pwsh
+        run: |
+          python .github\scripts\make_test_cert.py `
+            --pfx probe.pfx --cer probe.cer `
+            --password "$env:PROBE_CERT_PASSWORD" `
+            --publisher-out publisher.txt
+          Write-Host "publisher.txt = $(Get-Content publisher.txt -Raw)"
+
+      - name: 信任這張憑證（僅限這台用完即丟的 runner）
+        shell: pwsh
+        run: |
+          Import-Certificate -FilePath probe.cer `
+            -CertStoreLocation Cert:\LocalMachine\TrustedPeople | Out-Null
+          Import-Certificate -FilePath probe.cer `
+            -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+          Write-Host "已匯入 TrustedPeople 與 Root"
+
+      - name: 打包並簽章（正確尺寸的圖示，150x150）
+        shell: pwsh
+        run: |
+          $publisher = (Get-Content publisher.txt -Raw).Trim()
+          python .github\scripts\msix_deployment_probe.py make-package-dir `
+            --target pkg_good --identity "$env:PROBE_IDENTITY" `
+            --publisher "$publisher" --icon-size 150
+
+          $tools = python -c "import sdk_tools; print(sdk_tools.find_tool('makeappx.exe').path)"
+          $signtool = python -c "import sdk_tools; print(sdk_tools.find_tool('signtool.exe').path)"
+          Write-Host "makeappx : $tools"
+          Write-Host "signtool : $signtool"
+
+          & $tools pack /d pkg_good /p probe_good.msix /o
+          if ($LASTEXITCODE -ne 0) { throw "makeappx 失敗" }
+          & $signtool sign /fd sha256 /f probe.pfx /p "$env:PROBE_CERT_PASSWORD" probe_good.msix
+          if ($LASTEXITCODE -ne 0) { throw "signtool 失敗" }
+
+      - name: 「Q1 進度回報」「Q2 伺服器版能否部署」——以系統管理員身分部署
+        shell: pwsh
+        run: |
+          python .github\scripts\msix_deployment_probe.py deploy `
+            --package probe_good.msix --expect success --label "正確尺寸圖示（提權）"
+
+      - name: 移除剛才部署的套件
+        if: always()
+        shell: pwsh
+        run: python .github\scripts\msix_deployment_probe.py remove --identity-name "$env:PROBE_IDENTITY"
+
+      # runas /trustlevel:0x20000 會以「基本使用者」的受限權杖執行，去掉系統
+      # 管理員權限。這個做法的證據力不對稱，如實記錄：**成功即為結論性的
+      # 正面證據**（沒有管理員權限也裝得起來）；失敗則不具結論性，因為受限
+      # 權杖與一般標準使用者帳號並不完全等價，失敗可能來自權杖限制而非權限。
+      # 若這一步失敗，下一輪要改建一個真正的本機標準使用者帳號重測。
+      - name: 「Q3 降權能否部署」——以受限權杖部署
+        shell: pwsh
+        run: |
+          python .github\scripts\msix_deployment_probe.py remove --identity-name "$env:PROBE_IDENTITY" | Out-Null
+          $cmd = "python `"$PWD\.github\scripts\msix_deployment_probe.py`" deploy --package `"$PWD\probe_good.msix`" --expect success --label 降權 > `"$PWD\deelevated.txt`" 2>&1"
+          Start-Process -FilePath "runas.exe" `
+            -ArgumentList "/trustlevel:0x20000", "`"cmd /c $cmd`"" -Wait
+          Start-Sleep -Seconds 5
+          if (Test-Path deelevated.txt) {
+            Get-Content deelevated.txt | ForEach-Object { Write-Host $_ }
+          } else {
+            Write-Host "WARN: 降權執行沒有留下輸出，這一步不具結論性"
+          }
+
+      - name: 移除套件
+        if: always()
+        shell: pwsh
+        run: python .github\scripts\msix_deployment_probe.py remove --identity-name "$env:PROBE_IDENTITY"
+
+      - name: 「Q4 圖示尺寸不符」——打包簽章（圖示只有 16x16）
+        shell: pwsh
+        run: |
+          $publisher = (Get-Content publisher.txt -Raw).Trim()
+          python .github\scripts\msix_deployment_probe.py make-package-dir `
+            --target pkg_bad_icon --identity "$env:PROBE_IDENTITY" `
+            --publisher "$publisher" --icon-size 16
+
+          $makeappx = python -c "import sdk_tools; print(sdk_tools.find_tool('makeappx.exe').path)"
+          $signtool = python -c "import sdk_tools; print(sdk_tools.find_tool('signtool.exe').path)"
+
+          & $makeappx pack /d pkg_bad_icon /p probe_bad_icon.msix /o
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "結果：makeappx 在打包階段就拒絕了尺寸不符的圖示"
+            Write-Host "（這也是一種答案——第五輪決議第一項的前提不成立，只是擋在更早的階段）"
+            "makeappx-rejected" | Set-Content icon_verdict.txt
+            exit 0
+          }
+          & $signtool sign /fd sha256 /f probe.pfx /p "$env:PROBE_CERT_PASSWORD" probe_bad_icon.msix
+          if ($LASTEXITCODE -ne 0) { throw "signtool 失敗" }
+          "packed" | Set-Content icon_verdict.txt
+
+      - name: 「Q4 圖示尺寸不符」——部署看看系統收不收
+        shell: pwsh
+        run: |
+          if ((Get-Content icon_verdict.txt -Raw).Trim() -ne "packed") {
+            Write-Host "打包階段已被拒絕，這一步跳過"
+            exit 0
+          }
+          # 這一步不用 --expect 判定成敗：兩種結果都是有效答案，我們要的是
+          # 事實，不是通過與否。部署成功代表第五輪決議第一項的前提成立
+          # （沿用同一張 PNG 可行）；被拒絕代表該決議不成立，要改採自動縮放
+          # 或要求使用者提供三張。
+          python .github\scripts\msix_deployment_probe.py deploy `
+            --package probe_bad_icon.msix --expect rejected --label "圖示 16x16（宣告 150x150）"
+          Write-Host "註：上面這一步的 exit code 不代表 workflow 的成敗，請看實際輸出判讀。"
+        continue-on-error: true
+
+      - name: 移除套件
+        if: always()
+        shell: pwsh
+        run: python .github\scripts\msix_deployment_probe.py remove --identity-name "$env:PROBE_IDENTITY"
+
+      # 第三輪 spike 只驗證了 winrt-* 單獨打包。本專案的 bootstrapper 還會
+      # 帶著 pywebview（安裝介面）與 pywin32（捷徑），三者併進同一顆 exe
+      # 是否仍然正常，是路線 B 的一項未驗證前提。
+      - name: 「Q5 打包相容性」——winrt-* 與 pywebview／pywin32 併成同一顆 exe
+        shell: pwsh
+        run: |
+          pip install pyinstaller pywebview pywin32
+          @'
+          import webview            # noqa: F401
+          import win32com.client    # noqa: F401
+          from winrt.windows.management.deployment import PackageManager
+          manager = PackageManager()
+          # 方法名以探測的方式取得，理由見 msix_deployment_probe.py 的
+          # list_current_user_packages()。
+          names = [n for n in dir(manager) if n.startswith("find_packages")]
+          print(f"PROBE_OK methods={names}")
+          '@ | Set-Content -Path combined_probe.py -Encoding UTF8
+
+          Write-Host "--- 先在一般 Python 環境取得基準 ---"
+          python combined_probe.py
+          if ($LASTEXITCODE -ne 0) { throw "基準就失敗了，不是打包造成的" }
+
+          Write-Host "--- 打包成 onefile exe ---"
+          pyinstaller --onefile --name combined_probe combined_probe.py
+          Write-Host "--- 清空 PYTHONPATH 後執行打包產物 ---"
+          $env:PYTHONPATH = ""
+          & .\dist\combined_probe.exe
+          if ($LASTEXITCODE -ne 0) { throw "打包後的 exe 執行失敗——winrt 與 pywebview/pywin32 併包不相容" }
+          Write-Host "PASS: 三者併進同一顆 exe 可正常運作"
+
+      - name: 收集輸出
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path logs | Out-Null
+          Copy-Item publisher.txt, deelevated.txt, icon_verdict.txt logs\ -ErrorAction SilentlyContinue
+
+      - name: 上傳輸出
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spike-msix-deployment
+          path: logs\
+          if-no-files-found: warn
