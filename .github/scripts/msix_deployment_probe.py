@@ -49,73 +49,23 @@ def write_png(path, width, height, rgba=(0x4A, 0x90, 0xD9, 0xFF)):
         f.write(png)
 
 
-MANIFEST = """<?xml version="1.0" encoding="utf-8"?>
-<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
-         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
-         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities">
-  <Identity Name="{identity}" Publisher="{publisher}" Version="1.0.0.0"
-            ProcessorArchitecture="x64" />
-  <Properties>
-    <DisplayName>{display_name}</DisplayName>
-    <PublisherDisplayName>MSWI Probe</PublisherDisplayName>
-    <Logo>store.png</Logo>
-  </Properties>
-  <Dependencies>
-    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0"
-                        MaxVersionTested="10.0.26100.0" />
-  </Dependencies>
-  <Resources>{resources}</Resources>
-  <Capabilities><rescap:Capability Name="runFullTrust" /></Capabilities>
-  <Applications>
-    <Application Id="App" Executable="app.exe" EntryPoint="windows.fullTrustApplication">
-      <uap:VisualElements DisplayName="{display_name}" Description="MSWI deployment probe"
-                          BackgroundColor="transparent"
-                          Square150x150Logo="tile.png" Square44x44Logo="small.png" />{extensions}
-    </Application>
-  </Applications>
-</Package>
-"""
-
-
-FILE_ASSOC_TEMPLATE = """
-      <Extensions>
-        <uap:Extension Category="windows.fileTypeAssociation">
-          <uap:FileTypeAssociation Name="{group}">
-            <uap:DisplayName>MSWI Probe Document</uap:DisplayName>{logo}
-            <uap:SupportedFileTypes>
-              <uap:FileType>{extension}</uap:FileType>
-            </uap:SupportedFileTypes>
-          </uap:FileTypeAssociation>
-        </uap:Extension>
-      </Extensions>"""
-
-# 多語系顯示名稱要靠資源檔：清單沒有內嵌多語言字串的機制，只能以
-# ms-resource: 參照 makepri 編出來的 resources.pri。
-RESW_TEMPLATE = """<?xml version="1.0" encoding="utf-8"?>
-<root>
-  <data name="AppDisplayName" xml:space="preserve">
-    <value>{value}</value>
-  </data>
-</root>
-"""
-
-
 def make_package_dir(target, identity, publisher, icon_size=150,
                      file_assoc=None, assoc_logo=False, localized=False):
     """造出一個可以交給 makeappx 的目錄。
 
-    `icon_size` 決定三張圖示實際的像素尺寸。宣告的位置固定是
-    Square150x150Logo／Square44x44Logo／Logo，因此傳入 150 以外的值即為
-    「尺寸與宣告不符」的情形。
+    清單由本專案的 `msix_manifest.render()` 產生，不在這裡另寫一份——探針
+    自己手寫一份清單的話，它會與產品程式碼漂移，而且 CI 驗到的會是探針
+    自己的清單對不對，不是產生器對不對。改成共用之後，每一次 CI 執行都
+    順帶驗證了產生器的產出能不能通過 makeappx 與實際部署。
 
-    `file_assoc` 給一個副檔名（例如 ".mswiprobe"）即宣告檔案關聯；
-    `assoc_logo` 決定要不要一併宣告 <uap:Logo>——兩者的差別正是要問的
-    問題：不宣告時殼層實際會用哪個圖示。
-
-    `localized=True` 時顯示名稱改用 ms-resource: 參照，資源檔另由
-    write_resw_sources() 產生、由 makepri 編成 resources.pri。
+    `icon_size` 決定三張圖示實際的像素尺寸；宣告的位置固定，因此傳入 150
+    以外的值即為「尺寸與宣告不符」的情形。
     """
     import shutil
+    sys.path.insert(0, os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))))
+    import msix_manifest
+
     os.makedirs(target, exist_ok=True)
     # 借用系統的 notepad.exe 當替身，比照 test-packaging-options.yml 的既有
     # 做法：這裡不需要這支 exe 真的能做什麼，只需要它是一個合法的 PE 檔案。
@@ -124,62 +74,35 @@ def make_package_dir(target, identity, publisher, icon_size=150,
                 os.path.join(target, "app.exe"))
     for name in ("tile.png", "small.png", "store.png"):
         write_png(os.path.join(target, name), icon_size, icon_size)
-    if file_assoc:
+
+    doc_icon = ""
+    if file_assoc and assoc_logo:
         write_png(os.path.join(target, "doc.png"), 150, 150, rgba=(0xD9, 0x53, 0x4F, 0xFF))
+        doc_icon = "doc.png"
 
-    extensions = ""
-    if file_assoc:
-        extensions = FILE_ASSOC_TEMPLATE.format(
-            group=file_assoc.lstrip(".").lower(),
-            extension=file_assoc,
-            logo=(nl_indent() + "<uap:Logo>doc.png</uap:Logo>") if assoc_logo else "",
-        )
-
-    if localized:
-        display_name = "ms-resource:AppDisplayName"
-        resources = "".join(
-            f'<Resource Language="{lang}" />' for lang in LOCALIZED_LANGUAGES
-        )
-    else:
-        display_name = "MSWI Probe"
-        resources = '<Resource Language="en-us" />'
-
+    display_names = LOCALIZED_VALUES if localized else None
+    xml = msix_manifest.render(
+        identity_name=identity,
+        certificate_subject=publisher,
+        version="1.0.0.0",
+        app_name="MSWI Probe",
+        publisher="MSWI Probe",
+        main_exe="app.exe",
+        file_associations=[file_assoc] if file_assoc else [],
+        doc_icon=doc_icon,
+        display_names=display_names,
+        default_language=LOCALIZED_LANGUAGES[0] if localized else None,
+    )
     with open(os.path.join(target, "AppxManifest.xml"), "w", encoding="utf-8") as f:
-        f.write(MANIFEST.format(
-            identity=identity, publisher=xml_escape(publisher),
-            display_name=display_name, resources=resources, extensions=extensions,
-        ))
+        f.write(xml)
+    if localized:
+        msix_manifest.write_resource_sources(target, LOCALIZED_VALUES)
     return target
-
-
-def nl_indent():
-    """檔案關聯樣板裡 <uap:Logo> 那一行的縮排前綴。"""
-    return "\n            "
 
 
 # 第一個是預設語言（清單中 <Resource> 的第一筆即為預設）。
 LOCALIZED_LANGUAGES = ("en-us", "zh-tw")
 LOCALIZED_VALUES = {"en-us": "Probe English Name", "zh-tw": "探針中文名稱"}
-
-
-def write_resw_sources(target):
-    """依 makepri 期望的資料夾結構寫出各語言的 .resw。
-
-    一併放一張圖片進資源目錄：官方指出資源檔若沒有索引到任何圖片，
-    顯示名稱會直接顯示成 `ms-resource:AppDisplayName` 這串原始文字而不是
-    翻譯後的名稱。這個陷阱是否真的存在，正是本輪要問的。
-    """
-    for lang in LOCALIZED_LANGUAGES:
-        folder = os.path.join(target, "strings", lang)
-        os.makedirs(folder, exist_ok=True)
-        with open(os.path.join(folder, "Resources.resw"), "w", encoding="utf-8") as f:
-            f.write(RESW_TEMPLATE.format(value=LOCALIZED_VALUES[lang]))
-    return target
-
-
-def xml_escape(value):
-    return (value.replace("&", "&amp;").replace("<", "&lt;")
-            .replace(">", "&gt;").replace('"', "&quot;"))
 
 
 # --- 檔案關聯的圖示：系統實際會用哪一個 -----------------------------------
@@ -371,8 +294,6 @@ def main():
             file_assoc=args.file_assoc, assoc_logo=args.assoc_logo,
             localized=args.localized,
         )
-        if args.localized:
-            write_resw_sources(args.target)
         print(
             f"已造出套件目錄 {args.target}（圖示 {args.icon_size}x{args.icon_size}"
             f"，檔案關聯 {args.file_assoc or '無'}"
