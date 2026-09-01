@@ -31,6 +31,7 @@ import sys
 
 import builder
 import install_engine
+import lang_detect
 import packaging_core
 import packaging_settings
 import sdk_tools
@@ -110,6 +111,19 @@ _SCALAR_OVERRIDE_FIELDS = [
 ]
 
 
+def resolve_language(flag):
+    """這次的輸出要用哪一種語言（第十四輪決議第八項）。
+
+    帶了 --lang 就用它；沒帶就偵測系統語言，與 GUI 首次啟動時的預設值
+    一致。提供旗標是為了 CI——輸出語言跟著執行那台機器的區域設定跑，
+    會讓同一份設定在兩台機器上產生不同語言的 log，比對就失效了。
+    """
+    if flag:
+        return flag
+    return lang_detect.detect_system_language(
+        install_engine.LANGUAGES, install_engine.DEFAULT_LANGUAGE)
+
+
 def _strip_html(message):
     """validate_and_build_pack_data() 回傳的錯誤訊息帶 <br> 是給 GUI
     innerHTML 用的，終端機印出來要換成真正的換行。"""
@@ -132,6 +146,10 @@ def build_arg_parser():
     list_files_p.add_argument("--app-dir", dest="app_dir", required=True, help="應用程式內容資料夾")
 
     pack_p = sub.add_parser("pack", help="驗證設定並編譯出安裝檔")
+    pack_p.add_argument(
+        "--lang", dest="lang", default=None,
+        help=f"訊息語言（{'／'.join(install_engine.LANGUAGES)}），未指定時依系統語言",
+    )
     pack_p.add_argument("--config", default=None, help="JSON 設定檔路徑（選填，沒給就完全靠底下的 flag）")
     pack_p.add_argument("--workspace-dir", default=None, help="編譯工作目錄，預設用 packaging_core.get_workspace_dir()")
     # 這兩個與 --workspace-dir 同一種性質：描述「這台機器上的東西在哪」，
@@ -192,6 +210,10 @@ def build_arg_parser():
 
     msix_p = sub.add_parser(
         "pack-msix", help="產出未簽章的 .msix（兩截式流程的第一步）",
+    )
+    msix_p.add_argument(
+        "--lang", dest="lang", default=None,
+        help=f"訊息語言（{'／'.join(install_engine.LANGUAGES)}），未指定時依系統語言",
     )
     msix_p.add_argument("--config", default=None, help="JSON 設定檔路徑")
     msix_p.add_argument("--output", default=None, help="輸出的 .msix 路徑，預設用套件身分名稱")
@@ -255,6 +277,7 @@ def cmd_pack_msix(args):
 
     pack_data, error = packaging_core.validate_and_build_pack_data(
         data, app_dir, png_path, ico_path, doc_icon_path_selected,
+        lang=resolve_language(getattr(args, "lang", None)),
     )
     if error:
         print(_strip_html(error), file=sys.stderr)
@@ -408,6 +431,7 @@ def cmd_pack(args):
 
     pack_data, error = packaging_core.validate_and_build_pack_data(
         data, app_dir, png_path, ico_path, doc_icon_path_selected,
+        lang=resolve_language(getattr(args, "lang", None)),
     )
     if error:
         print(_strip_html(error), file=sys.stderr)

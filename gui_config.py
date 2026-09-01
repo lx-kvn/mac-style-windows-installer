@@ -273,7 +273,7 @@ class ConfigAPI:
         """掃描目前選定的 app_dir，回傳裡面所有 .exe 的相對路徑，供前端下拉選單選擇主執行檔"""
         return [p for p in self.list_app_dir_files() if p.lower().endswith(".exe")]
 
-    def start_pack(self, data, install_password=""):
+    def start_pack(self, data, install_password="", lang=None):
         """接收前端表單資料，執行嚴格驗證並啟動背景線程打包。
 
         install_password：使用者在「啟用安裝密碼保護」區塊選擇「直接輸入
@@ -300,6 +300,9 @@ class ConfigAPI:
         pack_data, error = validate_and_build_pack_data(
             data, self.app_dir, self.png_path, self.ico_path, self.doc_icon_path,
             has_inline_password=bool(install_password),
+            # 介面語言由前端送來：後端沒有別的管道知道使用者在畫面上選了
+            # 哪一種語言（GUI 的語言記在 localStorage）。沒送就用預設值。
+            lang=lang or install_engine.DEFAULT_LANGUAGE,
         )
         if error:
             return {"status": "error", "message": error}

@@ -1615,6 +1615,14 @@ spike 驗證（見「已完成之待辦」）。以下為仍待解決者：
 4. 於文件記載終端使用者端的環境條件：Windows 10 2004 之前的
    Enterprise／Education／LTSC 版需先開啟側載（第六輪查證結果第一項）。
 
+5. 將 `packaging_core.py` 的欄位驗證訊息一併改為可翻譯的 key。目前只有
+   `install_engine.py` 完成，兩者的訊息顯示在同一個彈窗裡，英文介面下會
+   中英混雜（第十四輪決議第九項刻意分階段，見 `docs/adr/0011`）。
+6. `install_engine.check_settings()` 回傳的 `notices`（第四類，不擋建置、
+   只需說明的項目）目前沒有接收端。`packaging_core.py` 裡那段說明「MSIX
+   引擎在上一行就中止了」已經不是事實——該中止已於引擎實作完成時移除。
+   要把 notices 接到 `build_all()` 的 progress_callback。
+
 ## 已知限制（如實記錄）
 
 - 這份文件涵蓋研究、方向決策、產品範圍決策與一輪 spike 驗證。程式碼

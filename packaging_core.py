@@ -525,7 +525,8 @@ def _read_signing_cert_subject(signing, reader=None):
 
 
 def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_path_selected,
-                                 has_inline_password=False, read_cert_subject=None):
+                                 has_inline_password=False, read_cert_subject=None,
+                                 lang=install_engine.DEFAULT_LANGUAGE):
     """驗證表單/JSON 資料，並組出要交給 builder.build_all() 的 pack_data。
 
     純函式：不碰執行緒、不呼叫 check_build_environment()/ensure_workspace_files()
@@ -542,6 +543,11 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
 
     回傳 (pack_data, None) 表示驗證通過；(None, error_message) 表示驗證失敗，
     error_message 就是原本要包進 {"status": "error", "message": ...} 的內容。
+
+    lang：MSIX 引擎的相容性清單要用哪一種語言。只影響那一份清單——本函式
+    其餘的欄位驗證訊息目前仍只有繁體中文（第十四輪決議第九項刻意分階段：
+    這一輪的主題是表單結構與引擎連動，把整個後端的訊息層一併重寫會讓這
+    一輪大到難以驗收）。因此英文介面下按編譯，錯誤彈窗可能中英混雜。
     """
     # 引擎的解讀放最前面：它決定後面哪些欄位算得上有效，而且值本身
     # 填錯時（打成 msi 之類）沒有必要先把其餘欄位驗完。
@@ -557,10 +563,12 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     exe_name = data.get("exe_name", "").strip()
     main_exe = data.get("main_exe", "").strip()
     eula_texts_raw = data.get("eula_texts", {}) or {}
+    # 迴圈變數不叫 lang：本函式已有一個同名參數（介面語言），推導式雖然
+    # 自帶作用域、不會真的互相影響，但兩個 lang 讀起來像是同一件事。
     eula_texts = {
-        str(lang).strip(): text.strip()
-        for lang, text in eula_texts_raw.items()
-        if str(lang).strip() and str(text).strip()
+        str(code).strip(): text.strip()
+        for code, text in eula_texts_raw.items()
+        if str(code).strip() and str(text).strip()
     }
     eula_default_lang = data.get("eula_default_lang", "").strip()
     dependencies = data.get("dependencies", []) or []
@@ -841,7 +849,7 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     # 能不能用，才決定要不要等這個引擎（見 docs/adr/0009）。
     report = install_engine.check_settings(engine, data)
     if report.has_blocking:
-        return None, report.error_message()
+        return None, report.error_message(lang)
     if engine == install_engine.MSIX:
         # 相容性通過之後才檢查 msix 區塊的必填欄位。順序是刻意的：先回答
         # 「這個引擎適不適合你」，再要求「把必填欄位補齊」——對方可能看完

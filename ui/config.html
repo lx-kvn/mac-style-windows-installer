@@ -1707,7 +1707,11 @@
             // 密碼以第二個參數送出，不是 data 的一個欄位——data 的欄位集合
             // 就是設定檔的格式，把密碼放進去等於同時讓設定檔能寫明文密碼
             // （見 docs/adr/0004）。
-            const result = await pywebview.api.start_pack(data, getInlineInstallPassword());
+            // 介面語言一併送出：MSIX 的相容性清單由後端組出來，後端沒有
+            // 別的管道知道使用者在這個畫面上選了哪一種語言
+            // （第十四輪決議第七項）。
+            const result = await pywebview.api.start_pack(
+                data, getInlineInstallPassword(), currentLang);
             if (result.status === 'error') { showErrorModal(result.message); }
             else if (result.status === 'processing') {
                 document.getElementById('progressOverlay').style.display = 'flex';
