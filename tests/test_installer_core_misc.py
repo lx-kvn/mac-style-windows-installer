@@ -20,14 +20,7 @@ import installer_core as ic
 import install_journal
 import install_encryption
 import dependency_install
-from _fakes import FakeWinReg
-
-
-def make_installer_api(**overrides):
-    api = ic.InstallerAPI()
-    for k, v in overrides.items():
-        setattr(api, k, v)
-    return api
+from _fakes import FakeWinReg, make_installer_api
 
 
 class TestFileChecksum(unittest.TestCase):

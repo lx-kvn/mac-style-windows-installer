@@ -46,7 +46,9 @@ import splash
 import builder
 import threading
 import lang_detect
+import install_engine
 import packaging_settings
+import sdk_tools
 from window_drag import WindowDragController
 from packaging_core import (
     get_resource_path,
@@ -290,6 +292,16 @@ class ConfigAPI:
         prep_error = ensure_workspace_files(workspace_dir)
         if prep_error:
             return {"status": "error", "message": f"環境準備失敗：<br>{prep_error}"}
+        # 在動手之前先問一次工作目錄齊不齊。MSIX 模式下 makeappx 打包與
+        # signtool 簽章（含一次連到時間戳記伺服器的往返）都發生在 build_all
+        # 之前，資源檢查若留到那時才跑，那些力氣就白花了，而且使用者看到的
+        # 是進度跑了一半才失敗，不是按下去就被擋。
+        missing = builder.missing_workspace_resources(
+            workspace_dir,
+            is_msix=pack_data.get("install_engine") == install_engine.MSIX,
+        )
+        if missing:
+            return {"status": "error", "message": f"環境準備失敗：<br>{missing}"}
         pack_data["workspace_dir"] = workspace_dir
 
         threading.Thread(
@@ -309,6 +321,55 @@ class ConfigAPI:
 
         workspace_dir = data.get("workspace_dir", ".")
         exe_name = data.get("exe_name").strip()
+        sdk_settings = packaging_settings.load_settings()
+
+        signed_msix = ""
+        if data.get("install_engine") == install_engine.MSIX:
+            # 憑證在不在本機決定走哪一條（第十三輪決議第三項，判準與 CLI 相同）。
+            # `signing.cert_path` 一律是本機 .pfx（驗證階段已確認檔案存在），
+            # 因此「有 signing」與「憑證是本機檔案」是同一件事。
+            signing = data.get("signing") or None
+            try:
+                packed = builder.build_msix(
+                    app_dir=self.app_dir,
+                    pack_data=data,
+                    png_path=self.png_path,
+                    # 放在工作目錄底下、不放進 dist/：後者會在編 bootstrapper
+                    # exe 之前被清空，中間產物擺在那裡會在被內嵌之前就消失。
+                    output_path=os.path.join(
+                        workspace_dir,
+                        f"{(data.get('msix') or {}).get('identity_name', 'package')}.msix",
+                    ),
+                    workspace_dir=workspace_dir,
+                    doc_icon_path=data.get("doc_icon_path", ""),
+                    signing=signing,
+                    sdk_tools_settings=sdk_settings,
+                    log=lambda message: progress_handler(30, message, 99, 2),
+                )
+            except Exception as e:
+                if self._window:
+                    safe_err = json.dumps(str(e), ensure_ascii=False)
+                    self._window.evaluate_js(f"window.packComplete('error', {safe_err})")
+                return
+
+            if not signing:
+                # 憑證不在本機，流程到此為止。這不是失敗——使用者拿到了一份
+                # 真正可用的產物；但也不能報成「編譯完成」，按下按鈕的人本來
+                # 預期拿到一顆安裝檔，說成完成會讓他以為東西已經齊了。
+                if self._window:
+                    msg = json.dumps(
+                        f"套件已產出：\n{packed}\n\n"
+                        "這份套件尚未簽章，因此還沒有編出安裝檔——未簽章的套件無法部署。\n"
+                        "請自行簽章（本機憑證或雲端代簽），再以 CLI 的\n"
+                        "  builder_cli.py pack --signed-msix <已簽章的.msix>\n"
+                        "編出安裝檔。\n\n"
+                        "若憑證就在這台機器上，把它填進「數位簽章」區塊，"
+                        "這兩步會自動一次完成，不需要分開跑。",
+                        ensure_ascii=False,
+                    )
+                    self._window.evaluate_js(f"window.packComplete('success', {msg})")
+                return
+            signed_msix = packed
 
         try:
             builder.build_all(
@@ -346,6 +407,9 @@ class ConfigAPI:
                 # 密碼本身來自獨立參數，不是 data 的一個欄位（見 docs/adr/0004）。
                 install_password=install_password,
                 workspace_dir=workspace_dir,
+                install_engine=data.get("install_engine", install_engine.TRADITIONAL),
+                signed_msix=signed_msix,
+                sdk_tools_settings=sdk_settings,
                 progress_callback=progress_handler,
             )
             if self._window:

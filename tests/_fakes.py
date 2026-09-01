@@ -143,3 +143,62 @@ def write_test_png(path, width=256, height=256):
     with open(path, "wb") as f:
         f.write(blob)
     return path
+
+
+def run_threads_synchronously():
+    """`threading.Thread` 的替身：`start()` 當場把 target 跑完，不另開執行緒。
+
+    真實抓到的缺陷：`gui_config.ConfigAPI.start_pack()` 起一個背景執行緒後
+    立刻回傳，測試裡的 `with mock.patch(...)` 區塊隨即結束、替身被撤掉，
+    那個執行緒接著呼叫到**真正的** `builder.build_all()`——於是測試在 repo
+    根目錄寫出 `installer_config.json` 並真的去叫 pyinstaller。留下來的那個
+    檔案會被後續讀取 `installer_config.json` 的測試撈到，造成與執行順序相依
+    的失敗（`InstallerAPI()` 在建構時就會讀它）。
+
+    這種失敗很難追：出問題的測試與寫出檔案的測試在不同檔案，而且單獨跑
+    兩者都會通過。用法：
+
+        with mock.patch("gui_config.threading.Thread",
+                        side_effect=run_threads_synchronously()):
+            api.start_pack(data)
+
+    這樣打包在 `with` 區塊內就跑完了，替身仍然有效。
+    """
+    from unittest import mock
+
+    def factory(target=None, args=(), kwargs=None, **_ignored):
+        thread = mock.Mock()
+        thread.start.side_effect = lambda: target(*args, **(kwargs or {}))
+        return thread
+
+    return factory
+
+
+def make_installer_api(**overrides):
+    """建立一個與工作目錄無關的 `installer_core.InstallerAPI`，再覆寫指定欄位。
+
+    `InstallerAPI.__init__()` 會呼叫 `load_config()`，而後者讀的是工作目錄裡的
+    `installer_config.json`（未凍結時 `get_resource_path()` fallback 到 cwd）。
+    那是產品的正確行為，但會讓測試受工作目錄的殘留檔案擺布——真實發生過：
+    某個測試在 repo 根目錄留下一份設定檔，另一個檔案裡的測試因此算出別的
+    安裝路徑而失敗，兩者單獨跑都會過。
+
+    這裡在建構期間把 `get_resource_path` 換成指向一個不存在的路徑，讓
+    `load_config()` 什麼都讀不到，欄位維持 `__init__` 的預設值。
+
+    先前每個測試檔各自有一份同名 helper，其說明寫著「繞開 load_config() 對
+    磁碟檔案的依賴」，但實作只是 `InstallerAPI()` 加 setattr，從未真的繞開。
+    """
+    import os
+    from unittest import mock
+    import installer_core
+
+    def nowhere(name):
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "_no_such_resource_dir", name)
+
+    with mock.patch.object(installer_core, "get_resource_path", side_effect=nowhere):
+        api = installer_core.InstallerAPI()
+    for key, value in overrides.items():
+        setattr(api, key, value)
+    return api

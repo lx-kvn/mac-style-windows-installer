@@ -20,16 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import gui_config
 import installer_core
-
-
-def make_installer_api(**overrides):
-    """建立一個不需要真的讀 installer_config.json 的 InstallerAPI 實例，
-    直接覆寫測試需要的欄位，繞開 load_config() 對磁碟檔案的依賴。
-    """
-    api = installer_core.InstallerAPI()
-    for k, v in overrides.items():
-        setattr(api, k, v)
-    return api
+from _fakes import make_installer_api, run_threads_synchronously
 
 
 class TestGuiConfigParsing(unittest.TestCase):
@@ -104,8 +95,15 @@ class TestGuiConfigParsing(unittest.TestCase):
         data = self._base_data("")
         data["need_file_assoc"] = False
 
+        # 打包執行緒要在 with 區塊內跑完。真實抓到的缺陷：原本沒有這一行，
+        # start_pack() 起完背景執行緒就回傳、替身隨即被撤掉，那個執行緒接著
+        # 呼叫到真正的 build_all()，在 repo 根目錄寫出 installer_config.json
+        # 並真的去叫 pyinstaller。留下的那個檔案會被後續建構 InstallerAPI()
+        # 的測試撈到（它在建構時就讀那個檔案），造成與執行順序相依的失敗。
         with mock.patch("gui_config.check_build_environment", return_value={"ready": True}), \
              mock.patch("gui_config.ensure_workspace_files", return_value=None), \
+             mock.patch("gui_config.threading.Thread",
+                        side_effect=run_threads_synchronously()), \
              mock.patch("gui_config.builder.build_all"):
             result = self.api.start_pack(data)
 
