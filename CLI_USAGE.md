@@ -31,7 +31,7 @@ pip install pyinstaller pywebview pywin32 cryptography
 
 ---
 
-## 四個子指令
+## 五個子指令
 
 ### `init`：產生範本設定檔
 
@@ -80,6 +80,22 @@ python builder_cli.py pack --config app.json [--其他 flag 覆蓋個別欄位..
   可以，不必指到最底層的架構子目錄。
 - `--sdk-tools-cache-dir`：覆蓋 `fetch-sdk-tools` 的快取位置，供 CI 把
   該目錄納入自己的快取機制。
+
+### `pack-msix`：產出未簽章的 `.msix`
+
+```
+python builder_cli.py pack-msix --config app.json [--output 路徑]
+```
+
+只有 `install_engine` 是 `msix` 時能用。產出一顆**未簽章**的 `.msix`，預設放在工作目錄的 `dist/` 底下、檔名用套件身分名稱（不用 `app_name`，因為那是自由文字、可以是中文，不保證能當檔名）。
+
+**為什麼這一步不順便簽章**：已簽章的 `.msix` 必須在編 bootstrapper exe之前備妥，而簽章可能由你的雲端代簽服務處理、不一定當場完成。把簽章綁進這個指令，等於讓雲端代簽那條路沒有容身之處。所以流程是兩截的——這個指令產出未簽章的套件，你自己拿去簽，再用 `pack --signed-msix` 編出安裝檔。
+
+這顆 `.msix` 本身就有用途：可以直接給 winget、企業側載、或讓使用者用App Installer 雙擊安裝。
+
+**注意 `pack` 目前還不能在 MSIX 引擎下用**——bootstrapper（內嵌 `.msix`並交給系統部署的那顆 `Setup.exe`）尚未實作。設定填 `msix` 去跑 `pack`會直接報錯並指向這個指令，不會默默產出一顆傳統安裝檔。
+
+---
 
 ### `fetch-sdk-tools`：取得 Windows SDK 工具
 

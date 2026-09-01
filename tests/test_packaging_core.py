@@ -1355,17 +1355,19 @@ class TestInstallEngineSelection(PackDataValidationTestBase):
         self.assertIn("格式本身的限制", error)
 
     def test_msix_with_a_clean_config_still_stops_because_the_engine_is_unimplemented(self):
-        """設定寫著 MSIX 卻默默產出一顆傳統安裝檔，比直接報錯糟得多。
+        """驗證通過即回傳可用的 pack_data。
 
-        msix 區塊要填齊：identity_name 依 ADR-0007 是必填且不由 app_name
-        推導，缺了會先被欄位檢查擋下來，測不到這裡要測的東西。
+        「引擎尚未實作」這道攔截已移到 pack 指令——它擋的是 bootstrapper
+        （內嵌 .msix 並交給系統部署的那顆 exe），而產出 .msix 這件事
+        （pack-msix）現在做得到，不該被同一道攔截擋住。
         """
         pack_data, error = self._validate(self._base_data(
             install_engine="msix", no_admin_install=True,
             msix={"identity_name": "MyCompany.DemoApp", "certificate_subject": "CN=Demo"},
         ))
-        self.assertIsNone(pack_data)
-        self.assertEqual(error, install_engine.MSIX_NOT_IMPLEMENTED)
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["msix"]["identity_name"], "MyCompany.DemoApp")
+        self.assertEqual(pack_data["msix"]["package_version"], "1.0.0.0")
 
     def test_compatibility_errors_come_before_the_unimplemented_notice(self):
         """相容性結果比「引擎還沒做好」有用：下游專案要先知道自己的設定
@@ -1373,7 +1375,6 @@ class TestInstallEngineSelection(PackDataValidationTestBase):
         _, error = self._validate(self._base_data(
             install_engine="msix", no_admin_install=False,
         ))
-        self.assertNotEqual(error, install_engine.MSIX_NOT_IMPLEMENTED)
         self.assertIn("尚未支援", error)
 
     def test_the_traditional_engine_ignores_msix_restrictions(self):
@@ -1415,15 +1416,16 @@ class TestMsixSettingsBlock(PackDataValidationTestBase):
         self.assertIn("certificate_subject", error)
 
     def test_a_complete_block_gets_past_the_field_checks(self):
-        """通過欄位檢查之後擋下來的應該是「引擎尚未實作」，不是欄位問題。"""
-        _, error = self._validate(self._msix())
-        self.assertEqual(error, install_engine.MSIX_NOT_IMPLEMENTED)
+        """欄位齊全時驗證應該通過，正規化後的值放進 pack_data。"""
+        pack_data, error = self._validate(self._msix())
+        self.assertIsNone(error)
+        self.assertIn("msix", pack_data)
 
     def test_a_prerelease_version_is_rejected_in_msix_mode(self):
         """第二輪決議第十項：傳統模式維持現狀（ADR-0003 允許後綴），
         MSIX 模式報錯。"""
         _, error = self._validate(self._msix())
-        self.assertEqual(error, install_engine.MSIX_NOT_IMPLEMENTED)
+        self.assertIsNone(error)
         data = self._msix()
         data["version"] = "1.0.0-rc1"
         _, error = self._validate(data)
@@ -1487,8 +1489,9 @@ class TestCertificateSubjectIsReadWhenAvailable(PackDataValidationTestBase):
             calls.append((path, password))
             return self.CERT
 
-        _, error = self._validate_with_reader(self._data(), reader)
-        self.assertEqual(error, install_engine.MSIX_NOT_IMPLEMENTED)
+        pack_data, error = self._validate_with_reader(self._data(), reader)
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["msix"]["certificate_subject"], self.CERT)
         self.assertEqual(calls, [(self.pfx, "pw")])
 
     def test_a_mismatch_is_reported(self):
@@ -1517,7 +1520,7 @@ class TestCertificateSubjectIsReadWhenAvailable(PackDataValidationTestBase):
         _, error = self._validate_with_reader(
             self._data(certificate_subject="CN=Whatever"), reader,
         )
-        self.assertEqual(error, install_engine.MSIX_NOT_IMPLEMENTED)
+        self.assertIsNone(error)
 
     def test_the_traditional_engine_never_reads_the_certificate(self):
         calls = []
@@ -1528,3 +1531,56 @@ class TestCertificateSubjectIsReadWhenAvailable(PackDataValidationTestBase):
         _, error = self._validate_with_reader(data, lambda p, pw: calls.append(p))
         self.assertIsNone(error)
         self.assertEqual(calls, [])
+
+
+class TestMsixDocIconFormat(PackDataValidationTestBase):
+    """ADR-0010：MSIX 模式的關聯圖示必須是 PNG。
+
+    uap:Logo 不吃 .ico，而吃 .ico 的 desktop7:Logo 需要 Windows 10 build
+    19645，遠高於本工具的最低版本；本專案又沒有影像處理能力可轉檔。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.ico = os.path.join(self.app_dir, "doc.ico")
+        self.png = os.path.join(self.app_dir, "doc.png")
+        for path in (self.ico, self.png):
+            with open(path, "wb") as f:
+                f.write(b"x")
+
+    def _data(self, **overrides):
+        data = self._base_data(
+            install_engine="msix", no_admin_install=True,
+            file_associations=".demo", need_file_assoc=True,
+            use_custom_doc_icon=True,
+            msix={"identity_name": "MyCompany.DemoApp", "certificate_subject": "CN=Demo"},
+        )
+        data.update(overrides)
+        return data
+
+    def test_msix_mode_accepts_png(self):
+        _, error = self._validate(self._data(), doc_icon_path_selected=self.png)
+        self.assertIsNone(error)
+
+    def test_msix_mode_rejects_ico_and_says_why(self):
+        _, error = self._validate(self._data(), doc_icon_path_selected=self.ico)
+        self.assertIsNotNone(error)
+        self.assertIn("PNG", error)
+
+    def test_the_traditional_engine_still_requires_ico(self):
+        """傳統模式維持現狀——它寫的是登錄表的 DefaultIcon，吃的就是 ICO。"""
+        data = self._data(install_engine="traditional")
+        _, error = self._validate(data, doc_icon_path_selected=self.png)
+        self.assertIsNotNone(error)
+        _, error = self._validate(data, doc_icon_path_selected=self.ico)
+        self.assertIsNone(error)
+
+    def test_per_extension_icons_follow_the_same_rule(self):
+        data = self._data(doc_icons={".demo": self.ico})
+        _, error = self._validate(data, doc_icon_path_selected=self.png)
+        self.assertIsNotNone(error)
+        self.assertIn("PNG", error)
+
+        data = self._data(doc_icons={".demo": self.png})
+        _, error = self._validate(data, doc_icon_path_selected=self.png)
+        self.assertIsNone(error)

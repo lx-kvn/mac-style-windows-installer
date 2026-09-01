@@ -20,6 +20,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import builder_cli
+import msix_package
 import sdk_tools
 
 
@@ -398,3 +399,116 @@ class TestInstallEngineFlag(unittest.TestCase):
         args = parser.parse_args(["pack", "--app-dir", "x"])
         data, _, _, _, _ = builder_cli._load_pack_input(args)
         self.assertNotIn("install_engine", data)
+
+
+class TestPackMsixCommand(unittest.TestCase):
+    """`pack-msix`：兩截式流程的第一個指令，產出未簽章的 .msix。
+
+    第二輪決議第三項：流程存在一個不可消除的斷點——已簽章的 .msix 必須在編
+    bootstrapper exe 之前備妥，而簽章可能由呼叫端的雲端代簽處理。指令設計
+    因此以兩截式為骨架。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.app_dir = os.path.join(self.tmp, "app")
+        os.makedirs(self.app_dir)
+        for name in ("main.exe", "icon.png", "icon.ico"):
+            with open(os.path.join(self.app_dir, name), "wb") as f:
+                f.write(b"x")
+        self.config = os.path.join(self.tmp, "cfg.json")
+
+    def _write_config(self, **overrides):
+        data = {
+            "install_engine": "msix",
+            "app_dir": self.app_dir,
+            "png_icon": os.path.join(self.app_dir, "icon.png"),
+            "ico_icon": os.path.join(self.app_dir, "icon.ico"),
+            "app_name": "DemoApp",
+            "version": "1.0.0",
+            "publisher": "Demo",
+            "exe_name": "Setup_DemoApp",
+            "main_exe": "main.exe",
+            "no_admin_install": True,
+            "msix": {
+                "identity_name": "MyCompany.DemoApp",
+                "certificate_subject": "CN=Demo",
+            },
+        }
+        data.update(overrides)
+        with open(self.config, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        return self.config
+
+    def _run(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = builder_cli.main(argv)
+        return code, out.getvalue() + err.getvalue()
+
+    def test_the_traditional_engine_is_rejected_with_a_pointer_to_the_field(self):
+        """`.msix` 是 MSIX 引擎的產物（第二輪決議第二項），傳統引擎沒有它。"""
+        self._write_config(install_engine="traditional")
+        code, output = self._run(["pack-msix", "--config", self.config])
+        self.assertEqual(code, 1)
+        self.assertIn("install_engine", output)
+
+    def test_a_valid_config_stages_and_packs(self):
+        self._write_config()
+        with mock.patch("msix_package.stage") as stage, \
+                mock.patch("msix_package.pack") as pack:
+            code, _ = self._run(["pack-msix", "--config", self.config])
+        self.assertEqual(code, 0)
+        self.assertEqual(stage.call_count, 1)
+        self.assertEqual(pack.call_count, 1)
+
+    def test_the_normalized_msix_values_reach_the_staging_call(self):
+        self._write_config()
+        with mock.patch("msix_package.stage") as stage, mock.patch("msix_package.pack"):
+            self._run(["pack-msix", "--config", self.config])
+        kwargs = stage.call_args.kwargs
+        self.assertEqual(kwargs["identity_name"], "MyCompany.DemoApp")
+        self.assertEqual(kwargs["certificate_subject"], "CN=Demo")
+        self.assertEqual(kwargs["version"], "1.0.0.0")
+
+    def test_the_default_output_name_comes_from_the_identity_name(self):
+        """不用 app_name：它是自由文字、可以是中文，不保證能當檔名。"""
+        self._write_config()
+        with mock.patch("msix_package.stage"), mock.patch("msix_package.pack") as pack:
+            self._run(["pack-msix", "--config", self.config])
+        output = pack.call_args[0][1]
+        self.assertTrue(output.endswith("MyCompany.DemoApp.msix"), output)
+
+    def test_the_output_path_can_be_overridden(self):
+        self._write_config()
+        target = os.path.join(self.tmp, "custom.msix")
+        with mock.patch("msix_package.stage"), mock.patch("msix_package.pack") as pack:
+            self._run(["pack-msix", "--config", self.config, "--output", target])
+        self.assertEqual(pack.call_args[0][1], target)
+
+    def test_a_packing_failure_returns_nonzero(self):
+        self._write_config()
+        with mock.patch("msix_package.stage"), \
+                mock.patch("msix_package.pack", side_effect=Exception("makeappx 掛了")):
+            code, output = self._run(["pack-msix", "--config", self.config])
+        self.assertEqual(code, 1)
+        self.assertIn("makeappx 掛了", output)
+
+    def test_validation_failures_are_reported_before_any_work(self):
+        self._write_config(msix={"identity_name": "MyCompany.DemoApp"})
+        with mock.patch("msix_package.stage") as stage:
+            code, output = self._run(["pack-msix", "--config", self.config])
+        self.assertEqual(code, 1)
+        self.assertIn("certificate_subject", output)
+        self.assertEqual(stage.call_count, 0)
+
+
+class TestPackRefusesMsixEngine(unittest.TestCase):
+    """`pack` 編的是 bootstrapper exe，那一塊尚未實作。"""
+
+    def test_the_message_points_at_pack_msix(self):
+        parser = builder_cli.build_arg_parser()
+        args = parser.parse_args(["pack", "--app-dir", "x"])
+        self.assertTrue(hasattr(args, "signed_msix"),
+                        "pack 應該有 --signed-msix 這個旗標（第九輪定案的兩截式第二步）")

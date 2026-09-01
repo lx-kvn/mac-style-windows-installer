@@ -602,10 +602,25 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
         if not os.path.exists(os.path.join(app_dir, rel)):
             return None, f"欄位驗證失敗：<br>指定改裝到 %LOCALAPPDATA% 的檔案「{rel}」不存在於應用程式資料夾中，請重新選擇。"
 
+    # 檔案關聯圖示的格式依引擎而不同（見 docs/adr/0010）：傳統引擎寫的是
+    # 登錄表的 DefaultIcon，吃的就是 ICO；MSIX 的 uap:Logo 不吃 ICO，而吃
+    # ICO 的 desktop7:Logo 需要 Windows 10 build 19645，遠高於本工具的最低
+    # 版本，本專案又沒有影像處理能力可轉檔。
+    doc_icon_extension = ".png" if engine == install_engine.MSIX else ".ico"
+    doc_icon_label = "PNG" if engine == install_engine.MSIX else "ICO"
+    msix_icon_reason = (
+        "（MSIX 模式的檔案關聯圖示只能是 PNG：套件清單能用的宣告不接受 ICO，"
+        "而接受 ICO 的那個宣告需要的 Windows 版本遠高於本工具宣告的最低版本。"
+        "請把同一張圖另存一份 PNG。）"
+    ) if engine == install_engine.MSIX else ""
+
     doc_icon_path = ""
     if use_custom_doc_icon:
-        if not doc_icon_path_selected or not doc_icon_path_selected.lower().endswith('.ico'):
-            return None, "欄位驗證失敗：<br>已勾選自訂文件圖示，請選擇一顆 ICO 檔案，或取消勾選改沿用應用程式圖示。"
+        if not doc_icon_path_selected or not doc_icon_path_selected.lower().endswith(doc_icon_extension):
+            return None, (
+                f"欄位驗證失敗：<br>已勾選自訂文件圖示，請選擇一顆 {doc_icon_label} 檔案，"
+                f"或取消勾選改沿用應用程式圖示。{msix_icon_reason}"
+            )
         doc_icon_path = doc_icon_path_selected
 
     try:
@@ -643,8 +658,11 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
             continue
         if ext not in file_associations:
             return None, f"欄位驗證失敗：<br>幫副檔名「{ext}」設定了專屬圖示，但它不在檔案關聯清單裡，請先把它加進檔案關聯清單，或移除這個圖示設定。"
-        if not icon_path.lower().endswith(".ico"):
-            return None, f"欄位驗證失敗：<br>副檔名「{ext}」指定的專屬圖示不是有效的 ICO 檔案，請重新選擇。"
+        if not icon_path.lower().endswith(doc_icon_extension):
+            return None, (
+                f"欄位驗證失敗：<br>副檔名「{ext}」指定的專屬圖示不是有效的 {doc_icon_label} 檔案，"
+                f"請重新選擇。{msix_icon_reason}"
+            )
         doc_icons[ext] = icon_path
 
     for script_field, script_rel in (("pre_install_script", pre_install_script), ("post_install_script", post_install_script)):
@@ -797,24 +815,24 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
         # 相容性通過之後才檢查 msix 區塊的必填欄位。順序是刻意的：先回答
         # 「這個引擎適不適合你」，再要求「把必填欄位補齊」——對方可能看完
         # 相容性結果就決定不用這個引擎，此時要他補欄位是白費工。
-        #
-        # 這裡只取驗證結果，不接收正規化後的值：那些值是要交給套件清單
-        # 產生器的，而那個東西還不存在，下一行就中止了。先把它們放進
-        # pack_data 只會讓人以為清單產生已經在運作。清單產生器完成、下面
-        # 那個中止拿掉之後，這裡改成把 msix_settings.validate() 的第一個
-        # 回傳值連同 to_quad_version(version) 的結果一起放進 pack_data["msix"]。
-        _, msix_error = msix_settings.validate(
+        msix_normalized, msix_error = msix_settings.validate(
             data.get("msix"),
             cert_subject=_read_signing_cert_subject(signing, read_cert_subject),
         )
         problems = [msix_error] if msix_error else []
+        package_version = ""
         try:
-            msix_settings.to_quad_version(version)
+            package_version = msix_settings.to_quad_version(version)
         except msix_settings.InvalidVersion as e:
             problems.append(str(e))
         if problems:
             return None, "欄位驗證失敗：<br>" + "<br>".join(problems)
-        return None, install_engine.MSIX_NOT_IMPLEMENTED
+        # 「引擎尚未實作」這道攔截不在這裡：它擋的是 bootstrapper（內嵌
+        # .msix 並交給系統部署的那顆 exe），而產出 .msix 本身已經做得到。
+        # 兩者由不同的指令觸發，因此該攔截屬於 builder_cli 的 pack 指令，
+        # 不屬於驗證。驗證的職責是「這份設定能不能用」，不是「工具做到哪
+        # 一步了」。
+        pack_data["msix"] = dict(msix_normalized, package_version=package_version)
     # report.notices（第四類，不擋建置、只需說明的項目）目前沒有接收端：
     # 它只在 MSIX 引擎下產生，而 MSIX 引擎在上一行就中止了。MSIX 引擎實作
     # 完成、上面那個中止拿掉之後，這裡把 notices 交給 build_all() 的

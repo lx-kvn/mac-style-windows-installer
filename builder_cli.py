@@ -13,6 +13,9 @@ builder_cli.py
   - `init`：產生一份帶預設值的範本 JSON 設定檔。
   - `pack`：讀 JSON（`--config`，選填）→ 用命令列參數覆蓋個別欄位
     （CLI 優先於 JSON）→ 驗證 → 編譯。
+  - `pack-msix`：產出未簽章的 `.msix`（兩截式流程的第一步，見第九輪定案
+    決議）。簽章由呼叫端自行處理，之後再以 `pack --signed-msix` 編出
+    bootstrapper exe。
   - `fetch-sdk-tools`：取得簽章／MSIX 打包需要的 Windows SDK 工具。這是
     獨立的一次性環境準備動作，`pack` 不會自行執行它——打包流程不在使用者
     未明確要求的情況下，把一個剛從網路取得的執行檔跑在打包機器上
@@ -27,6 +30,8 @@ import os
 import sys
 
 import builder
+import install_engine
+import msix_package
 import packaging_core
 import packaging_settings
 import sdk_tools
@@ -141,6 +146,10 @@ def build_arg_parser():
 
     # 路徑類欄位：不是 data 字典的一部分，是 validate_and_build_pack_data()
     # 額外的位置參數（GUI 版是靠檔案選擇對話框取得），這裡直接讓使用者填路徑字串。
+    pack_p.add_argument(
+        "--signed-msix", dest="signed_msix", default=None,
+        help="已簽章的 .msix 路徑，內嵌進 bootstrapper exe（兩截式流程的第二步）",
+    )
     pack_p.add_argument("--app-dir", dest="app_dir", default=None, help="應用程式內容資料夾")
     pack_p.add_argument("--png-icon", dest="png_icon", default=None, help="拖拽介面用的 PNG 圖示")
     pack_p.add_argument("--ico-icon", dest="ico_icon", default=None, help="安裝檔封面用的 ICO 圖示")
@@ -179,6 +188,27 @@ def build_arg_parser():
         help="逗號分隔，列在 dependencies 裡的相依元件 key，打包時內嵌進安裝檔（不用安裝時再連網下載）",
     )
 
+    msix_p = sub.add_parser(
+        "pack-msix", help="產出未簽章的 .msix（兩截式流程的第一步）",
+    )
+    msix_p.add_argument("--config", default=None, help="JSON 設定檔路徑")
+    msix_p.add_argument("--output", default=None, help="輸出的 .msix 路徑，預設用套件身分名稱")
+    msix_p.add_argument("--workspace-dir", default=None, help="編譯工作目錄")
+    msix_p.add_argument("--app-dir", dest="app_dir", default=None)
+    msix_p.add_argument("--png-icon", dest="png_icon", default=None)
+    msix_p.add_argument("--ico-icon", dest="ico_icon", default=None)
+    msix_p.add_argument("--doc-icon", dest="doc_icon", default=None)
+    for flag_key, dest in _SCALAR_OVERRIDE_FIELDS:
+        msix_p.add_argument(f"--{flag_key.replace('_', '-')}", dest=dest, default=None)
+    msix_p.add_argument("--sdk-tools-dir", dest="sdk_tools_dir", default=None)
+    msix_p.add_argument("--sdk-tools-cache-dir", dest="sdk_tools_cache_dir", default=None)
+    for dest in ("dependencies", "local_appdata_files", "bundle_dependencies"):
+        msix_p.add_argument(f"--{dest.replace('_', '-')}", dest=dest, default=None)
+    msix_p.add_argument("--add-to-path", dest="add_to_path",
+                        action=argparse.BooleanOptionalAction, default=None)
+    msix_p.add_argument("--no-admin-install", dest="no_admin_install",
+                        action="store_true", default=None)
+
     fetch_p = sub.add_parser(
         sdk_tools.FETCH_SUBCOMMAND,
         help=f"取得 {'、'.join(sdk_tools.REQUIRED_TOOLS)}（下載固定版本的 {sdk_tools.PACKAGE_ID} 並驗證雜湊）",
@@ -195,6 +225,83 @@ def build_arg_parser():
     )
 
     return parser
+
+
+def cmd_pack_msix(args):
+    """產出未簽章的 `.msix`（兩截式流程的第一步，見第九輪定案決議）。
+
+    這一步刻意不做簽章：已簽章的 `.msix` 必須在編 bootstrapper exe 之前
+    備妥，而簽章可能由呼叫端的雲端代簽處理、不一定即時完成（第二輪決議
+    第三項）。把簽章綁進這個指令，等於讓雲端代簽的情境沒有容身之處。
+    """
+    data, app_dir, png_path, ico_path, doc_icon_path_selected = _load_pack_input(args)
+
+    try:
+        engine = install_engine.normalize(data)
+    except install_engine.UnknownEngine as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    if engine != install_engine.MSIX:
+        # `.msix` 是 MSIX 引擎的產物（第二輪決議第二項），傳統引擎沒有它。
+        print(
+            "pack-msix 只適用於 MSIX 引擎，這份設定的 install_engine 是 "
+            f"{engine}。要產出 .msix 請把 install_engine 設成 "
+            f"{install_engine.MSIX}。",
+            file=sys.stderr,
+        )
+        return 1
+
+    pack_data, error = packaging_core.validate_and_build_pack_data(
+        data, app_dir, png_path, ico_path, doc_icon_path_selected,
+    )
+    if error:
+        print(_strip_html(error), file=sys.stderr)
+        return 1
+
+    workspace_dir = args.workspace_dir or packaging_core.get_workspace_dir()
+    msix = pack_data["msix"]
+    output = args.output or os.path.join(
+        workspace_dir, "dist", f"{msix['identity_name']}.msix")
+    # 預設檔名用套件身分名稱而不是 app_name：後者是自由文字、可以是中文，
+    # 不保證能當檔名；前者的字元集本來就受限（見 docs/adr/0007）。
+    os.makedirs(os.path.dirname(output) or ".", exist_ok=True)
+    staging_dir = os.path.join(workspace_dir, "msix_staging")
+
+    sdk_settings = sdk_tools.settings_with_overrides(
+        tools_dir=getattr(args, "sdk_tools_dir", None),
+        cache_dir=getattr(args, "sdk_tools_cache_dir", None),
+        settings=packaging_settings.load_settings(),
+    )
+
+    def find_tool(name):
+        return sdk_tools.find_tool(name, settings=sdk_settings)
+
+    try:
+        msix_package.stage(
+            app_dir=app_dir,
+            staging_dir=staging_dir,
+            png_icon=png_path,
+            identity_name=msix["identity_name"],
+            certificate_subject=msix["certificate_subject"],
+            version=msix["package_version"],
+            app_name=pack_data["app_name"],
+            publisher=pack_data["publisher"],
+            main_exe=pack_data["main_exe"],
+            doc_icon=doc_icon_path_selected,
+            doc_icons=pack_data.get("doc_icons") or {},
+            file_associations=pack_data.get("file_associations") or [],
+            add_to_path=pack_data.get("add_to_path", False),
+            path_target_exe=pack_data.get("path_target_exe", ""),
+            min_windows_version=msix.get("min_windows_version"),
+        )
+        msix_package.pack(staging_dir, output, find_tool=find_tool, log=print)
+    except Exception as e:
+        print(f"產出 .msix 失敗：{e}", file=sys.stderr)
+        return 1
+
+    print(f"完成，未簽章的套件：{output}")
+    print("下一步：自行簽章，再以 pack --signed-msix 編出 bootstrapper exe。")
+    return 0
 
 
 def cmd_fetch_sdk_tools(args):
@@ -314,6 +421,12 @@ def cmd_pack(args):
         print(_strip_html(error), file=sys.stderr)
         return 1
 
+    if pack_data.get("install_engine") == install_engine.MSIX:
+        # 這道攔截擋的是 bootstrapper（內嵌 .msix 並交給系統部署的那顆
+        # exe），不是 .msix 本身——後者已經做得到，見 pack-msix。
+        print(install_engine.MSIX_NOT_IMPLEMENTED, file=sys.stderr)
+        return 1
+
     workspace_dir = args.workspace_dir or packaging_core.get_workspace_dir()
     prep_error = packaging_core.ensure_workspace_files(workspace_dir)
     if prep_error:
@@ -383,6 +496,8 @@ def main(argv=None):
         return cmd_list_files(args)
     if args.command == "pack":
         return cmd_pack(args)
+    if args.command == "pack-msix":
+        return cmd_pack_msix(args)
     if args.command == sdk_tools.FETCH_SUBCOMMAND:
         return cmd_fetch_sdk_tools(args)
     parser.print_help()
