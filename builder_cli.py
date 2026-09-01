@@ -421,10 +421,17 @@ def cmd_pack(args):
         print(_strip_html(error), file=sys.stderr)
         return 1
 
-    if pack_data.get("install_engine") == install_engine.MSIX:
-        # 這道攔截擋的是 bootstrapper（內嵌 .msix 並交給系統部署的那顆
-        # exe），不是 .msix 本身——後者已經做得到，見 pack-msix。
-        print(install_engine.MSIX_NOT_IMPLEMENTED, file=sys.stderr)
+    if pack_data.get("install_engine") == install_engine.MSIX and not args.signed_msix:
+        # MSIX 模式必須指定已簽章的 .msix：它是被塞進 exe 資源區塊的，
+        # 塞進去之後要換成簽過章的版本等於整個重編一次，因此簽章一定
+        # 要在這一步之前完成（見規劃文件「下游專案的 CI 建置順序」）。
+        print(
+            "MSIX 引擎需要一份已簽章的 .msix。流程是兩截的：\n"
+            "  1. pack-msix 產出未簽章的 .msix\n"
+            "  2. 自行簽章（本機憑證或雲端代簽）\n"
+            "  3. pack --signed-msix <已簽章的.msix> 編出安裝檔",
+            file=sys.stderr,
+        )
         return 1
 
     workspace_dir = args.workspace_dir or packaging_core.get_workspace_dir()
@@ -471,6 +478,8 @@ def cmd_pack(args):
             create_restore_point_before_install=pack_data.get("create_restore_point_before_install", False),
             install_password_env=pack_data.get("install_password_env", ""),
             workspace_dir=workspace_dir,
+            install_engine=pack_data.get("install_engine", "traditional"),
+            signed_msix=args.signed_msix or "",
             sdk_tools_settings=sdk_tools.settings_with_overrides(
                 tools_dir=args.sdk_tools_dir,
                 cache_dir=args.sdk_tools_cache_dir,

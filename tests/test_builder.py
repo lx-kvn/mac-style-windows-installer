@@ -908,3 +908,169 @@ class TestMissingUninstallHtmlRaises(BuildAllTestBase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestMsixEngineBuild(BuildAllTestBase):
+    """MSIX 引擎的安裝檔：內嵌已簽章的 .msix，不產生 uninstall.exe。
+
+    ADR-0006：MSIX 模式的解除安裝由系統接管，沒有自訂介面，因此那顆
+    uninstall.exe 不該被編出來、也不該被內嵌——編了它會出現在安裝目錄裡
+    讓使用者以為可以用，而它在這個模式下什麼都做不到。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.signed_msix = os.path.join(self.app_dir, "MyCompany.MyApp.msix")
+        with open(self.signed_msix, "wb") as f:
+            f.write(b"PK fake msix")
+
+    def _msix_build(self, **overrides):
+        commands = []
+
+        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+            commands.append(cmd)
+            if "uninstall.py" in cmd:
+                os.makedirs(self.dist_dir, exist_ok=True)
+                with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
+                    f.write(b"FAKE")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        kwargs = {"install_engine": "msix", "signed_msix": self.signed_msix}
+        kwargs.update(overrides)
+        self._call_build_all(run_side_effect=fake_run, **kwargs)
+        return commands
+
+    def _config_written(self, commands):
+        """設定檔在編譯完成後會被清掉，因此從 --add-data 之外另外攔。"""
+        return self.captured_config
+
+    def test_the_uninstaller_is_not_built(self):
+        commands = self._msix_build()
+        self.assertFalse(any("uninstall.py" in cmd for cmd in commands),
+                         "MSIX 模式不該編出 uninstall.exe（ADR-0006）")
+
+    def test_the_uninstaller_is_not_embedded(self):
+        commands = self._msix_build()
+        flat = " ".join(part for cmd in commands for part in cmd)
+        self.assertNotIn("uninstall.exe", flat)
+
+    def test_the_signed_package_is_embedded(self):
+        commands = self._msix_build()
+        flat = " ".join(part for cmd in commands for part in cmd)
+        self.assertIn(os.path.basename(self.signed_msix), flat)
+
+    def test_the_app_contents_are_not_embedded(self):
+        """檔案由系統從套件裡落地，安裝檔不需要另外帶一份。"""
+        commands = self._msix_build()
+        flat = " ".join(part for cmd in commands for part in cmd)
+        self.assertNotIn("app_contents", flat)
+
+    def test_a_missing_signed_package_fails_before_compiling(self):
+        with self.assertRaises(Exception) as ctx:
+            self._msix_build(signed_msix=os.path.join(self.app_dir, "nope.msix"))
+        self.assertIn("nope.msix", str(ctx.exception))
+
+    def test_the_msix_engine_without_a_package_is_refused(self):
+        with self.assertRaises(Exception) as ctx:
+            self._msix_build(signed_msix="")
+        self.assertIn("msix", str(ctx.exception).lower())
+
+    def test_the_traditional_engine_still_builds_the_uninstaller(self):
+        commands = []
+
+        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+            commands.append(cmd)
+            if "uninstall.py" in cmd:
+                os.makedirs(self.dist_dir, exist_ok=True)
+                with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
+                    f.write(b"FAKE")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        self._call_build_all(run_side_effect=fake_run)
+        self.assertTrue(any("uninstall.py" in cmd for cmd in commands))
+
+
+class TestMsixConfigFields(BuildAllTestBase):
+    """安裝端要靠設定檔知道自己是哪一種引擎、內嵌的套件叫什麼。"""
+
+    def test_the_engine_and_package_name_reach_the_config(self):
+        signed = os.path.join(self.app_dir, "MyCompany.MyApp.msix")
+        with open(signed, "wb") as f:
+            f.write(b"PK")
+        captured = {}
+
+        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+            config_path = os.path.join(self.workspace_dir, "installer_config.json")
+            if os.path.exists(config_path):
+                with open(config_path, encoding="utf-8") as f:
+                    captured.update(json.load(f))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        self._call_build_all(run_side_effect=fake_run,
+                             install_engine="msix", signed_msix=signed)
+        self.assertEqual(captured.get("install_engine"), "msix")
+        self.assertEqual(captured.get("msix_package"), "MyCompany.MyApp.msix")
+
+    def test_the_traditional_engine_records_itself_too(self):
+        captured = {}
+
+        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+            if "uninstall.py" in cmd:
+                os.makedirs(self.dist_dir, exist_ok=True)
+                with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
+                    f.write(b"FAKE")
+            config_path = os.path.join(self.workspace_dir, "installer_config.json")
+            if os.path.exists(config_path):
+                with open(config_path, encoding="utf-8") as f:
+                    captured.update(json.load(f))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        self._call_build_all(run_side_effect=fake_run)
+        self.assertEqual(captured.get("install_engine"), "traditional")
+
+
+class TestSignedMsixSurvivesCleanup(BuildAllTestBase):
+    """真實抓到的缺陷：照文件走的流程一定會踩到。
+
+    pack-msix 把產出的 .msix 放進工作目錄的 dist/，而 build_all() 每次建置
+    開頭都會清空 dist/ 與 build/（避免用到上一輪的殘留）。於是文件所寫的
+    三步流程——pack-msix 產出、自行簽章、pack --signed-msix 編安裝檔——在
+    第三步會先刪掉自己要內嵌的那份套件，PyInstaller 接著回報「找不到檔案」，
+    而該訊息完全指不到真正的原因。
+
+    這不是「叫使用者把檔案放到別的地方」就能了事的：dist/ 正是上一步告訴
+    他產物在那裡的位置。
+    """
+
+    def test_a_signed_package_inside_dist_is_still_embedded(self):
+        os.makedirs(self.dist_dir, exist_ok=True)
+        signed = os.path.join(self.dist_dir, "MyCompany.MyApp.msix")
+        with open(signed, "wb") as f:
+            f.write(b"PK signed msix")
+
+        seen = {}
+
+        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+            for part in cmd:
+                if part.startswith("--add-data=") and ".msix" in part:
+                    source = part[len("--add-data="):].split(";")[0]
+                    seen["source"] = source
+                    seen["exists"] = os.path.isfile(source)
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        self._call_build_all(run_side_effect=fake_run,
+                             install_engine="msix", signed_msix=signed)
+        self.assertIn("source", seen, "沒有把 .msix 交給 --add-data")
+        self.assertTrue(seen["exists"],
+                        f"要內嵌的套件在編譯當下已經不存在：{seen.get('source')}")
+
+    def test_the_temporary_copy_is_cleaned_up(self):
+        os.makedirs(self.dist_dir, exist_ok=True)
+        signed = os.path.join(self.dist_dir, "MyCompany.MyApp.msix")
+        with open(signed, "wb") as f:
+            f.write(b"PK signed msix")
+        self._call_build_all(install_engine="msix", signed_msix=signed,
+                             run_side_effect=lambda *a, **k: mock.Mock(
+                                 returncode=0, stdout="", stderr=""))
+        leftovers = [n for n in os.listdir(self.workspace_dir) if n.endswith(".msix")]
+        self.assertEqual(leftovers, [], f"工作目錄留下暫存副本：{leftovers}")
