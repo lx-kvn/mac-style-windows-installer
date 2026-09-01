@@ -876,9 +876,13 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
         # 不屬於驗證。驗證的職責是「這份設定能不能用」，不是「工具做到哪
         # 一步了」。
         pack_data["msix"] = dict(msix_normalized, package_version=package_version)
-    # report.notices（第四類，不擋建置、只需說明的項目）目前沒有接收端：
-    # 它只在 MSIX 引擎下產生，而 MSIX 引擎在上一行就中止了。MSIX 引擎實作
-    # 完成、上面那個中止拿掉之後，這裡把 notices 交給 build_all() 的
-    # progress_callback 印進建置紀錄。先放一個永遠是空清單的欄位進 pack_data
-    # 只會讓人以為它已經在運作。
+    # 第四類（不擋建置、只需說明的項目）交給建置紀錄。原本這裡留著一段
+    # 說明，寫著「它只在 MSIX 引擎下產生，而 MSIX 引擎在上一行就中止了」
+    # ——那個中止已於引擎實作完成時移除，該說明因此不再是事實，而它所描述
+    # 的暫時狀態變成了永久的缺口：一份設定填了 folder_name 又選了 MSIX，
+    # 工具從頭到尾不會告訴使用者那個欄位不會有作用。
+    #
+    # 在這裡就把句子組好（而不是把 Report 傳下去）：語言是本函式的參數，
+    # build_all() 不知道也不需要知道這次要用哪一種語言。
+    pack_data["engine_notices"] = report.notice_messages(lang)
     return pack_data, None

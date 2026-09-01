@@ -453,6 +453,7 @@ class ConfigAPI:
                 workspace_dir=workspace_dir,
                 install_engine=data.get("install_engine", install_engine.TRADITIONAL),
                 signed_msix=signed_msix,
+                engine_notices=data.get("engine_notices"),
                 sdk_tools_settings=sdk_settings,
                 progress_callback=progress_handler,
             )

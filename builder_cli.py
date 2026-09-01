@@ -283,6 +283,13 @@ def cmd_pack_msix(args):
         print(_strip_html(error), file=sys.stderr)
         return 1
 
+    # 第四類的說明（不擋建置、只需要說明為什麼那個設定沒有作用）。這條指令
+    # 走的是 build_msix，不經過 build_all，因此不能靠 build_all 的進度回報
+    # ——真實抓到的缺口：說明原本只掛在那裡，而 pack-msix 正是 CI 走的那一條，
+    # 那裡沒有人盯著畫面看有沒有欄位被灰掉。
+    for notice in pack_data.get("engine_notices") or []:
+        print(notice)
+
     workspace_dir = args.workspace_dir or packaging_core.get_workspace_dir()
     msix = pack_data["msix"]
     output = args.output or os.path.join(
@@ -539,6 +546,7 @@ def cmd_pack(args):
             workspace_dir=workspace_dir,
             install_engine=pack_data.get("install_engine", "traditional"),
             signed_msix=signed_msix,
+            engine_notices=pack_data.get("engine_notices"),
             sdk_tools_settings=sdk_settings,
             progress_callback=progress_handler,
         )

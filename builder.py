@@ -285,7 +285,7 @@ def build_all(
     windows_service=None, scheduled_task=None, dependencies_min_version=None,
     create_restore_point_before_install=False, install_password_env="", install_password="",
     workspace_dir=".", sdk_tools_settings=None, install_engine="traditional",
-    signed_msix="", progress_callback=None,
+    signed_msix="", engine_notices=None, progress_callback=None,
 ):
     """流水線：產生配置 -> 編譯反安裝檔 -> 編譯主安裝檔
 
@@ -319,6 +319,13 @@ def build_all(
         """
         if progress_callback:
             progress_callback(percent, message, cap, time_constant)
+
+    # 引擎相容性的第四類說明（不擋建置、只需要說明為什麼那個設定沒有作用）。
+    # 在最開頭就送出去：使用者要在等編譯之前就看到，不是編完才知道自己有
+    # 一個設定從頭到尾沒有生效。句子由 packaging_core 依這次的語言組好，
+    # 這裡只負責送。
+    for notice in (engine_notices or []):
+        report(0, notice, cap=1, time_constant=1)
 
     dependencies = dependencies or []
     file_associations = file_associations or []
