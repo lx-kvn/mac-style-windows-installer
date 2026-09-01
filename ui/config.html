@@ -1152,6 +1152,37 @@
         function showLangCodeHelpModal() { document.getElementById('langCodeHelpModal').classList.add('active'); }
         function closeLangCodeHelpModal() { document.getElementById('langCodeHelpModal').classList.remove('active'); }
 
+        // 說明類彈窗點空白處就關掉：使用者打開它是為了讀一段文字，讀完想離開
+        // 時不該還要去找那顆關閉鈕。
+        //
+        // 看的是「按下」的當下在哪裡，不只是 click 的 target。
+        //
+        // 說明彈窗是一大段可捲動的文字，使用者會拖曳選取。從彈窗內開始拖、
+        // 放開時滑鼠落到外面時，click 事件的 target 會是兩者的共同祖先——也
+        // 就是遮罩本身。只看 click 的話，這種情形會在使用者選到一半時把彈窗
+        // 關掉，而且他完全不知道自己做錯了什麼。
+        //
+        // **只有說明類的可以這樣做。** 安裝端那四個彈窗（偵測到已安裝的版本、
+        // 建議先安裝以下元件、偵測到程式正在執行、檔案使用中）都是在問使用者
+        // 一個問題，點外面關掉等於那個問題沒有被回答，而後續流程需要那個答案。
+        function makeDismissibleByBackdrop(modalId) {
+            const modal = document.getElementById(modalId);
+            if (!modal) return;
+            let pressedOnBackdrop = false;
+            modal.addEventListener('mousedown', (event) => {
+                pressedOnBackdrop = event.target === modal;
+            });
+            modal.addEventListener('click', (event) => {
+                if (pressedOnBackdrop && event.target === modal) {
+                    modal.classList.remove('active');
+                }
+                pressedOnBackdrop = false;
+            });
+        }
+
+        makeDismissibleByBackdrop('helpModal');
+        makeDismissibleByBackdrop('langCodeHelpModal');
+
         function checkFolderNameSafety() {
             const val = document.getElementById('folder_name').value;
             const note = document.getElementById('folder_name_note');
