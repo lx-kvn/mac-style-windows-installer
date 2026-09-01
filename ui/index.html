@@ -472,6 +472,7 @@
                 btn_accept: "同意並繼續",
                 loading: "載入中...",
                 install_destination_label: "安裝目的地",
+                msix_destination_hint: "由 Windows 管理位置",
                 progress_preparing: "正在準備...",
                 desktop_shortcut_label: "建立桌面捷徑",
                 upgrade_default_title: "偵測到已安裝的版本",
@@ -517,6 +518,7 @@
                 btn_accept: "Agree & Continue",
                 loading: "Loading...",
                 install_destination_label: "Install Location",
+                msix_destination_hint: "Managed by Windows",
                 progress_preparing: "Preparing...",
                 desktop_shortcut_label: "Create a desktop shortcut",
                 upgrade_default_title: "Existing installation detected",
@@ -744,6 +746,9 @@
         const dragItem = document.getElementById('drag-item');
         const dropTarget = document.getElementById('drop-target');
         const pathPreview = document.getElementById('path-preview');
+        // 這個安裝檔是哪一種引擎。pywebviewready 時向後端問一次，之後
+        // 只讀不寫（見 CONTEXT.md「傳統引擎與 MSIX 引擎」）。
+        let installEngine = 'traditional';
         const appLabel = document.getElementById('app_name_label');
 
         window.addEventListener('pywebviewready', async () => {
@@ -752,8 +757,10 @@
 
             const defaultPath = await pywebview.api.get_default_path();
             const appName = await pywebview.api.get_app_name();
+            installEngine = await pywebview.api.get_install_engine();
             pathPreview.innerText = defaultPath;
             pathPreview.setAttribute('title', defaultPath);
+            if (installEngine === 'msix') applyMsixDestination();
             appLabel.innerText = appName;
             appLabel.setAttribute('title', appName);
 
@@ -853,12 +860,45 @@
 
         // 點安裝目的地圖示、以及用鍵盤選到它後按 Enter/空白鍵，都走這同一個
         // 函式，兩邊行為不會分岔。
+        // MSIX 模式的拖曳目的地（第二輪決議第四項）。
+        //
+        // 換的是外觀與可操作性，不是換一個元素：目的地仍然是同一個
+        // #drop-target，拖曳命中判定、吞一下的回應動畫、鍵盤觸發安裝那
+        // 幾條路徑因此完全不用動。
+        //
+        // 保留資料夾造型而非改用其他圖形，是因為「目的地固定、不可選擇」
+        // 正是 macOS DMG 的原始形式——使用者把應用程式拖進固定的「應用
+        // 程式」資料夾，沒有位置選擇。現行可點選的設計是本專案在原始形式
+        // 之外的延伸，移除它在視覺語彙上是回歸而非退化。
+        function applyMsixDestination() {
+            const icon = dropTarget.querySelector('.icon-wrapper img');
+            if (icon) icon.src = 'windows_folder_icon.png';
+
+            // aria-disabled 讓既有的 CSS 規則生效（游標不變手指、按下去
+            // 不縮放），不必為這個模式新增樣式；移掉 role 與 tabindex 則是
+            // 讓螢幕閱讀器與鍵盤都不再把它當成一顆按鈕。
+            dropTarget.setAttribute('aria-disabled', 'true');
+            dropTarget.removeAttribute('role');
+            dropTarget.removeAttribute('tabindex');
+            dropTarget.removeAttribute('onkeydown');
+
+            // 不顯示系統實際的套件路徑——那個路徑對使用者不具意義，而且
+            // title 裡若留著上一步設定的安裝路徑，會變成一個對不上的提示。
+            pathPreview.innerText = t('msix_destination_hint');
+            pathPreview.removeAttribute('title');
+            pathPreview.removeAttribute('data-i18n');
+        }
+
         async function chooseInstallFolder() {
             // 安裝一旦開始，這一輪的安裝位置就已經定案（後端拿到的路徑在
             // trigger_installation() 呼叫當下就固定了）。此時再讓使用者選一次
             // 不會改變實際的安裝位置，只會讓畫面顯示一個與實際安裝位置不符的
             // 路徑。守門放在這裡而不是 click 事件上，是因為鍵盤（Enter／空白鍵）
             // 也走這個函式，只擋 click 的話鍵盤那條路徑仍然打得開對話框。
+            // MSIX 的安裝位置由系統決定，沒有可以選的餘地。守門跟下面那道
+            // 一樣放在函式裡而不是只解掉 click 監聽——鍵盤（Enter／空白鍵）
+            // 走的是同一個函式。
+            if (installEngine === 'msix') return;
             if (installState !== 'idle') return;
             const newPath = await pywebview.api.select_folder();
             if (newPath) { pathPreview.innerText = newPath; pathPreview.setAttribute('title', newPath); }

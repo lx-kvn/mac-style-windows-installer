@@ -286,6 +286,15 @@ class InstallerAPI:
     def get_default_path(self):
         return self.default_path
 
+    def get_install_engine(self):
+        """這個安裝檔用的是哪一種引擎（見 CONTEXT.md「傳統引擎與 MSIX 引擎」）。
+
+        前端需要知道這件事的唯一理由是拖曳目的地的外觀與行為不同：MSIX 的
+        安裝位置由系統決定，目的地因此換一張圖示、不可點選、下方顯示說明
+        文字而不是路徑（第二輪決議第四項）。
+        """
+        return self.install_engine
+
     def get_ui_language(self):
         return self.ui_language
 
