@@ -150,6 +150,10 @@ class InstallerAPI:
         self.path_target_exe = ""
         self.local_appdata_files = []
         self.restart_explorer_on_update = False
+        # 沒有這個欄位的既有安裝檔一律是傳統引擎，行為完全不變。
+        self.install_engine = "traditional"
+        # MSIX 引擎才有：內嵌的已簽章套件在資源裡的檔名。
+        self.msix_package = ""
         self.no_admin_install = False
         self.custom_install_dir = ""
         self.pre_install_script = ""
@@ -253,6 +257,8 @@ class InstallerAPI:
                     self.path_target_exe = config.get("path_target_exe", "")
                     self.local_appdata_files = config.get("local_appdata_files", [])
                     self.restart_explorer_on_update = bool(config.get("restart_explorer_on_update", False))
+                    self.install_engine = config.get("install_engine", "traditional") or "traditional"
+                    self.msix_package = config.get("msix_package", "")
                     self.no_admin_install = bool(config.get("no_admin_install", False))
                     self.custom_install_dir = config.get("custom_install_dir", "")
                     self.pre_install_script = config.get("pre_install_script", "")
@@ -867,7 +873,43 @@ class InstallerAPI:
                 shutil.rmtree(self._decrypted_payload_dir, ignore_errors=True)
                 self._decrypted_payload_dir = None
 
+    def _install_msix(self, log):
+        """MSIX 引擎的安裝：把內嵌的已簽章套件交給 Windows 的套件引擎。
+
+        流程的順序與理由在 msix_install.run()；這裡只負責把這個安裝檔手上
+        的東西（內嵌套件的路徑、既有安裝的偵測與移除、進度回報）接上去。
+        """
+        import msix_deploy
+        import msix_install
+
+        package_path = get_resource_path(self.msix_package or "app.msix")
+
+        def deploy(path, progress=None):
+            return msix_deploy.deploy(path, progress=progress)
+
+        def report_progress(percentage):
+            # 第十一輪 CI 探針確認進度回報是真實百分比，因此這裡直接轉呈，
+            # 不需要退化為不確定進度動畫（第二輪決議第六項的備案未被觸發）。
+            self._report_progress(percentage, "正在安裝...")
+
+        return msix_install.run(
+            package_path,
+            check_existing=self.check_existing_install,
+            remove_existing=lambda info: self.run_upgrade_uninstall(info),
+            deploy=deploy,
+            progress=report_progress,
+            log=log,
+            package_must_exist=True,
+        )
+
     def _trigger_installation_impl_inner(self, create_desktop_shortcut, skip_process_check, log_lines, log):
+        # MSIX 引擎走另一條路徑。兩者幾乎不共用邏輯——傳統路徑做的是
+        # 「自己複製檔案、寫登錄表、產生 uninstall.exe」，MSIX 路徑做的是
+        # 「把已簽章的套件交給系統」——因此在最上層分流，而不是在傳統
+        # 流程裡插判斷。走錯路徑的後果是兩種落地方式同時發生。
+        if self.install_engine == "msix":
+            return self._install_msix(log)
+
         # 這一整批都提前在最外層宣告：任何階段（複製迴圈開始前/開始後、
         # 登錄表/捷徑/檔案關聯/服務/排程工作/PATH 任一步之後）才失敗，
         # 下面兩個 except 區塊都要能安全參照，讓 _rollback() 知道哪些系統

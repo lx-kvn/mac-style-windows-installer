@@ -82,50 +82,13 @@ class TestEnsureWorkspaceFiles(unittest.TestCase):
         self.embedded_dir = tempfile.mkdtemp()
         self.workspace_dir = tempfile.mkdtemp()
 
-        with open(os.path.join(self.embedded_dir, "installer_core.py"), "w") as f:
-            f.write("# NEW installer_core content")
-        with open(os.path.join(self.embedded_dir, "uninstall.py"), "w") as f:
-            f.write("# NEW uninstall content")
-        with open(os.path.join(self.embedded_dir, "window_drag.py"), "w") as f:
-            f.write("# NEW window_drag content")
-        with open(os.path.join(self.embedded_dir, "disk_space.py"), "w") as f:
-            f.write("# NEW disk_space content")
-        with open(os.path.join(self.embedded_dir, "file_assoc.py"), "w") as f:
-            f.write("# NEW file_assoc content")
-        with open(os.path.join(self.embedded_dir, "lang_detect.py"), "w") as f:
-            f.write("# NEW lang_detect content")
-        with open(os.path.join(self.embedded_dir, "restart_manager.py"), "w") as f:
-            f.write("# NEW restart_manager content")
-        with open(os.path.join(self.embedded_dir, "dependency_defs.py"), "w") as f:
-            f.write("# NEW dependency_defs content")
-        with open(os.path.join(self.embedded_dir, "install_scope.py"), "w") as f:
-            f.write("# NEW install_scope content")
-        with open(os.path.join(self.embedded_dir, "self_delete.py"), "w") as f:
-            f.write("# NEW self_delete content")
-        with open(os.path.join(self.embedded_dir, "system_entries.py"), "w") as f:
-            f.write("# NEW system_entries content")
-        with open(os.path.join(self.embedded_dir, "explorer_lock_release.py"), "w") as f:
-            f.write("# NEW explorer_lock_release content")
-        with open(os.path.join(self.embedded_dir, "windows_service.py"), "w") as f:
-            f.write("# NEW windows_service content")
-        with open(os.path.join(self.embedded_dir, "scheduled_task.py"), "w") as f:
-            f.write("# NEW scheduled_task content")
-        with open(os.path.join(self.embedded_dir, "restore_point.py"), "w") as f:
-            f.write("# NEW restore_point content")
-        with open(os.path.join(self.embedded_dir, "bits_download.py"), "w") as f:
-            f.write("# NEW bits_download content")
-        with open(os.path.join(self.embedded_dir, "install_journal.py"), "w") as f:
-            f.write("# NEW install_journal content")
-        with open(os.path.join(self.embedded_dir, "install_encryption.py"), "w") as f:
-            f.write("# NEW install_encryption content")
-        with open(os.path.join(self.embedded_dir, "progress_report.py"), "w") as f:
-            f.write("# NEW progress_report content")
-        with open(os.path.join(self.embedded_dir, "dependency_install.py"), "w") as f:
-            f.write("# NEW dependency_install content")
-        with open(os.path.join(self.embedded_dir, "version_compare.py"), "w") as f:
-            f.write("# NEW version_compare content")
-        with open(os.path.join(self.embedded_dir, "upgrade.py"), "w") as f:
-            f.write("# NEW upgrade content")
+        # 從 packaging_core 的清單推導，不手寫一份平行的模組清單。
+        # 原本這裡逐一列出每個模組，等於第三份要手動同步的清單——
+        # 新增任何一個共用深模組都會讓這幾個測試以「系統找不到指定的
+        # 檔案」失敗，而那個錯誤訊息完全指不到真正的原因。
+        for name in packaging_core.ENTRY_SCRIPTS + packaging_core.SHARED_DEEP_MODULES:
+            with open(os.path.join(self.embedded_dir, name), "w") as f:
+                f.write(f"# NEW {name.removesuffix('.py')} content")
         os.makedirs(os.path.join(self.embedded_dir, "ui"))
         with open(os.path.join(self.embedded_dir, "ui", "index.html"), "w") as f:
             f.write("<!-- NEW index.html -->")

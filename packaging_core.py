@@ -46,6 +46,10 @@ SHARED_DEEP_MODULES = [
     "windows_service.py", "scheduled_task.py", "restore_point.py", "bits_download.py",
     "install_journal.py", "install_encryption.py", "progress_report.py",
     "dependency_install.py", "version_compare.py", "upgrade.py",
+    # MSIX 引擎用得到的兩支。傳統引擎的安裝檔也會帶著它們，代價很小：
+    # msix_deploy 對 winrt 的匯入是延遲的，因此不會讓傳統引擎的安裝檔綁上
+    # 那個相依（見該模組的 _default_manager()）。
+    "msix_deploy.py", "msix_install.py",
 ]
 
 # `ui/` 底下「使用者可能自己換掉」的靜態資源。ensure_workspace_files() 只有

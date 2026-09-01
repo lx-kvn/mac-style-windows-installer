@@ -2568,3 +2568,49 @@ class TestSilentInstallLogPath(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestMsixEngineDispatch(unittest.TestCase):
+    """MSIX 引擎的安裝走另一條路徑。
+
+    傳統路徑做的是「自己複製檔案、寫登錄表、產生 uninstall.exe」，MSIX 路徑
+    做的是「把已簽章的套件交給系統」，兩者幾乎不共用邏輯，因此在最上層分流
+    而不是在傳統流程裡插判斷。
+    """
+
+    def test_the_engine_is_read_from_the_config(self):
+        api = make_installer_api()
+        self.assertEqual(api.install_engine, "traditional",
+                         "沒有這個欄位的既有安裝檔必須維持傳統行為")
+
+    def test_a_config_with_the_msix_engine_is_honoured(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        config_path = os.path.join(tmp, "installer_config.json")
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "app_name": "DemoApp", "version": "1.0.0",
+                "install_engine": "msix", "msix_package": "DemoCo.DemoApp.msix",
+            }, f)
+        with mock.patch.object(ic, "get_resource_path", return_value=config_path):
+            api = ic.InstallerAPI()
+        self.assertEqual(api.install_engine, "msix")
+        self.assertEqual(api.msix_package, "DemoCo.DemoApp.msix")
+
+    def test_the_msix_engine_does_not_run_the_traditional_install(self):
+        """走錯路徑的後果是「自己複製檔案」跟「交給系統部署」同時發生。"""
+        api = make_installer_api(install_engine="msix", msix_package="app.msix")
+        with mock.patch.object(api, "_install_msix", return_value={"status": "success"}) as msix, \
+                mock.patch.object(api, "_app_contents_dir") as contents:
+            result = api._trigger_installation_impl_inner(True, False, [], lambda m: None)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(msix.call_count, 1)
+        self.assertEqual(contents.call_count, 0,
+                         "MSIX 路徑不該碰傳統路徑的來源資料夾")
+
+    def test_the_traditional_engine_is_unaffected(self):
+        api = make_installer_api(install_engine="traditional")
+        with mock.patch.object(api, "_install_msix") as msix, \
+                mock.patch.object(api, "_app_contents_dir", return_value="C:\nope"):
+            api._trigger_installation_impl_inner(True, False, [], lambda m: None)
+        self.assertEqual(msix.call_count, 0)
