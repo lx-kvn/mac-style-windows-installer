@@ -53,6 +53,25 @@ COMMAND_LINE_APPLICATION_ID = "CommandLine"
 # 多語系顯示名稱的資源識別字，清單以 `ms-resource:` 加上它來參照。
 DISPLAY_NAME_RESOURCE = "AppDisplayName"
 
+# 套件內的圖示檔名。清單裡宣告的名稱與實際複製進套件的檔名必須一致，那是
+# 一個會安靜漂移的地方（清單指向一個不存在的檔案，makeappx 不一定會擋），
+# 因此固定在這裡，由清單產生與套件組裝共用同一份。
+TILE_LOGO = "tile.png"
+TASKBAR_LOGO = "small.png"
+STORE_LOGO = "store.png"
+SHARED_ASSOCIATION_LOGO = "doc.png"
+
+
+def association_logo_name(extension):
+    """某個副檔名專屬的關聯圖示在套件內的檔名。
+
+    比照 `builder.py` 對 `doc_icon_<副檔名>.ico` 的既有慣例：每個副檔名各自
+    複製一份固定命名的圖示，避免不同副檔名指向同名不同內容的來源檔案時互相
+    覆蓋。
+    """
+    return f"doc_{association_group_name(extension)}.png"
+
+
 DEFAULT_MIN_WINDOWS_VERSION = "10.0.17763.0"
 # 「已測試到的最高版本」影響限於相容性提示，依工具自身的建置環境填入即可，
 # 不開放設定（第五輪決議第二項末）。
@@ -224,7 +243,7 @@ def render(identity_name, certificate_subject, version, app_name, publisher,
            max_version_tested=None, display_names=None, default_language=None,
            file_associations=(), doc_icon="", doc_icons=None,
            add_to_path=False, path_target_exe="",
-           tile_logo="tile.png", taskbar_logo="small.png", store_logo="store.png"):
+           tile_logo=TILE_LOGO, taskbar_logo=TASKBAR_LOGO, store_logo=STORE_LOGO):
     """組出 `AppxManifest.xml` 的內容。
 
     `display_names` 有值時，顯示名稱改以 `ms-resource:` 參照——清單沒有內嵌
