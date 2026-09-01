@@ -226,6 +226,22 @@ class ConfigAPI:
             return res[0]
         return ""
 
+    def select_msix_icon(self):
+        """選擇 MSIX 三個宣告位置之一的覆蓋圖示（見 config.html 的 msix 區塊）。
+
+        與 select_extension_icon() 同樣不寫回任何 self.*_path：那些屬性是
+        「單一欄位對單一路徑」用的後端狀態，三個位置共用一組會互相蓋掉。
+        選到的路徑直接回傳，由前端記在對應位置上。
+
+        只收 PNG：MSIX 的套件圖示必須是 PNG（第五輪決議第一項），這裡先擋
+        住可以讓使用者當場就知道，不必等到打包階段才被驗證退回。
+        """
+        window = webview.active_window()
+        res = window.create_file_dialog(webview.OPEN_DIALOG, file_types=['PNG Image (*.png)'])
+        if res:
+            return res[0]
+        return ""
+
     def select_cert_file(self):
         """選擇數位簽章用的 PFX 憑證檔案（signing 設定，見規格文件 §8.27）"""
         window = webview.active_window()

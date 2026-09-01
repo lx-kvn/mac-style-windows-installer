@@ -247,6 +247,35 @@
         </div>
 
         <div class="form-group">
+            <label data-i18n="label_install_engine">安裝引擎</label>
+            <div class="checkbox-row"><input type="radio" name="install_engine" id="engine_traditional" value="traditional" checked onchange="onEngineChange()"><label for="engine_traditional" data-i18n="label_engine_traditional">傳統引擎（預設）</label></div>
+            <div class="checkbox-row"><input type="radio" name="install_engine" id="engine_msix" value="msix" onchange="onEngineChange()"><label for="engine_msix" data-i18n="label_engine_msix">MSIX 引擎（交給 Windows 的套件引擎管理）</label></div>
+            <div id="msix_section" style="display: none; margin-top: 8px;">
+                <label data-i18n="label_msix_identity_name">套件身分名稱</label>
+                <input type="text" id="msix_identity_name" placeholder="YourCompany.YourApp" data-i18n-placeholder="ph_msix_identity_name">
+                <label style="margin-top: 8px;" data-i18n="label_msix_certificate_subject">發行者（憑證上記載的名稱）</label>
+                <input type="text" id="msix_certificate_subject" placeholder="留空即從憑證自動填入" data-i18n-placeholder="ph_msix_certificate_subject">
+                <label style="margin-top: 8px;" data-i18n="label_msix_min_windows_version">最低支援的 Windows 版本（選填）</label>
+                <input type="text" id="msix_min_windows_version" placeholder="10.0.17763.0" data-i18n-placeholder="ph_msix_min_windows_version">
+                <label style="margin-top: 8px;" data-i18n="label_msix_icons">圖示個別覆蓋（選填）</label>
+                <div class="file-selector" style="margin-top: 4px;">
+                    <button class="btn-browse" onclick="browseMsixIcon('tile')" data-i18n="btn_browse_msix_tile">磚塊 150px</button>
+                    <span class="path-display" id="msix_icon_tile" data-i18n="use_shared_icon">沿用上方的 PNG 圖示</span>
+                </div>
+                <div class="file-selector" style="margin-top: 4px;">
+                    <button class="btn-browse" onclick="browseMsixIcon('taskbar')" data-i18n="btn_browse_msix_taskbar">工作列 44px</button>
+                    <span class="path-display" id="msix_icon_taskbar" data-i18n="use_shared_icon">沿用上方的 PNG 圖示</span>
+                </div>
+                <div class="file-selector" style="margin-top: 4px;">
+                    <button class="btn-browse" onclick="browseMsixIcon('store')" data-i18n="btn_browse_msix_store">商店 50px</button>
+                    <span class="path-display" id="msix_icon_store" data-i18n="use_shared_icon">沿用上方的 PNG 圖示</span>
+                </div>
+                <span class="note" data-i18n="note_msix">套件身分名稱一經發布即不可變更——改了之後系統會把它當成另一個不相關的應用程式並存安裝，而且不會有任何警告。3 到 50 個字元，只能用英文字母、數字、句點、連字號。發行者必須與簽章憑證上記載的名稱完全一致，不一致時系統直接拒絕安裝；上面的「數位簽章」區塊選了憑證時留空即可，工具會自動填入。憑證就在這台機器上時，按下「開始編譯安裝檔」會一路編到底，跟傳統引擎一樣；憑證不在本機（例如交給雲端代簽）時會編到 .msix 為止，之後要自行簽章、再用命令列工具接完後半段。圖示必須是正方形的 PNG，留空即沿用上方那張，三個位置的邊長分別至少要 150、44、50 像素。</span>
+            </div>
+            <span class="note" data-i18n="note_install_engine">決定安裝檔內部用哪一種方式把檔案落地。傳統引擎由 Setup.exe 自己複製檔案、寫登錄表，並附一支解除安裝程式。MSIX 引擎改把應用程式交給 Windows 的套件引擎，由系統保證解除安裝乾淨、不留殘檔，代價是安裝位置與使用者範圍都由系統決定（使用者選不了路徑），且部分設定在這個模式下無法使用——選了之後如果有設定不相容，按下編譯時會一次列出全部不相容的項目。</span>
+        </div>
+
+        <div class="form-group">
             <label data-i18n="label_install_location">安裝位置</label>
             <div class="checkbox-row"><input type="radio" name="install_location" id="install_loc_program_files" value="program_files" checked onchange="onInstallLocationChange()"><label for="install_loc_program_files" data-i18n="label_loc_program_files">Program Files（預設，需要系統管理員權限）</label></div>
             <div class="checkbox-row"><input type="radio" name="install_location" id="install_loc_local_appdata" value="local_appdata" onchange="onInstallLocationChange()"><label for="install_loc_local_appdata" data-i18n="label_loc_local_appdata">使用者目錄（%LOCALAPPDATA%\Programs\&lt;安裝資料夾名稱&gt;，免系統管理員權限）</label></div>
@@ -689,6 +718,22 @@
                 ph_pw_env: "例如: MSWI_INSTALL_PASSWORD",
                 note_install_password: "打包時把你的應用程式檔案整包加密，終端使用者要先輸入正確密碼才能繼續安裝（這道關卡出現在 EULA 之前）。用途是防止安裝檔被誤傳、亂用，不是拿來擋有心人硬破解的機制，不要用它保護真正機密的內容。「直接輸入密碼」只有這個畫面可以用，密碼不會被寫進任何檔案；需要重複打包或自動化流程，請改用環境變數那個選項，設定檔裡只會記下變數名稱。密碼打錯工具無法幫你檢查，做出來的安裝檔會沒有人打得開，送出前請用「顯示密碼」確認一次。",
                 label_enable_signing: "啟用數位簽章自動化",
+                label_install_engine: "安裝引擎",
+                label_engine_traditional: "傳統引擎（預設）",
+                label_engine_msix: "MSIX 引擎（交給 Windows 的套件引擎管理）",
+                note_install_engine: "決定安裝檔內部用哪一種方式把檔案落地。傳統引擎由 Setup.exe 自己複製檔案、寫登錄表，並附一支解除安裝程式。MSIX 引擎改把應用程式交給 Windows 的套件引擎，由系統保證解除安裝乾淨、不留殘檔，代價是安裝位置與使用者範圍都由系統決定（使用者選不了路徑），且部分設定在這個模式下無法使用——選了之後如果有設定不相容，按下編譯時會一次列出全部不相容的項目。",
+                label_msix_identity_name: "套件身分名稱",
+                ph_msix_identity_name: "YourCompany.YourApp",
+                label_msix_certificate_subject: "發行者（憑證上記載的名稱）",
+                ph_msix_certificate_subject: "留空即從憑證自動填入",
+                label_msix_min_windows_version: "最低支援的 Windows 版本（選填）",
+                ph_msix_min_windows_version: "10.0.17763.0",
+                label_msix_icons: "圖示個別覆蓋（選填）",
+                btn_browse_msix_tile: "磚塊 150px",
+                btn_browse_msix_taskbar: "工作列 44px",
+                btn_browse_msix_store: "商店 50px",
+                use_shared_icon: "沿用上方的 PNG 圖示",
+                note_msix: "套件身分名稱一經發布即不可變更——改了之後系統會把它當成另一個不相關的應用程式並存安裝，而且不會有任何警告。3 到 50 個字元，只能用英文字母、數字、句點、連字號。發行者必須與簽章憑證上記載的名稱完全一致，不一致時系統直接拒絕安裝；上面的「數位簽章」區塊選了憑證時留空即可，工具會自動填入。憑證就在這台機器上時，按下「開始編譯安裝檔」會一路編到底，跟傳統引擎一樣；憑證不在本機（例如交給雲端代簽）時會編到 .msix 為止，之後要自行簽章、再用命令列工具接完後半段。圖示必須是正方形的 PNG，留空即沿用上方那張，三個位置的邊長分別至少要 150、44、50 像素。",
                 btn_browse_cert: "選擇 PFX 憑證",
                 label_cert_password_env: "憑證密碼的環境變數名稱",
                 ph_cert_password_env: "例如: MSWI_CERT_PASSWORD",
@@ -831,6 +876,22 @@
                 ph_pw_env: "e.g. MSWI_INSTALL_PASSWORD",
                 note_install_password: "Encrypts your application files inside the installer; the end user must enter the correct password before installation can continue (this gate appears before the EULA). It exists to stop the installer from being passed around and used by mistake — it is not built to withstand someone determined to break it, so don't use it to protect genuinely sensitive content. \"Type the password here\" is only available in this window and the password is never written to any file; for repeatable or automated builds use the environment variable option instead, which records only the variable name in the config file. The tool cannot check whether you mistyped the password — a typo produces an installer nobody can open — so use \"Show password\" to confirm it before you build.",
                 label_enable_signing: "Enable code-signing automation",
+                label_install_engine: "Install engine",
+                label_engine_traditional: "Traditional engine (default)",
+                label_engine_msix: "MSIX engine (managed by the Windows packaging engine)",
+                note_install_engine: "Chooses how the installer puts your files on disk. The traditional engine has Setup.exe copy the files and write the registry itself, and ships an uninstaller alongside them. The MSIX engine hands the application to the Windows packaging engine instead, so the system guarantees a clean uninstall with nothing left behind — at the cost of the install location and user scope being decided by the system (the end user cannot choose a path), and some settings being unavailable in this mode. If any of your settings are incompatible, pressing build lists all of them at once.",
+                label_msix_identity_name: "Package identity name",
+                ph_msix_identity_name: "YourCompany.YourApp",
+                label_msix_certificate_subject: "Publisher (exactly as recorded on the certificate)",
+                ph_msix_certificate_subject: "Leave empty to fill in from the certificate",
+                label_msix_min_windows_version: "Minimum supported Windows version (optional)",
+                ph_msix_min_windows_version: "10.0.17763.0",
+                label_msix_icons: "Per-position icon overrides (optional)",
+                btn_browse_msix_tile: "Tile 150px",
+                btn_browse_msix_taskbar: "Taskbar 44px",
+                btn_browse_msix_store: "Store 50px",
+                use_shared_icon: "Using the PNG icon above",
+                note_msix: "The package identity name can never be changed once you have published — change it and the system treats the result as an unrelated application and installs it alongside the old one, with no warning. 3 to 50 characters, letters, digits, periods and hyphens only. The publisher must match the name recorded on your signing certificate exactly; if it does not, the system simply refuses to install. Leave it empty when you have chosen a certificate in the code-signing section above and the tool fills it in for you. When the certificate is on this machine, pressing Build runs all the way through just like the traditional engine; when it is not (cloud signing, for instance) the build stops at the .msix and you sign it yourself, then finish the second half with the command-line tool. Icons must be square PNGs — leave these empty to reuse the icon above; the three positions need edges of at least 150, 44 and 50 pixels respectively.",
                 btn_browse_cert: "Choose PFX certificate",
                 label_cert_password_env: "Environment variable holding the cert password",
                 ph_cert_password_env: "e.g. MSWI_CERT_PASSWORD",
@@ -1287,6 +1348,40 @@
         async function browsePng() { const path = await pywebview.api.select_png_icon(); if(path) document.getElementById('png_icon_path').innerText = path; }
         async function browseIco() { const path = await pywebview.api.select_ico_icon(); if(path) document.getElementById('ico_icon_path').innerText = path; }
 
+        // ---------------- 安裝引擎 ----------------
+        // MSIX 專屬欄位只在選了 MSIX 引擎時出現。傳統引擎完全不看它們（後端
+        // 亦然，見 install_engine.py），一直顯示等於要每個使用者都先搞懂一個
+        // 他用不到的概念。
+        function getInstallEngine() {
+            return document.querySelector('input[name="install_engine"]:checked').value;
+        }
+
+        function onEngineChange() {
+            document.getElementById('msix_section').style.display =
+                getInstallEngine() === 'msix' ? 'block' : 'none';
+        }
+
+        // 三個位置各自的覆蓋圖示。狀態記在前端、不寫回後端：後端那幾個
+        // self.*_path 屬性是「單一欄位對單一路徑」用的，三個位置共用一組會
+        // 互相蓋掉（比照個別副檔名圖示的作法）。
+        async function browseMsixIcon(position) {
+            const path = await pywebview.api.select_msix_icon();
+            if (path) {
+                document.getElementById('msix_icon_' + position).innerText = path;
+            }
+        }
+
+        function collectMsixIcons() {
+            const icons = {};
+            for (const position of ['tile', 'taskbar', 'store']) {
+                const shown = document.getElementById('msix_icon_' + position).innerText;
+                if (shown && shown !== t('use_shared_icon')) {
+                    icons[position] = shown;
+                }
+            }
+            return icons;
+        }
+
         // ---------------- 數位簽章自動化 ----------------
         function toggleSigningFields(checked) {
             document.getElementById('signing_section').style.display = checked ? 'block' : 'none';
@@ -1597,6 +1692,16 @@
                     cert_path: document.getElementById('cert_path_display').innerText === t('no_file_selected') ? '' : document.getElementById('cert_path_display').innerText,
                     cert_password_env: document.getElementById('cert_password_env').value.trim(),
                     timestamp_url: document.getElementById('timestamp_url').value.trim(),
+                } : {},
+                install_engine: getInstallEngine(),
+                // 傳統引擎時送空的：後端在那個模式下完全不看這一塊，送出一組
+                // 使用者可能只是隨手填過又切回去的值，會讓設定檔留下與這次
+                // 建置無關的內容。
+                msix: getInstallEngine() === 'msix' ? {
+                    identity_name: document.getElementById('msix_identity_name').value.trim(),
+                    certificate_subject: document.getElementById('msix_certificate_subject').value.trim(),
+                    min_windows_version: document.getElementById('msix_min_windows_version').value.trim(),
+                    icons: collectMsixIcons(),
                 } : {},
             };
             // 密碼以第二個參數送出，不是 data 的一個欄位——data 的欄位集合
