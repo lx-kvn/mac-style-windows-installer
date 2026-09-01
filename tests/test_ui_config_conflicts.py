@@ -38,7 +38,13 @@ class TestNoAdminInstallIsComputedInOnePlace(unittest.TestCase):
         self.assertIn("function isNoAdminInstall()", self.content)
 
     def test_the_submitted_payload_uses_the_helper(self):
-        match = re.search(r"no_admin_install:\s*([^\n,]+)", self.content)
+        # 範圍限定在 submitForm 組出來的那包資料裡。原本是搜尋整份檔案的第一個
+        # no_admin_install:，那個寫法假設「檔案裡只會有一處」——引擎連動的
+        # 欄位對應表出現之後就不成立了，而它抓到的是那張表、不是送出的資料。
+        payload = re.search(r"const data = \{(.*?)\n            \};",
+                            self.content, re.S)
+        self.assertIsNotNone(payload, "找不到 submitForm 組出來的資料")
+        match = re.search(r"no_admin_install:\s*([^\n,]+)", payload.group(1))
         self.assertIsNotNone(match, "找不到送出資料裡的 no_admin_install 欄位")
         self.assertIn("isNoAdminInstall()", match.group(1))
 

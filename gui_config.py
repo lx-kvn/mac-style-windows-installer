@@ -135,6 +135,31 @@ class ConfigAPI:
         """
         return lang_detect.detect_system_language(BUILDER_UI_LANGUAGES, DEFAULT_BUILDER_UI_LANGUAGE)
 
+    def get_engine_field_categories(self, engine, lang=None):
+        """這個引擎下有哪些設定不相容，各屬哪一類、就地提示要顯示什麼。
+
+        回傳 `{欄位: {"category": ..., "hint": ...}}`，與這次填了什麼無關——
+        就地標記的用途是事前告知，使用者還沒填就該看得到這一格在這個模式下
+        不能用（第十四輪決議第四項）。
+
+        分類與文字都由 `install_engine.py` 提供，前端不自行維護一份欄位
+        清單：那份清單與後端分岔時的症狀是某個欄位悄悄不再被標記，而那不會
+        有任何東西會叫。
+
+        認不得的引擎回傳空字典而不拋例外：引擎值來自前端，為此拋例外會讓
+        整個畫面停住。
+        """
+        if engine != install_engine.MSIX:
+            return {}
+        lang = lang or install_engine.DEFAULT_LANGUAGE
+        return {
+            field: {
+                "category": category,
+                "hint": install_engine.category_hint(category, lang),
+            }
+            for field, category in install_engine.field_categories().items()
+        }
+
     def open_url(self, url):
         """讓前端可以開啟預設瀏覽器前往下載頁（例如缺 Python 時導去官網）。"""
         try:

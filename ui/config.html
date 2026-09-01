@@ -93,6 +93,27 @@
         /* 左側細線讓展開後看得出這幾組欄位同屬一區，收合起來時不佔任何空間。 */
         .section-body { margin: -4px 0 20px 0; padding-left: 12px;
                         border-left: 2px solid var(--border-color); }
+        /* 引擎連動的兩種處置（第十四輪決議第四項）。兩者刻意長得不一樣：
+           一種是「你可以留著，但編譯時會被擋」，另一種是「這個設定在這個
+           引擎下不會有作用」——看起來一樣的話，使用者無從分辨自己是該改
+           設定還是該換引擎。 */
+        .engine-warned {
+            border-left: 2px solid var(--text-muted);
+            padding-left: 12px;
+        }
+        /* 真的停用：連同裡面的控制項一起。opacity 之外還要 pointer-events，
+           不然滑鼠仍然點得到、看起來像壞掉而不是停用。 */
+        .engine-disabled {
+            opacity: 0.45;
+            pointer-events: none;
+        }
+        .engine-hint {
+            display: block;
+            font-size: 11px;
+            line-height: 1.6;
+            margin-top: 6px;
+            color: var(--text-muted);
+        }
         label { display: block; font-size: 12px; font-weight: 500; margin-bottom: 8px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
         /* password 跟 text 套同一組樣式，不只是為了長相一致：安裝密碼那格的
            「顯示密碼」切換是直接改 input 的 type，只選 text 的話欄位會在切換
@@ -210,7 +231,7 @@
 
         <div class="form-group"><label data-i18n="label_app_name">應用程式名稱</label><input type="text" id="app_name" placeholder="例如: MyCustomApp" data-i18n-placeholder="ph_app_name"></div>
 
-        <div class="form-group">
+        <div class="form-group" id="group_folder_name">
             <label data-i18n="label_folder_name">安裝資料夾名稱</label>
             <input type="text" id="folder_name" placeholder="留空則沿用上方的應用程式名稱" data-i18n-placeholder="ph_folder_name" oninput="checkFolderNameSafety()">
             <span class="note" id="folder_name_note" data-i18n="note_folder_name">安裝路徑（例如 C:\Program Files\這裡）會用這個名稱，跟上面的應用程式名稱是分開的兩件事——應用程式名稱可以是中文，用來顯示給使用者看；如果應用程式名稱是中文，建議在這裡另外填一個純英數字的名稱，避免路徑中出現中文字在少數環境下造成讀寫問題。</span>
@@ -234,8 +255,13 @@
 
         <div class="form-group"><label data-i18n="label_ico_icon">執行檔封面圖示 (必須為 ICO 格式)</label><div class="file-selector"><button class="btn-browse" onclick="browseIco()" data-i18n="btn_browse_ico">選擇 ICO 檔案</button><span class="path-display" id="ico_icon_path" data-i18n="no_file_selected">未選擇檔案</span></div><span class="note" data-i18n="note_ico_icon">用於安裝檔在 Windows 檔案總管中顯示的外觀。</span></div>
 
-        <div class="form-group">
+        <div class="form-group" id="group_install_location">
             <label data-i18n="label_install_location">安裝位置</label>
+            <!-- MSIX 下三個選項全部無效：自訂路徑是格式做不到、Program Files
+                 是第一版尚未支援的使用者範圍，而「路徑」本身在 MSIX 下不存在。
+                 整組退場換成說明，比照安裝端對拖曳目的地的處置（第二輪決議
+                 第四項）——留著等於讓使用者以為自己選得了位置。 -->
+            <div id="install_location_choices">
             <div class="checkbox-row"><input type="radio" name="install_location" id="install_loc_program_files" value="program_files" checked onchange="onInstallLocationChange()"><label for="install_loc_program_files" data-i18n="label_loc_program_files">Program Files（預設，需要系統管理員權限）</label></div>
             <div class="checkbox-row"><input type="radio" name="install_location" id="install_loc_local_appdata" value="local_appdata" onchange="onInstallLocationChange()"><label for="install_loc_local_appdata" data-i18n="label_loc_local_appdata">使用者目錄（%LOCALAPPDATA%\Programs\&lt;安裝資料夾名稱&gt;，免系統管理員權限）</label></div>
             <div class="checkbox-row"><input type="radio" name="install_location" id="install_loc_custom" value="custom" onchange="onInstallLocationChange()"><label for="install_loc_custom" data-i18n="label_loc_custom">自訂路徑</label></div>
@@ -244,6 +270,10 @@
                 <div class="checkbox-row" style="margin-top: 6px;"><input type="checkbox" id="custom_install_requires_admin" onchange="updateAdminOnlyOptions()"><label for="custom_install_requires_admin" data-i18n="label_custom_requires_admin">這個路徑需要系統管理員權限</label></div>
             </div>
             <span class="note" data-i18n="note_install_location">預設會安裝到 Program Files，需要系統管理員權限（雙擊安裝檔會跳出 UAC 提示）。選「使用者目錄」會改裝到 %LOCALAPPDATA%\Programs\&lt;安裝資料夾名稱&gt;，整個安裝檔（含解除安裝）完全不要求提權。選「自訂路徑」可以自行填寫任意安裝目錄（支援 %APPDATA% 這類環境變數，會依使用者電腦當下的實際值展開），預設視為使用者自己有寫入權限的位置、不要求提權，如果你確定這個路徑需要系統管理員權限才能寫入，請另外勾選下面的選項。</span>
+            </div>
+            <div id="install_location_msix_note" style="display: none;">
+                <span class="note" data-i18n="note_install_location_msix">MSIX 模式下沒有這個選擇：套件的位置由 Windows 決定，不存在使用者會操作的安裝資料夾，也沒有路徑可以指定。第一版只安裝給執行安裝的那一位使用者，這台電腦上的其他使用者登入後不會有這個應用程式；需要所有使用者共用的話請改用傳統引擎。</span>
+            </div>
         </div>
 
         <!-- F09：免管理員權限安裝時，下面兩個需要管理員權限的選項會被停用，
@@ -332,7 +362,7 @@
                 <span class="note" data-i18n="note_path_target_exe">預設會把整個安裝目錄加進 PATH。如果應用程式除了主程式外，還附了一支獨立的命令列工具（例如放在子資料夾），可以在這裡另外指定那支執行檔，改成只把它所在的目錄加進 PATH。</span>
             </div>
         </div>
-        <div class="form-group">
+        <div class="form-group" id="group_windows_service">
             <div class="checkbox-row"><input type="checkbox" id="need_windows_service" onchange="toggleWindowsServiceFields(this.checked)"><label for="need_windows_service" data-i18n="label_windows_service">安裝為 Windows 服務（選填）</label></div>
             <div id="windows_service_section" style="display: none; margin-top: 8px;">
                 <label data-i18n="label_service_name">服務名稱</label>
@@ -348,7 +378,7 @@
                 <span class="note" data-i18n="note_windows_service">安裝時會用 sc.exe 把上面選的執行檔註冊成 Windows 服務；解除安裝時自動移除，不留殘留。</span>
             </div>
         </div>
-        <div class="form-group">
+        <div class="form-group" id="group_scheduled_task">
             <div class="checkbox-row"><input type="checkbox" id="need_scheduled_task" onchange="toggleScheduledTaskFields(this.checked)"><label for="need_scheduled_task" data-i18n="label_scheduled_task">建立排程工作（選填）</label></div>
             <div id="scheduled_task_section" style="display: none; margin-top: 8px;">
                 <label data-i18n="label_task_name">排程工作名稱</label>
@@ -372,7 +402,7 @@
             <span data-i18n="label_section_install_behavior">安裝行為（選填）</span>
         </div>
         <div id="section_install_behavior" class="section-body" style="display: none;">
-        <div class="form-group">
+        <div class="form-group" id="group_dependencies">
             <label data-i18n="label_dependencies">相依元件偵測 (選填)</label>
             <div class="checkbox-row"><input type="checkbox" id="dep_vcredist"><label for="dep_vcredist">Visual C++ Redistributable (x64)</label></div>
             <input type="text" id="dep_vcredist_min_version" style="margin-left: 24px; width: calc(100% - 24px); margin-top: -4px; margin-bottom: 10px;" placeholder="最低版本（選填，例如 14.38.33130）" data-i18n-placeholder="ph_dep_min_version">
@@ -383,23 +413,23 @@
             <span class="note" data-i18n="note_dependencies">安裝時會偵測系統是否已安裝，缺少的話提示使用者是否要自動下載並靜默安裝（或選擇略過，不會阻擋主程式安裝）。</span>
             <span class="note" data-i18n="note_dep_min_version">填了最低版本的話，偵測到已安裝但版本太舊時，也會視同未安裝並提示更新；留空只檢查有沒有安裝，不管版本新舊。</span>
         </div>
-        <div class="form-group">
+        <div class="form-group" id="group_custom_dependencies">
             <label data-i18n="label_custom_dependencies">自訂相依元件（選填）</label>
             <div id="custom_deps_rows"></div>
             <button class="btn-browse" type="button" onclick="addCustomDependencyRow()" data-i18n="btn_add_custom_dependency">+ 新增自訂相依元件</button>
             <span class="note" data-i18n="note_custom_dependencies">除了上面內建的 Visual C++ Redistributable / .NET Desktop Runtime，也可以自訂任意相依元件：安裝時用登錄表偵測是否已安裝，缺少的話比照內建元件提示自動下載＋靜默安裝。</span>
         </div>
-        <div class="form-group">
+        <div class="form-group" id="group_pre_install_script">
             <label data-i18n="label_pre_install_script">安裝前置腳本（選填）</label>
             <input type="text" id="pre_install_script_input" placeholder="相對於應用程式資料夾的路徑，例如: scripts\pre_install.bat" data-i18n-placeholder="ph_pre_install_script">
             <span class="note" data-i18n="note_pre_install_script">複製檔案之前自動靜默執行這支腳本/執行檔；執行失敗會中止整個安裝並回報錯誤。留空代表不執行。</span>
         </div>
-        <div class="form-group">
+        <div class="form-group" id="group_post_install_script">
             <label data-i18n="label_post_install_script">安裝後置腳本（選填）</label>
             <input type="text" id="post_install_script_input" placeholder="相對於應用程式資料夾的路徑，例如: scripts\post_install.bat" data-i18n-placeholder="ph_post_install_script">
             <span class="note" data-i18n="note_post_install_script">登錄表/捷徑都寫完後自動靜默執行這支腳本/執行檔；執行失敗只記錄警告，不影響安裝結果。留空代表不執行。</span>
         </div>
-        <div class="form-group">
+        <div class="form-group" id="group_local_appdata_files">
             <div class="checkbox-row"><input type="checkbox" id="need_local_appdata_files" onchange="toggleLocalAppdataFilesSection(this.checked)"><label for="need_local_appdata_files" data-i18n="label_local_appdata_files">個別檔案改裝到其他位置（進階，選填）</label></div>
             <div id="local_appdata_files_section" style="display: none; margin-top: 8px;">
                 <div id="local_appdata_files_tree" class="file-tree"></div>
@@ -769,6 +799,7 @@
                 note_install_password: "打包時把你的應用程式檔案整包加密，終端使用者要先輸入正確密碼才能繼續安裝（這道關卡出現在 EULA 之前）。用途是防止安裝檔被誤傳、亂用，不是拿來擋有心人硬破解的機制，不要用它保護真正機密的內容。「直接輸入密碼」只有這個畫面可以用，密碼不會被寫進任何檔案；需要重複打包或自動化流程，請改用環境變數那個選項，設定檔裡只會記下變數名稱。密碼打錯工具無法幫你檢查，做出來的安裝檔會沒有人打得開，送出前請用「顯示密碼」確認一次。",
                 label_enable_signing: "啟用數位簽章自動化",
                 label_install_engine: "安裝引擎",
+                note_install_location_msix: "MSIX 模式下沒有這個選擇：套件的位置由 Windows 決定，不存在使用者會操作的安裝資料夾，也沒有路徑可以指定。第一版只安裝給執行安裝的那一位使用者，這台電腦上的其他使用者登入後不會有這個應用程式；需要所有使用者共用的話請改用傳統引擎。",
                 label_section_install_flow: "安裝過程（選填）",
                 label_section_system_integration: "系統整合（選填）",
                 label_section_install_behavior: "安裝行為（選填）",
@@ -931,6 +962,7 @@
                 note_install_password: "Encrypts your application files inside the installer; the end user must enter the correct password before installation can continue (this gate appears before the EULA). It exists to stop the installer from being passed around and used by mistake — it is not built to withstand someone determined to break it, so don't use it to protect genuinely sensitive content. \"Type the password here\" is only available in this window and the password is never written to any file; for repeatable or automated builds use the environment variable option instead, which records only the variable name in the config file. The tool cannot check whether you mistyped the password — a typo produces an installer nobody can open — so use \"Show password\" to confirm it before you build.",
                 label_enable_signing: "Enable code-signing automation",
                 label_install_engine: "Install engine",
+                note_install_location_msix: "There is no such choice under MSIX mode: the package location is decided by Windows, there is no install folder for the user to work with, and there is no path to specify. The first version installs only for the user running the installer — other users on this machine will not have the application after signing in. Use the traditional engine if you need it shared across users.",
                 label_section_install_flow: "Installation experience (optional)",
                 label_section_system_integration: "System integration (optional)",
                 label_section_install_behavior: "Installation behaviour (optional)",
@@ -1498,6 +1530,7 @@
             // MSIX 下簽章決定產出的是安裝檔還是 .msix，不再只是選填，
             // 因此「發布」區要自己打開（第十四輪決議第六項）。
             applySectionAutoExpand();
+            applyEngineLinkage();
         }
 
         // 三個位置各自的覆蓋圖示。狀態記在前端、不寫回後端：後端那幾個
@@ -1519,6 +1552,110 @@
                 }
             }
             return icons;
+        }
+
+        // ---------------- 引擎連動 ----------------
+        // 後端欄位 -> 表單上要標記的區塊。分類與提示文字都由後端提供
+        // （install_engine.field_categories()／category_hint()），這裡只負責
+        // 「哪個欄位對到畫面上哪一塊」——那是前端才知道的事。
+        //
+        // 少列一個欄位的症狀是它悄悄不再被標記，因此 tests/test_gui_engine_linkage.py
+        // 會拿後端的清單來比對這張表。
+        const ENGINE_FIELD_TARGETS = {
+            dependencies: 'group_dependencies',
+            dependencies_min_version: 'group_dependencies',
+            bundle_dependencies: 'group_dependencies',
+            custom_dependencies: 'group_custom_dependencies',
+            windows_service: 'group_windows_service',
+            scheduled_task: 'group_scheduled_task',
+            pre_install_script: 'group_pre_install_script',
+            post_install_script: 'group_post_install_script',
+            folder_name: 'group_folder_name',
+            local_appdata_files: 'group_local_appdata_files',
+            // 這兩個由「安裝位置」整組退場處理，不個別標記——那一組在 MSIX 下
+            // 三個選項全部無效，逐項標記會變成三則指向同一件事的警告。
+            custom_install_dir: 'group_install_location',
+            no_admin_install: 'group_install_location',
+        };
+
+        // 真實抓到的缺陷：只加 `pointer-events: none` 的樣式擋得住滑鼠、擋不住
+        // 鍵盤——使用者仍然可以用 Tab 移進那個欄位並打字，只是看起來是灰的。
+        //
+        // 不用原生的 disabled 屬性：灰掉的欄位仍然照送它的值（顯示狀態不等於
+        // 資料狀態，GUI 與 CLI 對同一份設定要編出一樣的東西），而 disabled 的
+        // 欄位在很多既有的讀取寫法下會被跳過，兩邊就分岔了。改用 readOnly 加上
+        // 把它移出 Tab 順序：值仍在、仍讀得到，但使用者改不動。
+        function setGroupInert(group, inert) {
+            for (const el of group.querySelectorAll('input, select, textarea, button')) {
+                if (inert) {
+                    el.dataset.prevTabIndex = el.tabIndex;
+                    el.tabIndex = -1;
+                    if (el.type === 'text' || el.type === 'password' || el.tagName === 'TEXTAREA') {
+                        el.readOnly = true;
+                    }
+                } else {
+                    if (el.dataset.prevTabIndex !== undefined) {
+                        el.tabIndex = parseInt(el.dataset.prevTabIndex, 10);
+                        delete el.dataset.prevTabIndex;
+                    }
+                    el.readOnly = false;
+                }
+            }
+        }
+
+        function clearEngineLinkage() {
+            for (const id of new Set(Object.values(ENGINE_FIELD_TARGETS))) {
+                const group = document.getElementById(id);
+                if (!group) continue;
+                group.classList.remove('engine-warned', 'engine-disabled');
+                setGroupInert(group, false);
+                const hint = group.querySelector('.engine-hint');
+                if (hint) hint.remove();
+            }
+            document.getElementById('install_location_choices').style.display = '';
+            document.getElementById('install_location_msix_note').style.display = 'none';
+        }
+
+        async function applyEngineLinkage() {
+            clearEngineLinkage();
+            const engine = getInstallEngine();
+            let categories = {};
+            try {
+                categories = await pywebview.api.get_engine_field_categories(
+                    engine, currentLang);
+            } catch (e) {
+                // 後端問不到就維持沒有標記的樣子：少了事前提示仍然可以用，
+                // 按下編譯時的完整清單是最後一道保險。
+                return;
+            }
+
+            // 安裝位置整組退場。三個選項在 MSIX 下全部無效，而「路徑」本身
+            // 也不存在（第十四輪決議第十項）。
+            const locationAffected = categories.custom_install_dir || categories.no_admin_install;
+            if (locationAffected) {
+                document.getElementById('install_location_choices').style.display = 'none';
+                document.getElementById('install_location_msix_note').style.display = 'block';
+            }
+
+            for (const [field, info] of Object.entries(categories)) {
+                const id = ENGINE_FIELD_TARGETS[field];
+                if (!id || id === 'group_install_location') continue;
+                const group = document.getElementById(id);
+                if (!group) continue;
+                // 已經標過的區塊不重複加提示：三個相依元件欄位共用同一塊。
+                if (group.querySelector('.engine-hint')) continue;
+                // 不擋建置、只是失效的才真的停用；會擋建置的保留可操作，
+                // 否則使用者無法取消自己的設定（第十四輪決議第四項）。
+                const moot = info.category === 'moot';
+                group.classList.add(moot ? 'engine-disabled' : 'engine-warned');
+                // 只有真的停用的那一類要擋鍵盤。會擋建置的那些必須保持可操作，
+                // 否則使用者無法取消自己的設定。
+                if (moot) setGroupInert(group, true);
+                const hint = document.createElement('span');
+                hint.className = 'engine-hint';
+                hint.innerText = info.hint;
+                group.appendChild(hint);
+            }
         }
 
         // ---------------- 數位簽章自動化 ----------------
