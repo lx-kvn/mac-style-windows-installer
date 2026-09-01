@@ -420,8 +420,22 @@ def cmd_pack(args):
         settings=packaging_settings.load_settings(),
     )
 
+    prep_error = packaging_core.ensure_workspace_files(workspace_dir)
+    if prep_error:
+        print(prep_error, file=sys.stderr)
+        return 1
+    is_msix = pack_data.get("install_engine") == install_engine.MSIX
+    # 在動手打包之前先問一次工作目錄齊不齊：一體式流程下，makeappx 打包與
+    # signtool 簽章（含一次連到時間戳記伺服器的往返）都會發生在 build_all
+    # 之前，而 build_all 開頭那個廉價的資源檢查若留到那時才跑，那些力氣就
+    # 白花了。build_all 自己仍然會再檢查一次。
+    missing = builder.missing_workspace_resources(workspace_dir, is_msix=is_msix)
+    if missing:
+        print(missing, file=sys.stderr)
+        return 1
+
     signed_msix = args.signed_msix or ""
-    if pack_data.get("install_engine") == install_engine.MSIX and not signed_msix:
+    if is_msix and not signed_msix:
         # MSIX 模式需要一份已簽章的 .msix：它是被塞進 exe 資源區塊的，塞進去
         # 之後要換成簽過章的版本等於整個重編一次，因此簽章一定要在這一步
         # 之前完成（見規劃文件「下游專案的 CI 建置順序」）。
@@ -460,11 +474,6 @@ def cmd_pack(args):
         except Exception as e:
             print(f"產出 .msix 失敗：{e}", file=sys.stderr)
             return 1
-
-    prep_error = packaging_core.ensure_workspace_files(workspace_dir)
-    if prep_error:
-        print(prep_error, file=sys.stderr)
-        return 1
 
     def progress_handler(percent, message, cap=99, time_constant=15):
         print(f"[{percent:>3}%] {message}")

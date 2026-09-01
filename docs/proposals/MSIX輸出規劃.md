@@ -1355,6 +1355,12 @@ XML 屬性會產生格式錯誤的清單。每一個填值點都須通過跳脫�
 `dist/`：後者會在編 bootstrapper exe 之前被清空，中間產物擺在那裡會在被
 內嵌之前就消失。
 
+實機驗證時發現的順序問題：工作目錄缺基礎資源（`ui/index.html` 等）時，
+`makeappx` 打包與 `signtool` 簽章（含一次連到時間戳記伺服器的往返）都已
+跑完，才由 `build_all` 開頭那個廉價的資源檢查中止。該檢查抽為
+`builder.missing_workspace_resources()`，由 `pack` 在動手之前先問一次；
+`build_all` 自己仍然會再問，它不能假設呼叫端問過了。
+
 ### 第三項：GUI 與 CLI 維持功能對等，MSIX 不定位為 CLI 專用
 
 清查現況：GUI（`ui/config.html`）的表單欄位與 CLI 的設定欄位目前一一對應，

@@ -180,6 +180,33 @@ def _sign_file(target_path, signing, find_tool=None, run=None, log=None):
 MSIX_STAGING_DIRNAME = "msix_staging"
 
 
+def missing_workspace_resources(workspace_dir, is_msix=False):
+    """工作目錄少了哪個基礎資源，回傳說明字串；齊全時回傳 None。
+
+    這個檢查很廉價（幾次 os.path.exists），因此值得在花力氣之前先做。真實
+    踩到的順序問題：MSIX 一體式流程下，makeappx 打包與 signtool 簽章（含一次
+    連到時間戳記伺服器的往返）都已經跑完，才由 build_all 開頭的這段檢查中止。
+    抽成函式讓呼叫端能在動手之前先問一次，而 build_all 自己仍然會再問——它
+    不能假設呼叫端問過了。
+    """
+    workspace_dir = os.path.abspath(workspace_dir)
+    ui_dir = os.path.join(workspace_dir, "ui")
+    ui_index = os.path.join(ui_dir, "index.html")
+    ui_uninstall_html = os.path.join(ui_dir, "uninstall.html")
+
+    if not os.path.exists(ui_dir) or not os.path.exists(ui_index):
+        return f"找不到 ui 資料夾或 ui/index.html 基礎資源（預期位置：{ui_dir}）。"
+    # 解除安裝介面的兩個檔案只有傳統引擎會用到。MSIX 模式的解除安裝由系統
+    # 接管、不編 uninstall.exe（ADR-0006），要求它們存在等於為一個這個模式
+    # 用不到的東西擋下建置。
+    if not is_msix:
+        if not os.path.exists(ui_uninstall_html):
+            return f"找不到 ui/uninstall.html 基礎資源（預期位置：{ui_uninstall_html}）。"
+        if not os.path.exists(os.path.join(workspace_dir, "uninstall.py")):
+            return f"找不到 uninstall.py（預期位置：{workspace_dir}）。"
+    return None
+
+
 def build_msix(app_dir, pack_data, png_path, output_path, workspace_dir,
                doc_icon_path="", signing=None, sdk_tools_settings=None,
                find_tool=None, run=None, log=None):
@@ -328,20 +355,10 @@ def build_all(
     workspace_dir = os.path.abspath(workspace_dir)
     ui_dir = os.path.join(workspace_dir, "ui")
     ui_index = os.path.join(ui_dir, "index.html")
-    ui_uninstall_html = os.path.join(ui_dir, "uninstall.html")
 
-    if not os.path.exists(ui_dir) or not os.path.exists(ui_index):
-        raise Exception(
-            f"找不到 ui 資料夾或 ui/index.html 基礎資源（預期位置：{ui_dir}）。"
-        )
-    # 解除安裝介面的兩個檔案只有傳統引擎會用到。MSIX 模式的解除安裝由系統
-    # 接管、不編 uninstall.exe（ADR-0006），要求它們存在等於為一個這個模式
-    # 用不到的東西擋下建置。
-    if not is_msix:
-        if not os.path.exists(ui_uninstall_html):
-            raise Exception(f"找不到 ui/uninstall.html 基礎資源（預期位置：{ui_uninstall_html}）。")
-        if not os.path.exists(os.path.join(workspace_dir, "uninstall.py")):
-            raise Exception(f"找不到 uninstall.py（預期位置：{workspace_dir}）。")
+    missing = missing_workspace_resources(workspace_dir, is_msix=is_msix)
+    if missing:
+        raise Exception(missing)
 
     if not os.path.exists(os.path.join(workspace_dir, "installer_core.py")):
         raise Exception(f"找不到 installer_core.py（預期位置：{workspace_dir}）。")

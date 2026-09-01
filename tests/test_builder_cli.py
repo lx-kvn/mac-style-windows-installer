@@ -245,9 +245,16 @@ class TestCmdPack(unittest.TestCase):
             "pyinstaller_found": True, "python_found": True, "python_path": "python",
             "webview_found": True, "pywin32_found": True, "ready": True,
         }
+        # 工作目錄要真的存在且資源齊全：`pack` 在呼叫 build_all 之前會先檢查
+        # 一次（見 TestPackOneShotMsix 裡的順序測試）。
+        workspace = os.path.join(self.app_dir, "ws")
+        os.makedirs(os.path.join(workspace, "ui"))
+        for rel in ("ui/index.html", "ui/uninstall.html", "uninstall.py"):
+            with open(os.path.join(workspace, *rel.split("/")), "w", encoding="utf-8") as f:
+                f.write("x")
         with mock.patch("builder_cli.packaging_core.check_build_environment", return_value=ready_env), \
              mock.patch("builder_cli.packaging_core.ensure_workspace_files", return_value=None), \
-             mock.patch("builder_cli.packaging_core.get_workspace_dir", return_value="C:\\workspace"), \
+             mock.patch("builder_cli.packaging_core.get_workspace_dir", return_value=workspace), \
              mock.patch("builder_cli.builder.build_all") as mock_build:
             exit_code = builder_cli.cmd_pack(args)
         self.assertEqual(exit_code, 0)
@@ -529,9 +536,19 @@ class TestPackOneShotMsix(unittest.TestCase):
             f.write(b"fake pfx")
         os.environ["TEST_ONESHOT_PW"] = "hunter2"
         self.addCleanup(os.environ.pop, "TEST_ONESHOT_PW", None)
-        self.workspace = os.path.join(self.tmp, "ws")
-        os.makedirs(self.workspace)
+        self.workspace = self._make_workspace("ws")
         self.config = os.path.join(self.tmp, "cfg.json")
+
+    def _make_workspace(self, name):
+        """一個資源齊全的工作目錄。`pack` 在動手打包之前會檢查這些檔案在不
+        在，因此測試「一體式流程本身」時它們必須存在，否則測到的會是資源
+        檢查而不是流程。"""
+        ws = os.path.join(self.tmp, name)
+        os.makedirs(os.path.join(ws, "ui"))
+        for rel in ("ui/index.html", "ui/uninstall.html", "uninstall.py"):
+            with open(os.path.join(ws, *rel.split("/")), "w", encoding="utf-8") as f:
+                f.write("x")
+        return ws
 
     def _write_config(self, **overrides):
         data = {
@@ -629,6 +646,33 @@ class TestPackOneShotMsix(unittest.TestCase):
         self.assertEqual(code, 0, output)
         build_msix.assert_not_called()
         self.assertEqual(build_all.call_args.kwargs["signed_msix"], supplied)
+
+    def test_an_incomplete_workspace_is_caught_before_any_packaging(self):
+        """真實踩到的順序問題：工作目錄缺 ui/ 時，makeappx 打包與 signtool
+        簽章（含一次連到時間戳記伺服器的往返）都已經跑完，才由 build_all
+        開頭那個廉價的資源檢查中止。那個檢查要移到花力氣之前。"""
+        self._write_config(signing=self._signing())
+        ready_env = {
+            "pyinstaller_found": True, "python_found": True, "python_path": "python",
+            "webview_found": True, "pywin32_found": True, "ready": True,
+        }
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch("builder_cli.packaging_core.check_build_environment",
+                           return_value=ready_env), \
+                mock.patch("builder_cli.packaging_core.ensure_workspace_files",
+                           return_value=None), \
+                mock.patch("builder_cli.builder.build_all") as build_all, \
+                mock.patch("builder_cli.builder.build_msix") as build_msix:
+            empty = os.path.join(self.tmp, "empty_ws")
+            os.makedirs(empty)
+            code = builder_cli.main([
+                "pack", "--config", self.config, "--workspace-dir", empty])
+        output = out.getvalue() + err.getvalue()
+        self.assertEqual(code, 1)
+        self.assertIn("ui", output)
+        build_msix.assert_not_called()
+        build_all.assert_not_called()
 
     def test_a_failure_while_building_the_package_stops_before_build_all(self):
         self._write_config(signing=self._signing())
