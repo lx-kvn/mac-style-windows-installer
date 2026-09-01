@@ -1480,7 +1480,7 @@ class TestCertificateSubjectIsReadWhenAvailable(PackDataValidationTestBase):
 
     def test_an_unreadable_certificate_does_not_crash_the_build(self):
         """讀不到憑證不該中止：使用者仍可自己填 certificate_subject，
-        而簽章本身失敗與否是後面 _sign_executable() 的事。"""
+        而簽章本身失敗與否是後面 _sign_file() 的事。"""
         def reader(path, password):
             raise cert_subject.CertificateReadError("密碼不對")
 

@@ -31,7 +31,6 @@ import sys
 
 import builder
 import install_engine
-import msix_package
 import packaging_core
 import packaging_settings
 import sdk_tools
@@ -267,38 +266,27 @@ def cmd_pack_msix(args):
         workspace_dir, "dist", f"{msix['identity_name']}.msix")
     # 預設檔名用套件身分名稱而不是 app_name：後者是自由文字、可以是中文，
     # 不保證能當檔名；前者的字元集本來就受限（見 docs/adr/0007）。
-    os.makedirs(os.path.dirname(output) or ".", exist_ok=True)
-    staging_dir = os.path.join(workspace_dir, "msix_staging")
-
     sdk_settings = sdk_tools.settings_with_overrides(
         tools_dir=getattr(args, "sdk_tools_dir", None),
         cache_dir=getattr(args, "sdk_tools_cache_dir", None),
         settings=packaging_settings.load_settings(),
     )
 
-    def find_tool(name):
-        return sdk_tools.find_tool(name, settings=sdk_settings)
-
     try:
-        msix_package.stage(
+        # signing 一律傳 None：這個指令的產物按定義是未簽章的，即使設定裡
+        # 有本機憑證也一樣。使用者跑這個指令，要的就是一份還沒簽的套件，
+        # 好拿去交給代簽服務；在這裡順手簽下去等於讓那個情境無處可去。
+        builder.build_msix(
             app_dir=app_dir,
-            staging_dir=staging_dir,
-            png_icon=png_path,
-            identity_name=msix["identity_name"],
-            certificate_subject=msix["certificate_subject"],
-            version=msix["package_version"],
-            app_name=pack_data["app_name"],
-            publisher=pack_data["publisher"],
-            main_exe=pack_data["main_exe"],
-            doc_icon=doc_icon_path_selected,
-            doc_icons=pack_data.get("doc_icons") or {},
-            file_associations=pack_data.get("file_associations") or [],
-            add_to_path=pack_data.get("add_to_path", False),
-            path_target_exe=pack_data.get("path_target_exe", ""),
-            min_windows_version=msix.get("min_windows_version"),
-            icons=msix.get("icons") or {},
+            pack_data=pack_data,
+            png_path=png_path,
+            output_path=output,
+            workspace_dir=workspace_dir,
+            doc_icon_path=doc_icon_path_selected,
+            signing=None,
+            sdk_tools_settings=sdk_settings,
+            log=print,
         )
-        msix_package.pack(staging_dir, output, find_tool=find_tool, log=print)
     except Exception as e:
         print(f"產出 .msix 失敗：{e}", file=sys.stderr)
         return 1
@@ -425,20 +413,54 @@ def cmd_pack(args):
         print(_strip_html(error), file=sys.stderr)
         return 1
 
-    if pack_data.get("install_engine") == install_engine.MSIX and not args.signed_msix:
-        # MSIX 模式必須指定已簽章的 .msix：它是被塞進 exe 資源區塊的，
-        # 塞進去之後要換成簽過章的版本等於整個重編一次，因此簽章一定
-        # 要在這一步之前完成（見規劃文件「下游專案的 CI 建置順序」）。
-        print(
-            "MSIX 引擎需要一份已簽章的 .msix。流程是兩截的：\n"
-            "  1. pack-msix 產出未簽章的 .msix\n"
-            "  2. 自行簽章（本機憑證或雲端代簽）\n"
-            "  3. pack --signed-msix <已簽章的.msix> 編出安裝檔",
-            file=sys.stderr,
-        )
-        return 1
-
     workspace_dir = args.workspace_dir or packaging_core.get_workspace_dir()
+    sdk_settings = sdk_tools.settings_with_overrides(
+        tools_dir=args.sdk_tools_dir,
+        cache_dir=args.sdk_tools_cache_dir,
+        settings=packaging_settings.load_settings(),
+    )
+
+    signed_msix = args.signed_msix or ""
+    if pack_data.get("install_engine") == install_engine.MSIX and not signed_msix:
+        # MSIX 模式需要一份已簽章的 .msix：它是被塞進 exe 資源區塊的，塞進去
+        # 之後要換成簽過章的版本等於整個重編一次，因此簽章一定要在這一步
+        # 之前完成（見規劃文件「下游專案的 CI 建置順序」）。
+        #
+        # 憑證是本機檔案時，那三個步驟工具自己串得起來——第二輪決議第三項在
+        # 兩截式骨架之上留的正是這條便捷路徑。判斷依據是設定裡有沒有
+        # `signing`：它的 cert_path 一律是本機 .pfx（上面的驗證已確認檔案
+        # 實際存在），因此「有 signing」與「憑證在本機」是同一件事，不需要
+        # 使用者再多選一個模式。
+        if not pack_data.get("signing"):
+            print(
+                "MSIX 引擎需要一份已簽章的 .msix，而這份設定沒有 signing 欄位\n"
+                "（憑證不在本機，例如交給雲端代簽）。這種情況流程是兩截的：\n"
+                "  1. pack-msix 產出未簽章的 .msix\n"
+                "  2. 自行簽章\n"
+                "  3. pack --signed-msix <已簽章的.msix> 編出安裝檔\n"
+                "憑證就在本機時，把它填進 signing，pack 會自己把三步串完。",
+                file=sys.stderr,
+            )
+            return 1
+        identity_name = (pack_data.get("msix") or {}).get("identity_name", "package")
+        try:
+            signed_msix = builder.build_msix(
+                app_dir=app_dir,
+                pack_data=pack_data,
+                png_path=png_path,
+                # 放在工作目錄底下、不放進 dist/：後者會在編 bootstrapper exe
+                # 之前被清空，中間產物擺在那裡會在被內嵌之前就消失。
+                output_path=os.path.join(workspace_dir, f"{identity_name}.msix"),
+                workspace_dir=workspace_dir,
+                doc_icon_path=doc_icon_path_selected,
+                signing=pack_data["signing"],
+                sdk_tools_settings=sdk_settings,
+                log=print,
+            )
+        except Exception as e:
+            print(f"產出 .msix 失敗：{e}", file=sys.stderr)
+            return 1
+
     prep_error = packaging_core.ensure_workspace_files(workspace_dir)
     if prep_error:
         print(prep_error, file=sys.stderr)
@@ -483,12 +505,8 @@ def cmd_pack(args):
             install_password_env=pack_data.get("install_password_env", ""),
             workspace_dir=workspace_dir,
             install_engine=pack_data.get("install_engine", "traditional"),
-            signed_msix=args.signed_msix or "",
-            sdk_tools_settings=sdk_tools.settings_with_overrides(
-                tools_dir=args.sdk_tools_dir,
-                cache_dir=args.sdk_tools_cache_dir,
-                settings=packaging_settings.load_settings(),
-            ),
+            signed_msix=signed_msix,
+            sdk_tools_settings=sdk_settings,
             progress_callback=progress_handler,
         )
     except Exception as e:

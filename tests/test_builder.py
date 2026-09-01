@@ -906,10 +906,6 @@ class TestMissingUninstallHtmlRaises(BuildAllTestBase):
         self.assertIn("uninstall.html", str(ctx.exception))
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
-
 class TestMsixEngineBuild(BuildAllTestBase):
     """MSIX 引擎的安裝檔：內嵌已簽章的 .msix，不產生 uninstall.exe。
 
@@ -1074,3 +1070,7 @@ class TestSignedMsixSurvivesCleanup(BuildAllTestBase):
                                  returncode=0, stdout="", stderr=""))
         leftovers = [n for n in os.listdir(self.workspace_dir) if n.endswith(".msix")]
         self.assertEqual(leftovers, [], f"工作目錄留下暫存副本：{leftovers}")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

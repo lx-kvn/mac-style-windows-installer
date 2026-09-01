@@ -6,7 +6,7 @@
   寫清單、產生多語系資源來源檔。
 - `pack()` 呼叫 makepri／makeappx。工具的檢索（`find_tool`）與子行程的
   執行（`run`）都是可注入的參數，比照 `file_assoc.py` 的 registry seam
-  與 `builder._sign_executable()` 的作法，因此測試不需要真的有 SDK 工具。
+  與 `builder._sign_file()` 的作法，因此測試不需要真的有 SDK 工具。
 
 真的用 makeappx 驗證產出這件事，由 CI 探針涵蓋（該 workflow 使用本模組與
 `msix_manifest.py` 產生套件並實際部署）。

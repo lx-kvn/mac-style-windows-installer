@@ -5,8 +5,8 @@ install_engine.py
 「這份設定跟選定的引擎相不相容」的判斷。詞彙見 `CONTEXT.md`「傳統引擎與
 MSIX 引擎」與「安裝路徑與使用者範圍」兩節。
 
-本模組只回答「哪些設定在這個引擎下能用」，不負責產生 MSIX 套件本身。
-MSIX 引擎的實際部署邏輯尚未實作（見 `MSIX_NOT_IMPLEMENTED`）。
+本模組只回答「哪些設定在這個引擎下能用」，不負責產生 MSIX 套件本身——
+套件的組裝與打包在 `msix_package.py`，部署在 `msix_deploy.py`。
 
 ## 四類分類
 
@@ -46,21 +46,6 @@ MSIX = "msix"
 ENGINES = (TRADITIONAL, MSIX)
 
 SETTING_FIELD = "install_engine"
-
-# 尚未實作的是 **bootstrapper**——內嵌已簽章的 `.msix`、顯示拖曳介面、
-# 再交給系統部署的那顆 `Setup.exe`。產出 `.msix` 本身已經做得到，由
-# `pack-msix` 這個子指令負責（見 `msix_package.py`）。
-#
-# 設定寫著 MSIX 卻默默產出一顆傳統安裝檔，比直接報錯糟得多，因此 `pack`
-# 在 MSIX 引擎下一律中止。這個常數是「bootstrapper 還沒做好」這件事在程式碼
-# 裡的唯一位置，該部分完成時刪掉這裡與其唯一的呼叫點。
-MSIX_NOT_IMPLEMENTED = (
-    "MSIX 引擎的 bootstrapper（內嵌 .msix 並交給系統部署的那顆 Setup.exe）尚未實作，"
-    "因此 pack 目前無法在這個引擎下編譯安裝檔。\n"
-    "已經可以做的是產出 .msix 本身：改用 pack-msix 這個子指令。"
-    "那份 .msix 可以直接給 winget、企業側載或 App Installer 雙擊安裝使用。\n"
-    "設定的驗證已經跑完，上面若沒有其他訊息，代表這份設定是可用的。"
-)
 
 UNSUPPORTED = "unsupported"
 IMPOSSIBLE = "impossible"

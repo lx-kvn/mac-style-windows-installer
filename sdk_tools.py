@@ -20,7 +20,7 @@ Windows SDK 工具（`makeappx.exe`／`signtool.exe`）的定位與取得。
 2. **版本固定並驗證 SHA-256**——見 `PACKAGE_VERSION`／`PACKAGE_SHA256` 的
    維護說明。
 3. **快取為獨立且持久的使用者層級位置，路徑含版本號**——見 `cache_dir()`。
-4. **既有的 exe 簽章功能共用同一套取得機制**——`builder._sign_executable()`
+4. **既有的 exe 簽章功能共用同一套取得機制**——`builder._sign_file()`
    呼叫本模組的 `find_tool()`。
 5. **來源優先序依使用者表達意圖的明確程度排列**——見 `find_tool()`。
 

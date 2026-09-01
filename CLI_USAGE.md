@@ -93,9 +93,35 @@ python builder_cli.py pack-msix --config app.json [--output 路徑]
 
 這顆 `.msix` 本身就有用途：可以直接給 winget、企業側載、或讓使用者用App Installer 雙擊安裝。
 
-**注意 `pack` 目前還不能在 MSIX 引擎下用**——bootstrapper（內嵌 `.msix`並交給系統部署的那顆 `Setup.exe`）尚未實作。設定填 `msix` 去跑 `pack`會直接報錯並指向這個指令，不會默默產出一顆傳統安裝檔。
+**憑證就在本機時不必跑這個指令**——把憑證填進 `signing`，直接跑 `pack` 即可，工具會自己把「產出套件 → 簽章 → 編安裝檔」三步串完（見下一節）。這個指令服務的是憑證不在本機的情況。
 
 ---
+
+### MSIX 模式下的 `pack`：一體式與兩截式
+
+`install_engine` 是 `msix` 時，`pack` 依**憑證在不在本機**走兩條路。
+
+**憑證在本機（設定裡有 `signing`）——一體式，一個指令跑完：**
+
+```
+python builder_cli.py pack --config app.json
+```
+
+工具自己依序做完三件事：組裝並打包出 `.msix` → 用 `signing` 的憑證簽它 →把簽好的套件內嵌進 `Setup.exe`（那顆 exe 本身也會照舊被簽）。中間產物放在工作目錄底下，不放進 `dist/`——後者會在編 `Setup.exe` 之前被清空。
+
+**憑證不在本機（例如交給雲端代簽）——兩截式，中間讓開：**
+
+```
+python builder_cli.py pack-msix --config app.json --output app.msix
+（拿 app.msix 去簽，簽好之後）
+python builder_cli.py pack --config app.json --signed-msix app.msix
+```
+
+已簽章的 `.msix` 必須在編 `Setup.exe` 之前備妥（它是被塞進 exe 資源區塊的，塞進去之後要換成簽過章的版本等於整個重編一次），而簽章不一定當場完成——這個斷點消除不掉，只能把它擺在指令之間。
+
+帶了 `--signed-msix` 就一律走兩截式，即使設定裡有 `signing`：你已經自己簽好了，工具再簽一次等於覆寫你的簽章。
+
+設定是 `msix`、沒帶 `--signed-msix`、又沒有 `signing` 時，`pack` 會直接報錯並把上面兩截式的三個步驟印出來，不會默默產出一顆傳統安裝檔。
 
 ### `fetch-sdk-tools`：取得 Windows SDK 工具
 
@@ -103,8 +129,8 @@ python builder_cli.py pack-msix --config app.json [--output 路徑]
 python builder_cli.py fetch-sdk-tools [--cache-dir 目錄] [--force]
 ```
 
-`signing`（Setup.exe 的數位簽章）需要 `signtool`，未來的 MSIX 輸出還會
-需要 `makeappx`，兩者同屬 Windows SDK。**Windows SDK 安裝後不會把這些
+`signing`（`Setup.exe` 與 `.msix` 的數位簽章）需要 `signtool`，MSIX 輸出還
+需要 `makeappx` 與 `makepri`，三者同屬 Windows SDK。**Windows SDK 安裝後不會把這些
 工具加進 PATH**，而且也不需要為此安裝數 GB 的 SDK：這個子指令會下載一份
 固定版本的 `Microsoft.Windows.SDK.BuildTools` NuGet 套件（約 22 MB）、
 驗證 SHA-256、解壓到使用者層級的持久位置，之後打包流程自己找得到。解壓
@@ -136,7 +162,7 @@ Windows SDK**，依「你表達這個意圖有多明確」排列。建置過程�
 
 | JSON 鍵 | 對應 flag | 必填 | 說明 |
 |---|---|---|---|
-| `install_engine` | `--install-engine` | 否 | 安裝檔內部用哪一種方式把應用程式檔案落地：`traditional`（預設，目前唯一可用）由 `Setup.exe` 自己複製檔案、寫登錄表；`msix` 改交給 Windows 的套件引擎，由系統保證解除安裝乾淨。**MSIX 引擎尚未實作**，目前填 `msix` 只會跑完設定相容性檢查然後中止——這是刻意的，設定寫著 MSIX 卻默默產出一顆傳統安裝檔比直接報錯糟得多。兩者的差異與各自的代價見 `CONTEXT.md`「傳統引擎與 MSIX 引擎」一節 |
+| `install_engine` | `--install-engine` | 否 | 安裝檔內部用哪一種方式把應用程式檔案落地：`traditional`（預設，目前唯一可用）由 `Setup.exe` 自己複製檔案、寫登錄表；`msix` 改交給 Windows 的套件引擎，由系統保證解除安裝乾淨。填 `msix` 時 `pack` 的流程見上面「MSIX 模式下的 `pack`」一節。兩者的差異與各自的代價見 `CONTEXT.md`「傳統引擎與 MSIX 引擎」一節 |
 | `msix` | （只能透過 JSON） | MSIX 模式必填 | MSIX 專屬設定，`install_engine` 為 `traditional` 時完全不會被檢查。三個欄位：`identity_name`（套件身分名稱，**一經發布即不可變更**，改了系統會當成另一個不相關的應用程式並存安裝；3–50 個字元，只能用英文字母、數字、句點、連字號；不由 `app_name` 推導，見 `docs/adr/0007`）、`certificate_subject`（寫進套件清單的發行者，必須與簽章憑證上記載的名稱完全一致——不一致時系統直接拒絕安裝，而且錯誤訊息不會指向這個原因。**設定了 `signing` 且憑證讀得到時，留空即可，工具會自動填入並印出來**；填了但跟憑證對不上會在打包階段就報錯。雲端代簽這種憑證不在本機的情況才需要自己填。注意那個字串的形式不直覺——順序是反的、分隔符是逗號加空格、值裡有逗號時要用雙引號包起來，例如 `C=TW, CN="Foo, Inc."`）、`min_windows_version`（最低支援的 Windows 版本，留空即採 `10.0.17763.0`＝Windows 10 1809）、`icons`（三個位置的圖示個別覆蓋：`tile`／`taskbar`／`store`，留空即沿用 `png_icon` 同一張）。**MSIX 模式的圖示必須是正方形的 PNG**，共用那張邊長至少 150、個別覆蓋則各自至少 150／44／50——理由是顯示品質：小於宣告尺寸時 Windows 要放大它，而放大會明顯糊掉（縮小是安全的，所以大圖不受限制）。工具會實際讀圖片的尺寸，不是只看副檔名 |
 | `app_dir` | `--app-dir` | 是 | 應用程式內容資料夾 |
 | `png_icon` | `--png-icon` | 是 | 拖拽介面用的 PNG 圖示 |

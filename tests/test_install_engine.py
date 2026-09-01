@@ -258,13 +258,5 @@ class ListsEveryViolationTest(unittest.TestCase):
         self.assertEqual(report.error_message(), "")
 
 
-class NotYetImplementedTest(unittest.TestCase):
-    """MSIX 引擎本身尚未實作——設定通過檢查也不能默默編出傳統安裝檔。"""
-
-    def test_a_single_place_records_that_the_engine_is_unimplemented(self):
-        self.assertIsInstance(install_engine.MSIX_NOT_IMPLEMENTED, str)
-        self.assertTrue(install_engine.MSIX_NOT_IMPLEMENTED.strip())
-
-
 if __name__ == "__main__":
     unittest.main()

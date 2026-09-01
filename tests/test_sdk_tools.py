@@ -426,7 +426,7 @@ class SignExecutableUsesSharedLookupTest(TempDirTestCase):
             recorded["cmd"] = cmd
             return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
-        self.builder._sign_executable(
+        self.builder._sign_file(
             self.exe_path, self.signing,
             find_tool=lambda name: sdk_tools.ToolLocation(resolved, "manual", "", name),
             run=fake_run,
@@ -438,7 +438,7 @@ class SignExecutableUsesSharedLookupTest(TempDirTestCase):
             raise sdk_tools.SdkToolNotFound("找不到 signtool.exe，請執行 fetch-sdk-tools")
 
         with self.assertRaises(Exception) as ctx:
-            self.builder._sign_executable(self.exe_path, self.signing, find_tool=raising)
+            self.builder._sign_file(self.exe_path, self.signing, find_tool=raising)
         self.assertIn("fetch-sdk-tools", str(ctx.exception))
 
     def test_builder_no_longer_has_its_own_signtool_lookup(self):

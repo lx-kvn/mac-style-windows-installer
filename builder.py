@@ -124,8 +124,13 @@ def _download_file(url, dest_path, timeout=60, expected_sha256=None):
         raise
 
 
-def _sign_executable(exe_path, signing, find_tool=None, run=None, log=None):
-    """用 signtool 幫編譯出來的 exe 簽數位簽章（見 signing 設定欄位）。
+def _sign_file(target_path, signing, find_tool=None, run=None, log=None):
+    """用 signtool 幫產出的檔案簽數位簽章（見 signing 設定欄位）。
+
+    簽的對象有兩種：傳統引擎的 exe，以及 MSIX 引擎的 `.msix`。signtool 對
+    兩者的用法完全相同，因此不分成兩個函式——名稱不用 `_sign_executable`
+    是因為那個名字會讓人以為 `.msix` 需要另一條路徑，進而寫出第二份重複的
+    實作。
 
     這裡不負責生出憑證——那要跟憑證機構購買或用公司行號申請，這個函式做的
     只是「把簽章步驟接進打包流程」：憑證路徑/密碼來源都齊全時自動簽，找不到
@@ -161,7 +166,7 @@ def _sign_executable(exe_path, signing, find_tool=None, run=None, log=None):
             "/fd", "sha256",
             "/tr", signing["timestamp_url"],
             "/td", "sha256",
-            exe_path,
+            target_path,
         ],
         creationflags=creationflags, capture_output=True, text=True,
     )
@@ -169,7 +174,79 @@ def _sign_executable(exe_path, signing, find_tool=None, run=None, log=None):
         # 錯誤訊息不印密碼（signtool 本身的輸出也不會回顯密碼，這裡只是不
         # 額外把 password 變數帶進錯誤訊息，避免哪天有人手滑加進去）。
         tail = ((result.stdout or "") + "\n" + (result.stderr or ""))[-1000:]
-        raise Exception(f"簽署 {os.path.basename(exe_path)} 失敗：\n{tail}")
+        raise Exception(f"簽署 {os.path.basename(target_path)} 失敗：\n{tail}")
+
+
+MSIX_STAGING_DIRNAME = "msix_staging"
+
+
+def build_msix(app_dir, pack_data, png_path, output_path, workspace_dir,
+               doc_icon_path="", signing=None, sdk_tools_settings=None,
+               find_tool=None, run=None, log=None):
+    """把應用程式資料夾做成 `.msix`，回傳輸出路徑。
+
+    步驟固定為「組裝目錄 → makeappx 打包 →（憑證是本機檔案時）簽章」。
+
+    ## 為什麼簽章是這個函式的一部分，而不是呼叫端各自處理
+
+    第二輪決議第三項的流程存在一個不可消除的斷點：已簽章的 `.msix` 必須在
+    編 bootstrapper exe 之前備妥，而簽章可能由呼叫端的雲端代簽處理、不一定
+    即時完成。該決議因此以兩截式為骨架，並在其上留一條「一體式」便捷路徑
+    ——憑證是本機檔案時由工具自己把三步串完。
+
+    這裡用 `signing` 是否為 None 表達那個分歧，不另外設一個布林旗標：那種
+    旗標的意義會依賴另一個值（有旗標但沒憑證時要做什麼？），而呼叫端本來
+    就知道自己有沒有本機憑證。`signing` 為 None 時產物按定義是未簽章的
+    ——`pack-msix` 走的正是這一條，在那裡簽下去會讓雲端代簽失去容身之處。
+
+    ## 為什麼放在 builder.py 而不是 builder_cli.py
+
+    這條路徑 CLI 與 GUI 都要走得到。留在 CLI 裡的話 GUI 得再寫一份，而兩份
+    會分頭長歪成兩種行為。`gui_config.py` 與 `builder_cli.py` 都已經以
+    `build_all()` 為共同入口，這個函式與它並列。
+
+    find_tool／run 是測試接縫（比照 file_assoc.py 的 registry 參數）。
+    """
+    import msix_package
+
+    if find_tool is None:
+        def find_tool(name):
+            return sdk_tools.find_tool(name, settings=sdk_tools_settings)
+
+    msix = pack_data.get("msix") or {}
+    staging_dir = os.path.join(workspace_dir, MSIX_STAGING_DIRNAME)
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    msix_package.stage(
+        app_dir=app_dir,
+        staging_dir=staging_dir,
+        png_icon=png_path,
+        identity_name=msix["identity_name"],
+        certificate_subject=msix["certificate_subject"],
+        version=msix["package_version"],
+        app_name=pack_data["app_name"],
+        publisher=pack_data["publisher"],
+        main_exe=pack_data["main_exe"],
+        doc_icon=doc_icon_path,
+        doc_icons=pack_data.get("doc_icons") or {},
+        file_associations=pack_data.get("file_associations") or [],
+        add_to_path=pack_data.get("add_to_path", False),
+        path_target_exe=pack_data.get("path_target_exe", ""),
+        min_windows_version=msix.get("min_windows_version"),
+        icons=msix.get("icons") or {},
+    )
+    packed = msix_package.pack(
+        staging_dir, output_path, find_tool=find_tool, run=run, log=log)
+
+    if signing:
+        # 簽不成不回傳一份未簽章的套件：呼叫端會把它內嵌進安裝檔，而那份
+        # 安裝檔要到終端使用者手上才會失敗（未簽章的套件無法部署）。
+        if log:
+            log("正在簽署套件...")
+        _sign_file(packed, signing, find_tool=find_tool, run=run, log=log)
+    return packed
 
 
 def build_all(
@@ -588,11 +665,11 @@ def build_all(
 
         # log 只掛在第一次呼叫：兩次簽的是同一支 signtool，來源那行印兩次
         # 只是重複。
-        _sign_executable(
+        _sign_file(
             dist_installer, signing, find_tool=locate_signtool,
             log=lambda message: report(99, message, cap=99, time_constant=2),
         )
         if built_uninstall:
-            _sign_executable(built_uninstall, signing, find_tool=locate_signtool)
+            _sign_file(built_uninstall, signing, find_tool=locate_signtool)
 
     report(100, f"編譯完成，輸出位置：{dist_installer}", cap=100, time_constant=1)

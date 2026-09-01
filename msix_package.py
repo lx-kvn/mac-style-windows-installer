@@ -9,7 +9,7 @@ msix_package.py
   資源來源檔。不呼叫任何外部工具，因此可以完整地單元測試。
 - **`pack()`** 呼叫 `makepri`／`makeappx`。工具的檢索與子行程的執行都是
   可注入的參數（`find_tool`／`run`），比照 `file_assoc.py` 的 registry
-  seam 與 `builder._sign_executable()` 的作法，測試不需要真的有 SDK 工具。
+  seam 與 `builder._sign_file()` 的作法，測試不需要真的有 SDK 工具。
 
 這個拆法也對應第二輪決議第三項的兩截式流程：`stage()` 與 `pack()` 一起
 構成「產出未簽章的 `.msix`」這個步驟，簽章由呼叫端處理，之後才是編

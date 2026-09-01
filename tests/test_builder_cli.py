@@ -269,10 +269,6 @@ class TestCmdPack(unittest.TestCase):
         mock_build.assert_not_called()
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
-
 class TestFetchSdkToolsCommand(unittest.TestCase):
     """`fetch-sdk-tools` 子指令（ADR-0008 決定一：明確要求才下載）。
 
@@ -507,11 +503,206 @@ class TestPackMsixCommand(unittest.TestCase):
         self.assertEqual(stage.call_count, 0)
 
 
-class TestPackRefusesMsixEngine(unittest.TestCase):
-    """`pack` 編的是 bootstrapper exe，那一塊尚未實作。"""
+class TestPackOneShotMsix(unittest.TestCase):
+    """`pack` 在 MSIX 模式下的「一體式」便捷路徑（第二輪決議第三項）。
 
-    def test_the_message_points_at_pack_msix(self):
-        parser = builder_cli.build_arg_parser()
-        args = parser.parse_args(["pack", "--app-dir", "x"])
-        self.assertTrue(hasattr(args, "signed_msix"),
-                        "pack 應該有 --signed-msix 這個旗標（第九輪定案的兩截式第二步）")
+    該決議以兩截式為骨架，並在其上留一條便捷路徑：憑證是本機檔案時，由
+    工具自己把三個步驟串完。這一段先前只做了骨架，因此即使憑證就在本機、
+    工具明明串得起來，也照樣要求使用者手動跑三步。
+
+    判斷依據是設定裡有沒有 `signing`：這個專案的 `signing.cert_path` 一律
+    是本機 `.pfx`（`packaging_core` 會驗證它實際存在），因此「有 signing」
+    與「憑證是本機檔案」是同一件事，不需要使用者再多選一個模式。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.app_dir = os.path.join(self.tmp, "app")
+        os.makedirs(self.app_dir)
+        for name in ("main.exe", "icon.ico"):
+            with open(os.path.join(self.app_dir, name), "wb") as f:
+                f.write(b"x")
+        write_test_png(os.path.join(self.app_dir, "icon.png"))
+        self.cert = os.path.join(self.tmp, "cert.pfx")
+        with open(self.cert, "wb") as f:
+            f.write(b"fake pfx")
+        os.environ["TEST_ONESHOT_PW"] = "hunter2"
+        self.addCleanup(os.environ.pop, "TEST_ONESHOT_PW", None)
+        self.workspace = os.path.join(self.tmp, "ws")
+        os.makedirs(self.workspace)
+        self.config = os.path.join(self.tmp, "cfg.json")
+
+    def _write_config(self, **overrides):
+        data = {
+            "install_engine": "msix",
+            "app_dir": self.app_dir,
+            "png_icon": os.path.join(self.app_dir, "icon.png"),
+            "ico_icon": os.path.join(self.app_dir, "icon.ico"),
+            "app_name": "DemoApp",
+            "version": "1.0.0",
+            "publisher": "Demo",
+            "exe_name": "Setup_DemoApp",
+            "main_exe": "main.exe",
+            "no_admin_install": True,
+            "msix": {
+                "identity_name": "MyCompany.DemoApp",
+                "certificate_subject": "CN=Demo",
+            },
+        }
+        data.update(overrides)
+        with open(self.config, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        return self.config
+
+    def _signing(self):
+        return {
+            "cert_path": self.cert,
+            "cert_password_env": "TEST_ONESHOT_PW",
+            "timestamp_url": "http://timestamp.example/ts",
+        }
+
+    def _run(self, argv, **patches):
+        ready_env = {
+            "pyinstaller_found": True, "python_found": True, "python_path": "python",
+            "webview_found": True, "pywin32_found": True, "ready": True,
+        }
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch("builder_cli.packaging_core.check_build_environment",
+                           return_value=ready_env), \
+                mock.patch("builder_cli.packaging_core.ensure_workspace_files",
+                           return_value=None), \
+                mock.patch("builder_cli.builder.build_all") as build_all, \
+                mock.patch("builder_cli.builder.build_msix",
+                           **patches) as build_msix:
+            code = builder_cli.main(argv + ["--workspace-dir", self.workspace])
+        return code, out.getvalue() + err.getvalue(), build_msix, build_all
+
+    def test_without_a_local_certificate_the_two_stage_flow_is_explained(self):
+        """憑證不在本機（例如雲端代簽）時，那個斷點無法消除，只能說清楚。"""
+        self._write_config()
+        code, output, build_msix, build_all = self._run(["pack", "--config", self.config])
+        self.assertEqual(code, 1)
+        self.assertIn("pack-msix", output)
+        build_msix.assert_not_called()
+        build_all.assert_not_called()
+
+    def test_with_a_local_certificate_the_three_steps_are_chained(self):
+        self._write_config(signing=self._signing())
+        packed = os.path.join(self.workspace, "MyCompany.DemoApp.msix")
+        code, output, build_msix, build_all = self._run(
+            ["pack", "--config", self.config], return_value=packed)
+        self.assertEqual(code, 0, output)
+        build_msix.assert_called_once()
+        self.assertEqual(build_all.call_args.kwargs["signed_msix"], packed)
+
+    def test_the_package_is_signed_during_the_chained_run(self):
+        """一體式的重點就在這裡：`signing` 要傳下去，不然串起來的是一份
+        未簽章的套件，而未簽章的套件裝不起來。"""
+        self._write_config(signing=self._signing())
+        _, _, build_msix, _ = self._run(
+            ["pack", "--config", self.config],
+            return_value=os.path.join(self.workspace, "p.msix"))
+        self.assertEqual(build_msix.call_args.kwargs["signing"]["cert_path"], self.cert)
+
+    def test_the_intermediate_package_is_not_left_inside_dist(self):
+        """`dist/` 會在編 bootstrapper exe 之前被清空，中間產物放在那裡會
+        在被內嵌之前就消失（這個坑實際踩過一次）。"""
+        self._write_config(signing=self._signing())
+        _, _, build_msix, _ = self._run(
+            ["pack", "--config", self.config],
+            return_value=os.path.join(self.workspace, "p.msix"))
+        output_path = build_msix.call_args.kwargs["output_path"]
+        dist = os.path.join(os.path.abspath(self.workspace), "dist")
+        self.assertFalse(os.path.abspath(output_path).startswith(dist + os.sep),
+                         f"中間產物放在會被清空的 dist/ 底下：{output_path}")
+
+    def test_an_explicitly_supplied_package_skips_the_chained_run(self):
+        """使用者已經自己簽好了，重簽一次等於覆寫他的簽章。"""
+        self._write_config(signing=self._signing())
+        supplied = os.path.join(self.tmp, "signed.msix")
+        with open(supplied, "wb") as f:
+            f.write(b"PK signed")
+        code, output, build_msix, build_all = self._run(
+            ["pack", "--config", self.config, "--signed-msix", supplied])
+        self.assertEqual(code, 0, output)
+        build_msix.assert_not_called()
+        self.assertEqual(build_all.call_args.kwargs["signed_msix"], supplied)
+
+    def test_a_failure_while_building_the_package_stops_before_build_all(self):
+        self._write_config(signing=self._signing())
+        code, output, _, build_all = self._run(
+            ["pack", "--config", self.config],
+            side_effect=Exception("makeappx 掛了"))
+        self.assertEqual(code, 1)
+        self.assertIn("makeappx 掛了", output)
+        build_all.assert_not_called()
+
+    def test_the_traditional_engine_never_takes_this_path(self):
+        self._write_config(install_engine="traditional", signing=self._signing())
+        code, output, build_msix, build_all = self._run(["pack", "--config", self.config])
+        self.assertEqual(code, 0, output)
+        build_msix.assert_not_called()
+        self.assertEqual(build_all.call_args.kwargs["signed_msix"], "")
+
+
+class TestPackMsixStaysUnsigned(unittest.TestCase):
+    """`pack-msix` 的產物按定義是未簽章的，即使設定裡有本機憑證。
+
+    在那裡順手簽下去會讓雲端代簽的情境失去容身之處：使用者跑這個指令，
+    要的就是一份還沒簽的套件，好拿去交給代簽服務。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.app_dir = os.path.join(self.tmp, "app")
+        os.makedirs(self.app_dir)
+        for name in ("main.exe", "icon.ico"):
+            with open(os.path.join(self.app_dir, name), "wb") as f:
+                f.write(b"x")
+        write_test_png(os.path.join(self.app_dir, "icon.png"))
+        cert = os.path.join(self.tmp, "cert.pfx")
+        with open(cert, "wb") as f:
+            f.write(b"fake pfx")
+        os.environ["TEST_UNSIGNED_PW"] = "pw"
+        self.addCleanup(os.environ.pop, "TEST_UNSIGNED_PW", None)
+        self.config = os.path.join(self.tmp, "cfg.json")
+        with open(self.config, "w", encoding="utf-8") as f:
+            json.dump({
+                "install_engine": "msix",
+                "app_dir": self.app_dir,
+                "png_icon": os.path.join(self.app_dir, "icon.png"),
+                "ico_icon": os.path.join(self.app_dir, "icon.ico"),
+                "app_name": "DemoApp",
+                "version": "1.0.0",
+                "publisher": "Demo",
+                "exe_name": "Setup_DemoApp",
+                "main_exe": "main.exe",
+                "no_admin_install": True,
+                "signing": {
+                    "cert_path": cert,
+                    "cert_password_env": "TEST_UNSIGNED_PW",
+                    "timestamp_url": "http://timestamp.example/ts",
+                },
+                "msix": {
+                    "identity_name": "MyCompany.DemoApp",
+                    "certificate_subject": "CN=Demo",
+                },
+            }, f)
+
+    def test_it_never_signs_even_when_a_local_certificate_is_configured(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch("builder_cli.builder.build_msix",
+                           return_value="p.msix") as build_msix:
+            code = builder_cli.main([
+                "pack-msix", "--config", self.config,
+                "--workspace-dir", os.path.join(self.tmp, "ws")])
+        self.assertEqual(code, 0, out.getvalue() + err.getvalue())
+        self.assertIsNone(build_msix.call_args.kwargs["signing"])
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
