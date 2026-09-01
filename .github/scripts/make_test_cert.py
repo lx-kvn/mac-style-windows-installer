@@ -1,8 +1,8 @@
 """為 CI 探針產生一張自簽的程式碼簽章憑證，並印出套件清單該填的發行者。
 
-只在 `.github/workflows/spike-msix-deployment.yml` 使用。憑證的定位是開發與
-測試手段，不是散布方案（`docs/proposals/MSIX輸出規劃.md` 第二輪決議第一項），
-且只存在於用完即丟的 runner 上。
+供 `.github/workflows/test-packaging-options.yml` 的 MSIX 引擎驗證使用。
+憑證的定位是開發與測試手段，不是散布方案（`docs/proposals/MSIX輸出規劃.md`
+第二輪決議第一項），且只存在於用完即丟的 runner 上。
 
 發行者字串刻意透過本專案自己的 `cert_subject.py` 取得，而不是在這裡另外
 組一份——那個字串的形式並不直覺（順序、分隔符、引號規則，見該模組說明），

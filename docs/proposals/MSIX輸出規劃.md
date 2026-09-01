@@ -1455,6 +1455,13 @@ spike 驗證（見「已完成之待辦」）。以下為仍待解決者：
 
 ## 已完成之待辦
 
+- MSIX 引擎的端到端驗證併入 `test-packaging-options.yml`（新的
+  `test-msix-engine` job），一次性探針 `spike-msix-deployment.yml` 與
+  `msix_deployment_probe.py` 一併刪除。探針問的是「這條路走不走得通」，
+  八個問題都已有答案；引擎完成後需要的是「這條路現在還走得通嗎」，那要
+  跟著改動一起跑。新的 job 走一體式打包、靜默安裝、以 `Get-AppxPackage`
+  確認套件真的被系統接收（含發行者是否由憑證自動填入、版本是否正規化成
+  四段），再移除並確認清乾淨。
 - 第四類（不擋建置、只需說明的項目）的說明接上接收端：`pack` 經由
   `build_all()` 的 progress_callback 送進建置紀錄，`pack-msix` 由該指令
   自行印出（它走的是 `build_msix`，不經過 `build_all`）。原本兩者都沒有
@@ -1640,8 +1647,6 @@ spike 驗證（見「已完成之待辦」）。以下為仍待解決者：
 
 ## 待辦事項
 
-1. 引擎完成後把真正的 MSIX 驗證併回 `test-packaging-options.yml`，並刪除
-   `.github/workflows/spike-msix-deployment.yml`（它是一次性探針）。
 2. 於使用說明書（GUI 端）記載新的版面結構：四個可收合的大區、自動展開
    的三種情形、以及不相容設定的三種呈現方式。
 3. 於使用說明書（GUI 端）記載 MSIX 模式的使用方式、兩種引擎的差異、

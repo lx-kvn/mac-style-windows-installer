@@ -222,3 +222,165 @@ jobs:
           name: test-packaging-options-logs
           path: logs\
           if-no-files-found: warn
+
+  # MSIX 引擎的同一件事：實際打包一顆 MSIX 模式的 Setup.exe、靜默安裝到這台
+  # 用完即丟的 runner 上、確認套件真的被 Windows 的套件引擎接收，再移除、
+  # 確認清乾淨。
+  #
+  # 這個 job 取代了先前的一次性探針 workflow（spike-msix-deployment.yml）。
+  # 探針問的是「這條路走不走得通」，八個問題都已經有答案；引擎實作完成之後
+  # 需要的是「這條路現在還走得通嗎」——後者要跟著每次改動一起跑，因此併進
+  # 這個 workflow，與傳統引擎的驗證放在一起。
+  test-msix-engine:
+    runs-on: windows-latest
+
+    env:
+      PYTHONUTF8: "1"
+      # 憑證只存在於這台用完即丟的 runner 上，且僅供本次驗證使用；它不是
+      # 散布方案（第二輪決議第一項：自簽憑證的定位是開發與測試手段）。
+      MSWI_CI_CERT_PASSWORD: "mswi-ci-msix"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # winrt-* 的版本固定：安裝端要靠它們呼叫 Windows 的部署 API，而
+      # PyInstaller 是靜態分析，版本組合換掉可能導致打包出來的 exe 少帶模組。
+      - name: 安裝相依
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller pywebview pywin32 cryptography
+          pip install winrt-runtime==3.2.1 winrt-Windows.Management.Deployment==3.2.1 winrt-Windows.Foundation==3.2.1 winrt-Windows.Foundation.Collections==3.2.1 winrt-Windows.ApplicationModel==3.2.1
+
+      # 吃自己的狗糧：SDK 工具用本專案的 fetch-sdk-tools 取得，等於一併驗證
+      # ADR-0008 的取得流程在乾淨機器上仍然可用。
+      - name: 取得 SDK 工具（makeappx／makepri／signtool）
+        run: python builder_cli.py fetch-sdk-tools
+
+      - name: 產生自簽測試憑證並讓這台機器信任它
+        shell: pwsh
+        run: |
+          python .github\scripts\make_test_cert.py `
+            --pfx ci.pfx --cer ci.cer `
+            --password "$env:MSWI_CI_CERT_PASSWORD" `
+            --common-name "MSWI CI MSIX" `
+            --publisher-out publisher.txt
+          # 未受信任的套件無法部署，這一步是必要的前置，不是在驗證信任機制。
+          Import-Certificate -FilePath ci.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople | Out-Null
+          Import-Certificate -FilePath ci.cer -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+          Write-Host "發行者字串：$(Get-Content publisher.txt -Raw)"
+
+      - name: 準備測試用的 app_dir
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force app_dir | Out-Null
+          Copy-Item "$env:WINDIR\System32\notepad.exe" app_dir\MswiCiMsix.exe
+          Set-Content -Path app_dir\readme.txt -Value "ci payload" -Encoding UTF8
+          python .github\scripts\make_ci_icons.py --png icon.png --ico icon.ico
+
+      # certificate_subject 留空：驗證「工具會從憑證自動填入」這條路徑，
+      # 那個字串的形式並不直覺（順序、分隔符、引號規則，見 cert_subject.py），
+      # 讓 CI 自己填一份等於驗不到產品程式碼算得對不對。
+      - name: 產生 MSIX 模式的設定檔
+        shell: pwsh
+        run: |
+          $config = @{
+            install_engine = "msix"
+            app_dir        = (Resolve-Path app_dir).Path
+            png_icon       = (Resolve-Path icon.png).Path
+            ico_icon       = (Resolve-Path icon.ico).Path
+            app_name       = "MSWI CI MSIX"
+            version        = "1.2.3"
+            publisher      = "MSWI CI"
+            exe_name       = "Setup_MswiCiMsix"
+            main_exe       = "MswiCiMsix.exe"
+            no_admin_install = $true
+            file_associations = ".mswicimsix"
+            signing = @{
+              cert_path         = (Resolve-Path ci.pfx).Path
+              cert_password_env = "MSWI_CI_CERT_PASSWORD"
+              timestamp_url     = "http://timestamp.digicert.com"
+            }
+            msix = @{
+              identity_name       = "MswiCi.MsixEngineTest"
+              certificate_subject = ""
+            }
+          }
+          $config | ConvertTo-Json -Depth 6 | Set-Content -Path msix_config.json -Encoding UTF8
+          Get-Content msix_config.json
+
+      # 憑證在本機，因此走的是一體式路徑：一個指令從組裝套件、簽章、到編出
+      # 內嵌它的 Setup.exe（第十三輪決議第一項）。
+      - name: 一體式打包（產出已簽章的 .msix 並內嵌進 Setup.exe）
+        run: python builder_cli.py pack --config msix_config.json
+
+      - name: 確認產出物的形狀
+        shell: pwsh
+        run: |
+          $failures = @()
+          if (-not (Test-Path "dist\Setup_MswiCiMsix.exe")) { $failures += "沒有產出 Setup.exe" }
+          # MSIX 模式不編 uninstall.exe（ADR-0006：解除安裝由系統接管）。
+          if (Test-Path "dist\uninstall.exe") { $failures += "MSIX 模式不該產出 uninstall.exe" }
+          $msix = Get-ChildItem -Filter "*.msix" | Select-Object -First 1
+          if (-not $msix) { $failures += "找不到中間產物 .msix" }
+          if ($failures.Count -gt 0) { throw ($failures -join "`n") }
+          Write-Host "Setup.exe 大小：$((Get-Item 'dist\Setup_MswiCiMsix.exe').Length) bytes"
+
+      - name: 靜默安裝
+        shell: pwsh
+        run: |
+          $proc = Start-Process -FilePath "dist\Setup_MswiCiMsix.exe" -ArgumentList "/S", "/LOG=$PWD\msix_silent_install.log" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+            throw "靜默安裝回報失敗，exit code = $($proc.ExitCode)"
+          }
+
+      - name: 驗證套件真的被系統接收
+        shell: pwsh
+        run: |
+          $failures = @()
+          $pkg = Get-AppxPackage -Name "MswiCi.MsixEngineTest" -ErrorAction SilentlyContinue
+          if (-not $pkg) {
+            $failures += "Get-AppxPackage 找不到這個套件——部署沒有真的發生"
+          } else {
+            Write-Host "PackageFullName : $($pkg.PackageFullName)"
+            Write-Host "InstallLocation : $($pkg.InstallLocation)"
+            Write-Host "Publisher       : $($pkg.Publisher)"
+            # 版本號要被正規化成四段（MSIX 的要求，見 msix_settings.to_quad_version）
+            if ($pkg.Version -ne "1.2.3.0") { $failures += "版本號是 $($pkg.Version)，預期 1.2.3.0" }
+            # 發行者必須與憑證一致，否則系統根本不會收——這裡再確認一次是為了
+            # 讓「自動從憑證填入」那條路徑失效時，錯誤指向正確的原因。
+            $expected = (Get-Content publisher.txt -Raw).Trim()
+            if ($pkg.Publisher -ne $expected) {
+              $failures += "發行者是 $($pkg.Publisher)，憑證上是 $expected"
+            }
+            if (-not (Test-Path $pkg.InstallLocation)) { $failures += "安裝位置不存在" }
+            if (-not (Test-Path (Join-Path $pkg.InstallLocation "MswiCiMsix.exe"))) {
+              $failures += "套件裡沒有主執行檔"
+            }
+          }
+          if ($failures.Count -gt 0) { throw ($failures -join "`n") }
+          Write-Host "套件已由 Windows 的套件引擎接收。"
+
+      # MSIX 模式沒有自訂的解除安裝介面（ADR-0006），移除由系統負責。
+      - name: 移除套件並確認清乾淨
+        shell: pwsh
+        run: |
+          $pkg = Get-AppxPackage -Name "MswiCi.MsixEngineTest"
+          Remove-AppxPackage -Package $pkg.PackageFullName
+          Start-Sleep -Seconds 2
+          $still = Get-AppxPackage -Name "MswiCi.MsixEngineTest" -ErrorAction SilentlyContinue
+          if ($still) { throw "移除之後套件還在：$($still.PackageFullName)" }
+          Write-Host "已移除，且系統中不再有這個套件。"
+
+      - name: 上傳安裝紀錄（不管成功失敗都上傳，方便事後排查）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: msix-engine-logs
+          path: msix_silent_install.log
+          if-no-files-found: ignore
