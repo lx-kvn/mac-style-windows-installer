@@ -251,3 +251,51 @@ class CertificateSubjectAutoFillTest(unittest.TestCase):
         )
         self.assertIsNone(error)
         self.assertEqual(normalized["certificate_subject"], "CN=Whatever")
+
+
+class IconOverrideTest(unittest.TestCase):
+    """第五輪決議第一項：預設沿用 png_icon，另提供欄位供個別指定。
+
+    三個位置的宣告尺寸不同（磚塊 150、工作列 44、商店 50），因此各自的
+    最小邊長也不同——共用那張要滿足最大的 150，個別覆蓋只需要滿足自己
+    那個位置。用同一個門檻會把一張完全夠用的 44×44 工作列圖示擋下來。
+    """
+
+    def test_the_three_positions_are_named_and_sized(self):
+        self.assertEqual(
+            set(msix_settings.ICON_MINIMUM_SIZES), {"tile", "taskbar", "store"})
+        self.assertEqual(msix_settings.ICON_MINIMUM_SIZES["tile"], 150)
+        self.assertEqual(msix_settings.ICON_MINIMUM_SIZES["taskbar"], 44)
+        self.assertEqual(msix_settings.ICON_MINIMUM_SIZES["store"], 50)
+
+    def test_the_shared_icon_must_satisfy_the_largest_position(self):
+        """沒有個別覆蓋時，同一張圖要同時填三個位置，因此要滿足最大的那個。"""
+        self.assertEqual(msix_settings.SHARED_ICON_MINIMUM,
+                         max(msix_settings.ICON_MINIMUM_SIZES.values()))
+
+    def test_an_unknown_icon_position_is_rejected(self):
+        _, error = msix_settings.validate({
+            "identity_name": "A.B", "certificate_subject": "CN=X",
+            "icons": {"banner": "x.png"},
+        })
+        self.assertIsNotNone(error)
+        self.assertIn("banner", error)
+
+    def test_the_known_positions_are_accepted(self):
+        normalized, error = msix_settings.validate({
+            "identity_name": "A.B", "certificate_subject": "CN=X",
+            "icons": {"tile": "t.png", "taskbar": "s.png", "store": "st.png"},
+        })
+        self.assertIsNone(error)
+        self.assertEqual(set(normalized["icons"]), {"tile", "taskbar", "store"})
+
+    def test_icons_default_to_empty(self):
+        normalized, error = msix_settings.validate({
+            "identity_name": "A.B", "certificate_subject": "CN=X"})
+        self.assertIsNone(error)
+        self.assertEqual(normalized["icons"], {})
+
+    def test_a_non_dict_icons_block_is_rejected(self):
+        _, error = msix_settings.validate({
+            "identity_name": "A.B", "certificate_subject": "CN=X", "icons": "x.png"})
+        self.assertIsNotNone(error)

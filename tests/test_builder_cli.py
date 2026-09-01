@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import builder_cli
 import msix_package
 import sdk_tools
+from _fakes import write_test_png
 
 
 class TestCmdInit(unittest.TestCase):
@@ -414,9 +415,11 @@ class TestPackMsixCommand(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.app_dir = os.path.join(self.tmp, "app")
         os.makedirs(self.app_dir)
-        for name in ("main.exe", "icon.png", "icon.ico"):
+        for name in ("main.exe", "icon.ico"):
             with open(os.path.join(self.app_dir, name), "wb") as f:
                 f.write(b"x")
+        # 真的 PNG：MSIX 模式會實際讀尺寸（見 png_size.py）。
+        write_test_png(os.path.join(self.app_dir, "icon.png"))
         self.config = os.path.join(self.tmp, "cfg.json")
 
     def _write_config(self, **overrides):

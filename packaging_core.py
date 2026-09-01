@@ -27,6 +27,7 @@ import dependency_defs
 import cert_subject
 import install_engine
 import msix_settings
+import png_size
 import windows_service
 
 # installer_core.py/uninstall.py 這兩支 entry point 實際 import 的專案內部
@@ -477,6 +478,32 @@ def _validate_version_string(version):
     return None
 
 
+def _msix_icon_problems(png_path, icon_overrides):
+    """檢查 MSIX 模式要用的圖示尺寸，回傳問題訊息的清單。
+
+    共用的那張（`png_icon`）要同時填三個位置，因此要滿足最大的那個
+    尺寸；個別覆蓋只需要滿足自己那個位置——用同一個門檻會把一張
+    完全夠用的 44×44 工作列圖示擋下來。
+
+    兩項檢查的理由是顯示品質，不是部署可行性：第十一輪 CI 探針已確認
+    尺寸與宣告不符不會被系統拒絕部署。
+    """
+    problems = []
+    overrides = icon_overrides or {}
+    # 三個位置都被個別覆蓋時，共用的那張不會被用到，也就不需要檢查它。
+    if set(overrides) != set(msix_settings.ICON_MINIMUM_SIZES):
+        problem = png_size.describe_problem(
+            png_path, minimum=msix_settings.SHARED_ICON_MINIMUM)
+        if problem:
+            problems.append(f"png_icon：{problem}")
+    for position, path in overrides.items():
+        problem = png_size.describe_problem(
+            path, minimum=msix_settings.ICON_MINIMUM_SIZES[position])
+        if problem:
+            problems.append(f"msix.icons.{position}：{problem}")
+    return problems
+
+
 def _read_signing_cert_subject(signing, reader=None):
     """簽章憑證讀得到的話，回傳它的發行者字串，否則回傳 None。
 
@@ -829,6 +856,10 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
             package_version = msix_settings.to_quad_version(version)
         except msix_settings.InvalidVersion as e:
             problems.append(str(e))
+        # 圖示的尺寸檢查放在這裡而不是 msix_settings：那個模組拿到的是
+        # 設定值、不保證路徑相對於什麼，讀檔案是這一層才知道怎麼做的事。
+        problems.extend(_msix_icon_problems(png_path, (msix_normalized or {}).get("icons")))
+
         if problems:
             return None, "欄位驗證失敗：<br>" + "<br>".join(problems)
         # 「引擎尚未實作」這道攔截不在這裡：它擋的是 bootstrapper（內嵌

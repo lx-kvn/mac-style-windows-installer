@@ -110,3 +110,36 @@ class _FakeKeyCtx:
 
     def __exit__(self, *a):
         return False
+
+
+def write_test_png(path, width=256, height=256):
+    """寫一張真的 PNG 到指定路徑，回傳該路徑。
+
+    測試資料原本多半是 `b"fake"` 之類的位元組——副檔名對、內容不對。那在
+    只檢查副檔名的年代沒問題，但 MSIX 模式會實際讀圖片的尺寸（正方形、
+    邊長下限，見 png_size.py），假內容會被正確地擋下來。與其在每個測試各自
+    造一張，共用這一個。
+
+    不引進 Pillow：PNG 的最小合法結構就是簽章加三個區塊，用標準函式庫寫得出來，
+    而本專案刻意不帶影像處理相依（第五輪決議第一項）。
+    """
+    import os
+    import struct
+    import zlib
+
+    raw = b"".join(b"\x00" + b"\x00\x00\x00\xff" * width for _ in range(height))
+
+    def chunk(tag, data):
+        body = tag + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
+
+    blob = (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 1))
+            + chunk(b"IEND", b""))
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(blob)
+    return path

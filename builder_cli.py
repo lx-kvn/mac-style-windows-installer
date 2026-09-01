@@ -52,6 +52,9 @@ TEMPLATE = {
         "identity_name": "YourCompany.YourApp",
         "certificate_subject": "CN=Your Company, O=Your Company, C=TW",
         "min_windows_version": "",
+        # icons：三個位置的圖示個別覆蓋，留空即沿用 png_icon 同一張
+        # （第五輪決議第一項）。都必須是正方形的 PNG。
+        "icons": {"tile": "", "taskbar": "", "store": ""},
     },
     "app_dir": "C:\\path\\to\\your\\app\\folder",
     "png_icon": "C:\\path\\to\\drag_icon.png",
@@ -293,6 +296,7 @@ def cmd_pack_msix(args):
             add_to_path=pack_data.get("add_to_path", False),
             path_target_exe=pack_data.get("path_target_exe", ""),
             min_windows_version=msix.get("min_windows_version"),
+            icons=msix.get("icons") or {},
         )
         msix_package.pack(staging_dir, output, find_tool=find_tool, log=print)
     except Exception as e:

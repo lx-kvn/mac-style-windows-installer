@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import cert_subject
 import install_engine
 import packaging_core
+from _fakes import write_test_png
 
 
 class TestDefaultWorkspaceDir(unittest.TestCase):
@@ -281,6 +282,9 @@ class PackDataValidationTestBase(unittest.TestCase):
         self.app_dir = tempfile.mkdtemp()
         with open(os.path.join(self.app_dir, "main.exe"), "wb") as f:
             f.write(b"fake")
+        # 真的 PNG：MSIX 模式會實際讀尺寸（見 png_size.py），假內容
+        # 會被正確地擋下來。傳統模式不看尺寸，用真的也無妨。
+        self.default_png = write_test_png(os.path.join(self.app_dir, "_icon.png"))
 
     def tearDown(self):
         shutil.rmtree(self.app_dir, ignore_errors=True)
@@ -306,8 +310,8 @@ class PackDataValidationTestBase(unittest.TestCase):
         data.update(overrides)
         return data
 
-    def _validate(self, data, png_path="fake.png", ico_path="fake.ico", doc_icon_path_selected=""):
-        return packaging_core.validate_and_build_pack_data(data, self.app_dir, png_path, ico_path, doc_icon_path_selected)
+    def _validate(self, data, png_path=None, ico_path="fake.ico", doc_icon_path_selected=""):
+        return packaging_core.validate_and_build_pack_data(data, self.app_dir, png_path or self.default_png, ico_path, doc_icon_path_selected)
 
 
 class TestValidateAndBuildPackData(PackDataValidationTestBase):
@@ -1441,7 +1445,7 @@ class TestCertificateSubjectIsReadWhenAvailable(PackDataValidationTestBase):
 
     def _validate_with_reader(self, data, reader):
         return packaging_core.validate_and_build_pack_data(
-            data, self.app_dir, "fake.png", "fake.ico", "",
+            data, self.app_dir, self.default_png, "fake.ico", "",
             read_cert_subject=reader,
         )
 
@@ -1547,3 +1551,88 @@ class TestMsixDocIconFormat(PackDataValidationTestBase):
         data = self._data(doc_icons={".demo": self.png})
         _, error = self._validate(data, doc_icon_path_selected=self.png)
         self.assertIsNone(error)
+
+
+class TestMsixIconDimensions(PackDataValidationTestBase):
+    """第五輪決議第一項的兩項檢查：正方形、邊長不小於宣告的尺寸。
+
+    第十一輪 CI 探針確認尺寸不符不會被系統拒絕部署，因此這兩項檢查的理由
+    是顯示品質而非部署可行性——訊息要照這個講。
+    """
+
+    def setUp(self):
+        super().setUp()
+        import png_size  # noqa: F401  確認模組存在
+        self.big = self._png("big.png", 256, 256)
+        self.small = self._png("small.png", 64, 64)
+        self.wide = self._png("wide.png", 256, 128)
+        self.tiny_ok_for_taskbar = self._png("t44.png", 44, 44)
+
+    def _png(self, name, w, h):
+        import struct
+        import zlib
+        raw = b"".join(b"\x00" + b"\x00\x00\x00\xff" * w for _ in range(h))
+
+        def chunk(tag, data):
+            body = tag + data
+            return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
+
+        blob = (b"\x89PNG\r\n\x1a\n"
+                + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+                + chunk(b"IDAT", zlib.compress(raw, 1)) + chunk(b"IEND", b""))
+        path = os.path.join(self.app_dir, name)
+        with open(path, "wb") as f:
+            f.write(blob)
+        return path
+
+    def _data(self, **overrides):
+        data = self._base_data(
+            install_engine="msix", no_admin_install=True,
+            msix={"identity_name": "MyCompany.DemoApp", "certificate_subject": "CN=Demo"},
+        )
+        data.update(overrides)
+        return data
+
+    def test_a_large_square_shared_icon_passes(self):
+        _, error = self._validate(self._data(), png_path=self.big)
+        self.assertIsNone(error)
+
+    def test_a_small_shared_icon_is_rejected(self):
+        _, error = self._validate(self._data(), png_path=self.small)
+        self.assertIsNotNone(error)
+        self.assertIn("150", error)
+
+    def test_a_rectangular_shared_icon_is_rejected(self):
+        _, error = self._validate(self._data(), png_path=self.wide)
+        self.assertIsNotNone(error)
+        self.assertIn("正方形", error)
+
+    def test_the_traditional_engine_does_not_check_dimensions(self):
+        """傳統模式那張圖只餵給拖曳介面，沒有這些限制。"""
+        _, error = self._validate(self._base_data(), png_path=self.small)
+        self.assertIsNone(error)
+
+    def test_each_position_has_its_own_minimum(self):
+        """44x44 對工作列位置完全夠用，卻不夠當共用的那張。"""
+        data = self._data(msix={
+            "identity_name": "MyCompany.DemoApp", "certificate_subject": "CN=Demo",
+            "icons": {"taskbar": self.tiny_ok_for_taskbar},
+        })
+        _, error = self._validate(data, png_path=self.big)
+        self.assertIsNone(error)
+
+        data = self._data(msix={
+            "identity_name": "MyCompany.DemoApp", "certificate_subject": "CN=Demo",
+            "icons": {"tile": self.tiny_ok_for_taskbar},
+        })
+        _, error = self._validate(data, png_path=self.big)
+        self.assertIsNotNone(error)
+        self.assertIn("150", error)
+
+    def test_a_missing_override_file_is_reported(self):
+        data = self._data(msix={
+            "identity_name": "MyCompany.DemoApp", "certificate_subject": "CN=Demo",
+            "icons": {"tile": os.path.join(self.app_dir, "nope.png")},
+        })
+        _, error = self._validate(data, png_path=self.big)
+        self.assertIsNotNone(error)

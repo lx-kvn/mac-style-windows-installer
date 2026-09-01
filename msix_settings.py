@@ -18,10 +18,12 @@ msix_settings.py
 建立，[ADR-0007](docs/adr/0007-package-identity-name-is-an-explicit-required-field.md)
 決定三沿用。
 
-本模組只驗證與正規化，不產生套件清單（`AppxManifest.xml`）——後者尚未實作。
-`msix.icons`（第五輪決議第一項的三張圖示個別覆蓋）也尚未納入：該決議的成立
-以「尺寸與宣告不符的圖示是否會被系統拒絕部署」這項未驗證的前提為條件，
-前提若不成立，整個決議要改採自動縮放或要求使用者提供三張，欄位形狀會跟著變。
+本模組只驗證與正規化，不產生套件清單（`AppxManifest.xml`）——後者見
+`msix_manifest.py`。
+
+`msix.icons` 這裡只檢查鍵名與結構，不檢查圖片本身：那需要讀檔案，而本模組
+拿到的是設定值、不保證路徑相對於什麼。圖片尺寸的檢查在 `packaging_core`，
+那裡才知道路徑怎麼解析（規則見 `png_size.py`）。
 """
 import re
 
@@ -29,6 +31,14 @@ import re
 # 功能支援表皆自 1809 起算），不是格式的絕對下限（1709／10.0.16299.0）。
 # 填入絕對下限等同對兩個已終止支援、且不在該矩陣內的版本作出無人驗證的承諾。
 DEFAULT_MIN_WINDOWS_VERSION = "10.0.17763.0"
+
+# 三個圖示位置在套件清單裡宣告的尺寸。各自的最小邊長不同，用同一個門檻
+# 會把一張完全夠用的 44x44 工作列圖示擋下來。
+ICON_MINIMUM_SIZES = {"tile": 150, "taskbar": 44, "store": 50}
+
+# 沒有個別覆蓋時，同一張 png_icon 要同時填三個位置，因此要滿足最大的
+# 那一個（第五輪決議第一項）。
+SHARED_ICON_MINIMUM = max(ICON_MINIMUM_SIZES.values())
 
 # 版本號每段的上限，官方定義 DotQuad 的最大值為 65535.65535.65535.65535。
 VERSION_SEGMENT_MAX = 65535
@@ -143,6 +153,29 @@ def _validate_min_windows_version(value):
         )
 
 
+def _validate_icons(block):
+    """檢查 `msix.icons` 的鍵，回傳 (正規化後的字典, 錯誤訊息)。
+
+    只檢查鍵名與結構，不在這裡檢查圖片本身——那需要讀檔案，而這個
+    模組拿到的是設定值、不保證路徑相對於什麼。圖片尺寸的檢查在
+    `packaging_core`，那裡才知道路徑怎麼解析（見 `png_size.py`）。
+    """
+    if not block:
+        return {}, None
+    if not isinstance(block, dict):
+        return None, (
+            "msix.icons 必須是一個物件（字典），例如 "
+            '{"tile": "tile.png"}'"。"
+        )
+    unknown = [k for k in block if k not in ICON_MINIMUM_SIZES]
+    if unknown:
+        return None, (
+            f"msix.icons 只認得 {'、'.join(ICON_MINIMUM_SIZES)} 這三個位置，"
+            f"收到的還有：{'、'.join(unknown)}。"
+        )
+    return {k: str(v or "").strip() for k, v in block.items() if str(v or "").strip()}, None
+
+
 def validate(block, cert_subject=None):
     """驗證並正規化 `msix` 區塊，回傳 (normalized, error_message)。
 
@@ -188,6 +221,10 @@ def validate(block, cert_subject=None):
             "    （把設定改成憑證上那一個，或清空這個欄位讓工具自動填入。）"
         )
 
+    icons, icons_error = _validate_icons(block.get("icons"))
+    if icons_error:
+        problems.append(icons_error)
+
     min_version, min_version_error = _validate_min_windows_version(
         str(block.get("min_windows_version", "") or "").strip()
     )
@@ -200,4 +237,5 @@ def validate(block, cert_subject=None):
         "identity_name": identity_name,
         "certificate_subject": certificate_subject,
         "min_windows_version": min_version,
+        "icons": icons,
     }, None
