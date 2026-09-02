@@ -49,6 +49,11 @@
   `10.0.17763.0` 的依據是微軟支援矩陣，未經實機確認（第六輪查證結果）。
 - **不宣告圖示時系統實際使用哪個圖示**：CI 探針量測失敗，對照組亦無回應，
   當時如實回報測不到（ADR-0010 已知限制）。
+- **安裝介面（GUI 路徑）在缺少 WebView2 Runtime 時的行為**：
+  `test-packaging-options.yml` 的三個安裝步驟全部走 `/S` 靜默安裝，該路徑
+  不開任何視窗，因此拖曳安裝畫面從未在任何 CI 環境執行過。使用說明書中
+  「缺 WebView2 時畫面會直接空白或報錯」的敘述來自推論，未經觀察。
+  見待辦第 3 項。
 
 ### 明確排除、不是遺漏的
 
@@ -1757,26 +1762,61 @@ spike 驗證（見「已完成之待辦」）。以下為仍待解決者：
    一台虛擬機可同時驗掉兩件事：
 
    - `MinVersion=10.0.17763.0` 是否真的能在該組建完成部署（連帶驗證
-     「避開 `uap10:RuntimeBehavior`、改用 `EntryPoint=
-     "windows.fullTrustApplication"`」這個決定是否正確——`uap10:` 需要
-     2004，判斷若有誤會在 17763 上當場失敗）。
+     「避開 `uap10:RuntimeBehavior`、改用
+     `EntryPoint="windows.fullTrustApplication"`」這個決定是否正確——
+     `uap10:` 需要 2004，判斷若有誤會在 17763 上當場失敗）。
    - 企業版／教育版／LTSC 在 2004 之前預設關閉側載（第六輪查證結果
      第一項）。LTSC 2019 正是該情境本身。
 
-   VM 內不需要開發環境：`Setup_XXX.exe` 是自足的（`winrt-*` 已內嵌）。
-   要進去的只有那顆 exe 與測試憑證的 `.cer`，步驟與 `test-msix-engine`
-   job 相同。GitHub Actions 沒有 1809 的 runner，這件事只能本機做。
+   **用 VMware Workstation，不用 Hyper-V。** 這台開發機已裝有 VMware
+   Workstation 17.6.1，其 `vmrun.exe` 提供的自動化介面足以把整套驗證寫成
+   腳本，形狀與 `test-msix-engine` job 相同：`revertToSnapshot` →
+   `start nogui` → `CopyFileFromHostToGuest`（送入 `Setup_XXX.exe` 與測試
+   憑證）→ `runProgramInGuest`（`/S` 安裝、`Get-AppxPackage` 查詢）→
+   `CopyFileFromGuestToHost`（取回結果）→ `stop`。主機端拿到結果檔即可
+   斷言。失敗時另有 `captureScreen` 可存證。
 
-3. 以 Windows 沙箱建立「乾淨桌面環境」的驗證。現行 CI 跑在 Server 2022
-   上，抓不到「因為這台機器早就裝了 VC++／Python 所以能動」這類問題，而
-   桌面版的乾淨環境與伺服器版的並不相同。沙箱關閉即整個丟棄，設定是一份
-   `.wsb`（可掛載主機資料夾為唯讀、指定開機後執行的指令），形狀接近一份
-   CI job 定義。
+   採快照而非「獨立-非持續」磁碟模式：後者關機即自動丟棄、更省事，但只有
+   單一乾淨狀態。本項要驗的兩件事需要「未開啟側載」與「已開啟側載」兩個
+   狀態各測一次，快照給得了，非持續磁碟給不了。
 
-   **動手前要先確認一件事**：MSIX 的部署在 Windows 沙箱裡能不能運作。
-   沙箱是輕量容器，部分系統服務被裁減，套件部署是否受影響未知——這是
-   量測得到的事，不要用推論代替。沙箱跑的是主機的 Windows 版本，因此
-   驗不到 1809，與第 2 項是兩件不同的事。
+   前置條件與注意事項：
+
+   - guest 內必須安裝 VMware Tools，否則 `runProgramInGuest` 與
+     `CopyFile*` 皆無法使用，只剩開關機。
+   - `runProgramInGuest` 需要 guest 的帳號密碼。VM 為用完即丟的測試環境、
+     不含真實資料，但該密碼不寫死在會進版控的檔案裡，比照本專案既有作法
+     走環境變數。
+   - VM 內不需要開發環境：`Setup_XXX.exe` 是自足的（`winrt-*` 已內嵌）。
+   - 關閉 guest 的自動更新，否則 VHD 會持續長大。
+   - GitHub Actions 沒有 1809 的 runner，這件事只能本機做。
+
+   已知的副作用：這台機器為此啟用了 Hyper-V，而 Hyper-V 啟用後 VMware
+   只能跑在 Windows Hypervisor Platform 之上，效能低於獨佔硬體虛擬化時。
+   若既有的 VMware 虛擬機明顯變慢，可考慮關閉 Hyper-V——代價是 Windows
+   沙箱一併不能用（見下一項）。
+
+3. 驗證安裝介面（GUI 路徑）在缺少 WebView2 Runtime 的乾淨環境下的行為。
+
+   目的寫成「驗證什麼」而不是「用哪個工具」：手段可以是 Windows 沙箱、
+   VMware 的乾淨快照，或任何一台沒裝過東西的機器；工具不可用時，這一項
+   不應跟著作廢。
+
+   **這是一個目前完全沒有被涵蓋的缺口。** `test-packaging-options.yml` 的
+   三個安裝步驟全部使用 `/S` 靜默安裝，那條路徑不開任何視窗，因此這個
+   專案的核心——macOS 風格的拖曳安裝畫面——從未在任何 CI 環境執行過。
+   該畫面依賴 pywebview → WebView2 Runtime，而
+   `docs/使用說明書.md` 已記載「比較舊、沒更新過的 Windows 10 可能會缺，
+   畫面會直接空白或報錯」——該敘述來自推論，未經實際觀察。
+
+   要確認的是：缺少 WebView2 時實際發生什麼（空白視窗、錯誤訊息、還是
+   直接崩潰），以及使用者是否有辦法從畫面上得知原因。若答案是「空白視窗、
+   沒有任何說明」，那是需要修正的行為，不只是文件問題。
+
+   若採 Windows 沙箱，需先確認一件事：MSIX 的部署在沙箱裡能不能運作。
+   沙箱是輕量容器，部分系統服務被裁減，是否受影響未知——這是量測得到的
+   事，不要用推論代替。沙箱跑的是主機的 Windows 版本，因此驗不到 1809，
+   與第 2 項是兩件不同的事。
 
 ## 已知限制（如實記錄）
 
