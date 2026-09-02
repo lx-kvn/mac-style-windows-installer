@@ -1450,6 +1450,14 @@ spike 驗證（見「已完成之待辦」）。以下為仍待解決者：
    `sdk_tools_cache_dir`（工具偏好層級，與 `workspace_dir` 同一層，另於
    `pack` 提供同名旗標作單次覆蓋）；SDK 工具的取得指令定為獨立子指令
    `fetch-sdk-tools`。兩者已隨 ADR-0008 的實作定案，見 `sdk_tools.py`。
+
+   **第十四輪更新**：本項已全數解決。兩截式的指令為 `pack-msix` 與
+   `pack --signed-msix`；引擎選擇欄位為 `install_engine`；套件身分名稱為
+   `msix.identity_name`。MSIX 的簽章與 exe 的 Authenticode 簽章**共用同一個**
+   `signing` 區塊——兩者都是 `signtool` 對一個檔案簽章，用法完全相同
+   （`builder._sign_file()` 同時服務兩者）；分立會讓使用者為同一張憑證填
+   兩次，而兩份設定分岔時的症狀是其中一個產物沒被簽到。該共用同時是
+   「憑證在不在本機」這個分歧的判準（第十三輪決議第一項）。
 4. **EULA 頁面在 MSIX 模式的行為**：推論為不受影響（EULA 由 bootstrapper
    於交付系統部署之前顯示完畢）。
 
