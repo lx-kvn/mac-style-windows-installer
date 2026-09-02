@@ -1,22 +1,22 @@
-"""驅動本機的 Windows 10 1809 驗證虛擬機（Enterprise LTSC 2019，17763.316）。
+"""驅動本機的驗證用虛擬機。
 
-`docs/proposals/MSIX輸出規劃.md` 待辦清單上與 1809 相關的項目無法在 CI 上
-驗證：GitHub Actions 只提供 `windows-latest`，沒有 1809 的 runner。這支
-模組把「要對虛擬機做什麼」翻譯成 vmrun 的指令列，讓那些項目能以腳本重複
-執行，而不是每次靠人手動點。
+`docs/proposals/MSIX輸出規劃.md` 待辦清單上有幾項無法在 CI 上驗證：
+GitHub Actions 只提供 `windows-latest`，沒有 1809 的 runner，也不是繁體
+中文環境。這支模組把「要對哪台虛擬機做什麼」翻譯成 vmrun 的指令列，讓那些
+項目能以腳本重複執行。
 
-虛擬機的建立方式、快照命名與已確認的環境事實記在
+各台虛擬機的建立方式、快照命名與已確認的環境事實記在
 `.claude/skills/run-1809-vm/SKILL.md`。
 
-**密碼不寫進任何檔案。** 由 `password_from_env()` 從環境變數讀取，比照
-builder.py 的 `signing.cert_password_env` 作法。vmrun 的介面要求密碼以
-`-gp` 出現在指令列上，這一點無法避免，因此輸出到 log 或錯誤訊息之前一律
-先經過 `_redact()`——否則密碼會隨著診斷輸出流進終端機與往後可能接上的
-記錄檔。
+**密碼不寫進任何檔案。** 由 `password_from_env()` 依機器宣告的變數名稱從
+環境變數讀取，比照 builder.py 的 `signing.cert_password_env` 作法。vmrun
+的介面要求密碼以 `-gp`／`-vp` 出現在指令列上，這一點無法避免，因此輸出到
+log 或錯誤訊息之前一律先經過 `_scrub()`。
 
 run／log／sleep 是測試接縫（比照 builder.py 的 run 參數與 file_assoc.py
 的 registry 參數），預設分別是 subprocess.run、不輸出、time.sleep。
 """
+import collections
 import contextlib
 import io
 import os
@@ -25,14 +25,10 @@ import subprocess
 import time
 
 
-VMX = r"D:\VMware\Win10-1809-LTSC\Windows10-1809-LTSC.vmx"
 VMRUN = r"C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe"
 VMWARE_EXE = r"C:\Program Files (x86)\VMware\VMware Workstation\vmware.exe"
 PREFERENCES_INI = os.path.join(
     os.path.expandvars("%APPDATA%"), "VMware", "preferences.ini")
-SNAPSHOT = "Clean"
-GUEST_USER = "Tester"
-PASSWORD_ENV = "WIN1809_VM_PASSWORD"
 
 # 這支模組會送出的 vmrun 子指令。列成常數不只是為了自我說明——測試以它
 # 辨識每次呼叫送出的是哪一個子指令，藉此斷言先後順序。
@@ -40,6 +36,7 @@ SUBCOMMANDS = frozenset({
     "revertToSnapshot",
     "start",
     "stop",
+    "captureScreen",
     "CopyFileFromHostToGuest",
     "CopyFileFromGuestToHost",
     "runProgramInGuest",
@@ -51,33 +48,97 @@ READY_PROBE = r"C:\Windows\System32\whoami.exe"
 REDACTED = "***"
 
 
+Machine = collections.namedtuple(
+    "Machine", "key vmx snapshot user password_env encryption_env")
+
+
+MACHINES = {
+    # 驗證 MSIX 的 MinVersion 能否部署、企業版側載預設值、缺少 WebView2
+    # Runtime 時安裝精靈的行為。組建停在 17763.316（不連網路，見 SKILL）。
+    "win1809": Machine(
+        key="win1809",
+        vmx=r"D:\VMware\Win10-1809-LTSC\Windows10-1809-LTSC.vmx",
+        snapshot="Clean",
+        user="Tester",
+        password_env="WIN1809_VM_PASSWORD",
+        encryption_env=None,
+    ),
+    # 真正的繁體中文 Windows 環境——CI 的 runner 是英文的，中文介面從未
+    # 在真的中文系統上跑過。也用於新版 Windows 上的 MSIX 與憑證行為。
+    #
+    # encryption_env 不是可選的裝飾：Windows 11 要求 TPM 2.0，VMware 以
+    # 虛擬 TPM 滿足它，而帶虛擬 TPM 的機器必須加密存放。沒帶 -vp 時連
+    # 「列出快照」都會被回以 "A password is required for this operation"。
+    "win11": Machine(
+        key="win11",
+        vmx=r"D:\VMware\Windows11-25h2\Windows11-25H2.vmx",
+        snapshot="Clean",
+        user="Tester",
+        password_env="WIN11_VM_PASSWORD",
+        encryption_env="WIN11_VM_ENCRYPTION_PASSWORD",
+    ),
+}
+
+
 class VmError(Exception):
     """虛擬機操作失敗。訊息一律不含密碼。"""
 
 
-def password_from_env(environ=None):
-    """讀出客體帳號的密碼。
+def machine(key):
+    """依代號取出機器定義。找不到時把可選的代號一併說出來。"""
+    try:
+        return MACHINES[key]
+    except KeyError:
+        raise VmError(
+            "沒有代號為 " + repr(key) + " 的虛擬機。可用的有："
+            + "、".join(sorted(MACHINES))
+        )
 
-    空字串視同未設定。若讓空密碼通過，後續失敗會出現在 vmrun 的登入階段，
-    訊息是「認證失敗」——那會把人引去檢查帳號與虛擬機狀態，而真正的成因
-    只是環境變數沒設。
+
+def _as_machine(value):
+    return value if isinstance(value, Machine) else machine(value)
+
+
+def password_from_env(name, environ=None):
+    """讀出指定環境變數裡的密碼。
+
+    空字串視同未設定。若讓空密碼通過，後續失敗會出現在 vmrun 的登入或
+    解密階段，訊息是「認證失敗」——那會把人引去檢查帳號與虛擬機狀態，
+    而真正的成因只是環境變數沒設。
     """
     environ = os.environ if environ is None else environ
-    value = environ.get(PASSWORD_ENV, "")
+    value = environ.get(name, "")
     if not value:
         raise VmError(
-            "環境變數 " + PASSWORD_ENV + " 沒有值。請先設定客體帳號的密碼："
-            "[Environment]::SetEnvironmentVariable('" + PASSWORD_ENV
+            "環境變數 " + name + " 沒有值。請先設定："
+            "[Environment]::SetEnvironmentVariable('" + name
             + "','<密碼>','User')，設定後需重開終端機。"
         )
     return value
+
+
+def connect(machine_or_key, environ=None, **kwargs):
+    """依機器定義組出一個 Vm，密碼從它宣告的環境變數讀取。
+
+    未宣告 encryption_env 的機器不會去讀那個變數——未加密的機器不該因為
+    少設一個與它無關的環境變數而無法使用。
+    """
+    target = _as_machine(machine_or_key)
+    environ = os.environ if environ is None else environ
+    encryption = None
+    if target.encryption_env:
+        encryption = password_from_env(target.encryption_env, environ)
+    return Vm(target,
+              password_from_env(target.password_env, environ),
+              encryption_password=encryption,
+              **kwargs)
 
 
 def write_guest_script(path, text):
     """把要送進客體執行的 PowerShell 腳本寫成 UTF-8 with BOM。
 
     客體端是 Windows PowerShell 5.1，讀取無 BOM 的 `.ps1` 時以系統 ANSI
-    編碼解讀。客體為 en-US，中文字元因此被拆成無效 token，回報的是語法
+    編碼解讀。客體為 en-US 時中文字元因此被拆成無效 token，回報的是語法
     錯誤而不是編碼錯誤——症狀完全不指向成因。加上 BOM 之後 5.1 才會以
     UTF-8 解讀。
 
@@ -89,20 +150,20 @@ def write_guest_script(path, text):
 
 
 class Vm:
-    def __init__(self, vmx, user, password, vmrun=VMRUN,
-                 run=None, log=None, sleep=None):
-        self.vmx = vmx
-        self.user = user
+    def __init__(self, machine, password, encryption_password=None,
+                 vmrun=VMRUN, run=None, log=None, sleep=None):
+        self.machine = machine
         self.vmrun = vmrun
         self._password = password
+        self._encryption_password = encryption_password
         self._run = run or subprocess.run
         self._log = log
         self._sleep = sleep or time.sleep
 
-    # ---- 主機端操作（不進客體，因此不帶帳號密碼）----
+    # ---- 主機端操作（不進客體，因此不帶客體帳密）----
 
-    def revert(self, snapshot=SNAPSHOT):
-        self._invoke("revertToSnapshot", [snapshot])
+    def revert(self, snapshot=None):
+        self._invoke("revertToSnapshot", [snapshot or self.machine.snapshot])
 
     def start(self, gui=False):
         """開機。gui=True 會開出 VMware 的主控台視窗。
@@ -137,9 +198,7 @@ class Vm:
             if probe.returncode == 0:
                 return
             self._sleep(delay)
-        raise VmError(
-            "等待客體就緒逾時（已嘗試 " + str(attempts) + " 次）。"
-        )
+        raise VmError("等待客體就緒逾時（已嘗試 " + str(attempts) + " 次）。")
 
     # ---- 客體端操作 ----
 
@@ -151,6 +210,18 @@ class Vm:
         self._invoke("CopyFileFromGuestToHost",
                      [guest_path, host_path], guest=True)
 
+    def capture_screen(self, host_path):
+        """把客體當下的畫面存成 PNG。
+
+        產出的檔案寫在主機端，但 VMware 仍把這歸類為客體操作，不帶帳密會
+        回以 "Anonymous guest operations are not allowed"。
+
+        無畫面模式下一樣可用（實測結束碼 0）。解析度不是固定值：實測有畫面
+        模式為 2558x1190、無畫面模式為 2558x1186，比對兩張截圖時不要假設
+        尺寸相同。
+        """
+        self._invoke("captureScreen", [host_path], guest=True)
+
     def run_program(self, program, *args, **kwargs):
         """在客體裡執行程式。
 
@@ -160,18 +231,13 @@ class Vm:
         interactive=True（實測回報 SessionId 為 1）。
 
         interactive=True 要求客體確實有人以互動方式登入。這個條件在正常
-        流程下成立——`Clean` 快照恢復後就是 Tester 已登入的桌面——但若
-        略過還原直接開機，客體是從硬碟冷開機、停在鎖定畫面，此時 vmrun
-        會回報「使用者必須以互動方式登入」。又一個「一定要先還原快照」的
-        理由。
+        流程下成立——快照恢復後就是 Tester 已登入的桌面——但若略過還原
+        直接開機，客體是從硬碟冷開機、停在鎖定畫面，此時 vmrun 會回報
+        「使用者必須以互動方式登入」。又一個「一定要先還原快照」的理由。
 
         客體程式拿到的是**已提升的權限**（實測 IsInRole(Administrator)
         為 True，且確實寫得進 HKLM 的側載機碼與 LocalMachine\\Root 憑證
         存放區），因此裝憑證與改側載設定都不需要額外處理。
-
-        check=False 時客體程式的非零結束碼不視為錯誤——有些情境預期它失敗
-        （例如驗證側載預設為關閉時，部署本來就該被拒絕），把那當成例外會讓
-        「測到了預期中的失敗」與「工具本身壞掉」混為一談。
 
         **客體端請用 powershell.exe，不要用 cmd.exe。** vmrun 會把每個參數
         各自加上引號再交給客體，powershell.exe 接受被引號包住的參數（實測
@@ -186,6 +252,10 @@ class Vm:
         得讓客體把結果寫進檔案再 copy_out() 取回。驗證「側載預設為關閉」時
         尤其重要：光是「失敗了」不足以歸因，必須另外讀回登錄值佐證失敗確實
         來自側載設定，而不是別的原因。
+
+        check=False 時客體程式的非零結束碼不視為錯誤——有些情境預期它失敗
+        （例如驗證側載預設為關閉時，部署本來就該被拒絕），把那當成例外會讓
+        「測到了預期中的失敗」與「工具本身壞掉」混為一談。
         """
         check = kwargs.pop("check", True)
         interactive = kwargs.pop("interactive", False)
@@ -199,9 +269,12 @@ class Vm:
 
     def _invoke(self, subcommand, args=(), guest=False, check=True):
         cmd = [self.vmrun, "-T", "ws"]
+        # 加密的機器連還原、開機、列快照都要帶 -vp，不只客體操作。
+        if self._encryption_password:
+            cmd += ["-vp", self._encryption_password]
         if guest:
-            cmd += ["-gu", self.user, "-gp", self._password]
-        cmd += [subcommand, self.vmx] + [str(arg) for arg in args]
+            cmd += ["-gu", self.machine.user, "-gp", self._password]
+        cmd += [subcommand, self.machine.vmx] + [str(arg) for arg in args]
         if self._log:
             self._log(" ".join(self._redact(cmd)))
         result = self._run(cmd, capture_output=True, text=True)
@@ -213,11 +286,17 @@ class Vm:
             )
         return result
 
+    def _secrets(self):
+        return [s for s in (self._password, self._encryption_password) if s]
+
     def _redact(self, cmd):
-        return [REDACTED if token == self._password else token for token in cmd]
+        secrets = self._secrets()
+        return [REDACTED if token in secrets else token for token in cmd]
 
     def _scrub(self, text):
-        return text.replace(self._password, REDACTED) if self._password else text
+        for secret in self._secrets():
+            text = text.replace(secret, REDACTED)
+        return text
 
 
 _TAB_FILE = re.compile(
@@ -300,16 +379,18 @@ def preserved_tab(vmx, list_tabs=None, reopen=None):
             reopen(vmx)
 
 
-def fresh_boot(vm, snapshot=SNAPSHOT, gui=False):
-    """把虛擬機帶回快照狀態並開到可用為止。
+def fresh_boot(vm, gui=False):
+    """把虛擬機帶回它的快照狀態並開到可用為止。
 
-    每一輪驗證都從這裡開始。若在殘留狀態上執行，測到的可能是上一輪留下的
-    東西——例如上一輪為了驗證部署而開啟的側載設定，會讓下一輪「側載預設是
-    關的」測出相反的結果。
+    每一輪驗證都從這裡開始，理由有兩個。其一，若在殘留狀態上執行，測到的
+    可能是上一輪留下的東西——例如上一輪為了驗證部署而開啟的側載設定，會讓
+    下一輪「側載預設是關的」測出相反的結果。其二，略過還原直接開機是從硬碟
+    冷開機，客體會停在鎖定畫面（實測截圖確認），沒有互動登入，
+    run_program(interactive=True) 會被拒絕。
 
     gui 決定這一輪看不看得到畫面，在此定案並往下傳。中途改不了：切換模式
     必須關機重開，而關機重開等於這一輪從頭來過。
     """
-    vm.revert(snapshot)
+    vm.revert()
     vm.start(gui=gui)
     vm.wait_until_ready()
