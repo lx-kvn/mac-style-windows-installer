@@ -92,7 +92,15 @@ MSIX 的 `<uap:Logo>` 掛在**關聯群組**（`uap:FileTypeAssociation`）之�
 
 ## 待辦事項
 
-1. 實作 MSIX 模式下 `doc_icon`／`doc_icons` 的 PNG 驗證與 `.ico` 的報錯訊息。
-2. 實作副檔名到群組名稱的推導與格式驗證（全小寫、無空白、1 至 64 字元）。
-3. 於 `msix_settings.DEFAULT_MIN_WINDOWS_VERSION` 一帶加註說明，指出變更該值
-   時須回頭檢視本 ADR 的決定三。
+（本 ADR 的待辦事項已全數完成，見下方「已完成之待辦」。）
+
+## 已完成之待辦
+
+1. **MSIX 模式下 `doc_icon`／`doc_icons` 的 PNG 驗證與 `.ico` 的報錯訊息**
+   ——已實作於 `packaging_core.py`。訊息鍵為 `doc_icon.format` 與
+   `doc_icon.ext_bad_format`，MSIX 模式下額外附上 `doc_icon.msix_png_reason`
+   說明為何只能是 PNG。
+2. **副檔名到群組名稱的推導與格式驗證**——已實作於
+   `msix_manifest.association_group_name()`。
+3. **`msix_settings.DEFAULT_MIN_WINDOWS_VERSION` 一帶的註記**——已補上，
+   指出調高該值時本 ADR 決定三的前提可能不再成立，須重新評估。
