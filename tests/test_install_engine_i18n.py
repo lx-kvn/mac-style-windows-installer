@@ -24,6 +24,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import install_engine
+import messages
 
 
 def settings(**overrides):
@@ -37,25 +38,9 @@ def settings(**overrides):
     return data
 
 
-class TheTwoLanguagesCannotDrift(unittest.TestCase):
-    def test_both_languages_are_declared(self):
-        self.assertIn("zh-TW", install_engine.LANGUAGES)
-        self.assertIn("en", install_engine.LANGUAGES)
-
-    def test_every_language_has_exactly_the_same_keys(self):
-        """少一把鍵的症狀是「某個欄位在某個語言下沒有訊息」，而那個欄位
-        可能很少被用到，不會有人在正常使用中發現。"""
-        tables = {lang: set(install_engine.MESSAGES[lang]) for lang in install_engine.LANGUAGES}
-        reference = tables["zh-TW"]
-        for lang, keys in tables.items():
-            self.assertEqual(keys, reference,
-                             f"{lang} 與 zh-TW 的鍵集合不同："
-                             f"多了 {keys - reference}、少了 {reference - keys}")
-
-    def test_no_message_is_empty(self):
-        for lang in install_engine.LANGUAGES:
-            for key, text in install_engine.MESSAGES[lang].items():
-                self.assertTrue(text.strip(), f"{lang} 的 {key} 是空的")
+# 「兩種語言的鍵集合必須相同」與「訊息不得為空」已移到
+# tests/test_message_tables.py 統一檢查——那件事現在跨五個模組，留在這裡
+# 等於同一條不變式有兩個看守者，其中一個遲早不會被更新。
 
 
 class EveryClassifiedFieldHasAMessage(unittest.TestCase):
@@ -64,7 +49,7 @@ class EveryClassifiedFieldHasAMessage(unittest.TestCase):
 
     def test_every_incompatible_field_is_translatable(self):
         for field, category in install_engine.field_categories().items():
-            for lang in install_engine.LANGUAGES:
+            for lang in messages.LANGUAGES:
                 self.assertIsNotNone(
                     install_engine.field_message(field, lang),
                     f"{field}（{category}）在 {lang} 下沒有訊息")
@@ -73,7 +58,7 @@ class EveryClassifiedFieldHasAMessage(unittest.TestCase):
         """就地提示只說類別、不說細節（細節留給編譯時的完整清單）。"""
         for category in (install_engine.UNSUPPORTED, install_engine.IMPOSSIBLE,
                          install_engine.MOOT):
-            for lang in install_engine.LANGUAGES:
+            for lang in messages.LANGUAGES:
                 hint = install_engine.category_hint(category, lang)
                 self.assertTrue(hint and hint.strip(),
                                 f"{category} 在 {lang} 下沒有簡短提示")
@@ -151,7 +136,7 @@ class TheErrorMessageIsRendered(unittest.TestCase):
     def test_both_categories_are_still_listed_separately(self):
         """第二類與第三類要求下游採取的行動不同（等待 vs 重新設計），
         混列會讓對方必須逐條判讀語氣才分得出來。"""
-        for lang in install_engine.LANGUAGES:
+        for lang in messages.LANGUAGES:
             text = self._report().error_message(lang)
             self.assertGreaterEqual(text.count("\n\n"), 1, f"{lang} 沒有分段")
 

@@ -20,7 +20,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import builder_cli
-import install_engine
+import messages
 from _fakes import write_test_png
 
 
@@ -58,7 +58,7 @@ class TheLanguageIsResolved(unittest.TestCase):
         with mock.patch("builder_cli.lang_detect.detect_system_language") as detect:
             builder_cli.resolve_language(None)
         supported = detect.call_args[0][0]
-        self.assertEqual(set(supported), set(install_engine.LANGUAGES))
+        self.assertEqual(set(supported), set(messages.LANGUAGES))
 
 
 class TheIncompatibilityListComesOutInThatLanguage(unittest.TestCase):

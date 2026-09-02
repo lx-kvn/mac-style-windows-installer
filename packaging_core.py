@@ -26,6 +26,7 @@ import packaging_settings
 import dependency_defs
 import cert_subject
 import install_engine
+import messages
 import msix_settings
 import png_size
 import windows_service
@@ -526,7 +527,7 @@ def _read_signing_cert_subject(signing, reader=None):
 
 def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_path_selected,
                                  has_inline_password=False, read_cert_subject=None,
-                                 lang=install_engine.DEFAULT_LANGUAGE):
+                                 lang=messages.DEFAULT_LANGUAGE):
     """驗證表單/JSON 資料，並組出要交給 builder.build_all() 的 pack_data。
 
     純函式：不碰執行緒、不呼叫 check_build_environment()/ensure_workspace_files()

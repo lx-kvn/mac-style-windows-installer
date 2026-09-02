@@ -47,6 +47,7 @@ import builder
 import threading
 import lang_detect
 import install_engine
+import messages
 import packaging_settings
 import sdk_tools
 from window_drag import WindowDragController
@@ -151,7 +152,7 @@ class ConfigAPI:
         """
         if engine != install_engine.MSIX:
             return {}
-        lang = lang or install_engine.DEFAULT_LANGUAGE
+        lang = lang or messages.DEFAULT_LANGUAGE
         return {
             field: {
                 "category": category,
@@ -327,7 +328,7 @@ class ConfigAPI:
             has_inline_password=bool(install_password),
             # 介面語言由前端送來：後端沒有別的管道知道使用者在畫面上選了
             # 哪一種語言（GUI 的語言記在 localStorage）。沒送就用預設值。
-            lang=lang or install_engine.DEFAULT_LANGUAGE,
+            lang=lang or messages.DEFAULT_LANGUAGE,
         )
         if error:
             return {"status": "error", "message": error}

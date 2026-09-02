@@ -41,6 +41,8 @@ CLI 共用。
 """
 from collections import namedtuple
 
+import messages
+
 TRADITIONAL = "traditional"
 MSIX = "msix"
 ENGINES = (TRADITIONAL, MSIX)
@@ -50,9 +52,6 @@ SETTING_FIELD = "install_engine"
 UNSUPPORTED = "unsupported"
 IMPOSSIBLE = "impossible"
 MOOT = "moot"
-
-LANGUAGES = ("zh-TW", "en")
-DEFAULT_LANGUAGE = "zh-TW"
 
 
 class UnknownEngine(Exception):
@@ -73,7 +72,7 @@ class Report(namedtuple("Report", "blocking notices")):
     def has_blocking(self):
         return bool(self.blocking)
 
-    def error_message(self, lang=DEFAULT_LANGUAGE):
+    def error_message(self, lang=messages.DEFAULT_LANGUAGE):
         """把全部違規項組成一則多行訊息；沒有違規項時回傳空字串。
 
         分成兩段列出而不是混在一起：第二類與第三類要求下游專案採取的行動
@@ -84,21 +83,21 @@ class Report(namedtuple("Report", "blocking notices")):
         """
         if not self.blocking:
             return ""
-        lines = [translate("error.intro", lang)]
+        lines = [_t("error.intro", lang)]
         for category in (UNSUPPORTED, IMPOSSIBLE):
             items = [f for f in self.blocking if f.category == category]
             if not items:
                 continue
             lines.append("")
-            lines.append(translate(f"heading.{category}", lang))
-            lines.extend(f"  - {translate(f.key, lang)}" for f in items)
+            lines.append(_t(f"heading.{category}", lang))
+            lines.extend(f"  - {_t(f.key, lang)}" for f in items)
         return "\n".join(lines)
 
-    def notice_messages(self, lang=DEFAULT_LANGUAGE):
+    def notice_messages(self, lang=messages.DEFAULT_LANGUAGE):
         """第四類的說明句子。不擋建置，交給建置紀錄印出來。"""
-        separator = translate("list.separator", lang)
+        separator = _t("list.separator", lang)
         return [
-            translate(f.key, lang, fields=separator.join(f.field.split(",")))
+            _t(f.key, lang, fields=separator.join(f.field.split(",")))
             for f in self.notices
         ]
 
@@ -220,15 +219,11 @@ MESSAGES = {
 }
 
 
-def translate(key, lang=DEFAULT_LANGUAGE, **params):
-    """取出一則訊息。認不得的語言退回預設語言，不拋例外。
-
-    語言標籤來自系統設定或命令列旗標，可能是任何值；為了一個顯示語言中止
-    建置沒有道理——使用者要的是安裝檔，不是一堂語言標籤課。
+def _t(key, lang=messages.DEFAULT_LANGUAGE, **params):
+    """本模組訊息表的查表捷徑。機制在 messages.py，那裡也說明了為什麼
+    訊息表留在各模組而不是集中一張。
     """
-    table = MESSAGES.get(lang) or MESSAGES[DEFAULT_LANGUAGE]
-    text = table.get(key) or MESSAGES[DEFAULT_LANGUAGE].get(key, key)
-    return text.format(**params) if params else text
+    return messages.translate(MESSAGES, key, lang, **params)
 
 
 def field_categories():
@@ -241,20 +236,20 @@ def field_categories():
     return dict(_FIELD_CATEGORIES)
 
 
-def field_message(field, lang=DEFAULT_LANGUAGE):
+def field_message(field, lang=messages.DEFAULT_LANGUAGE):
     """該欄位的完整說明；不是不相容欄位時回傳 None。"""
     if field not in _FIELD_CATEGORIES:
         return None
-    return translate(f"field.{field}", lang)
+    return _t(f"field.{field}", lang)
 
 
-def category_hint(category, lang=DEFAULT_LANGUAGE):
+def category_hint(category, lang=messages.DEFAULT_LANGUAGE):
     """就地提示：只說類別，不說細節。
 
     細節（失去什麼、有無替代方案）留在按下編譯時的完整清單裡——那本來就是
     它的職責，而欄位旁邊塞進一整段會把表單擠爆。
     """
-    return translate(f"hint.{category}", lang)
+    return _t(f"hint.{category}", lang)
 
 
 def check_settings(engine, settings):

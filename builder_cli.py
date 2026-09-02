@@ -31,6 +31,7 @@ import sys
 
 import builder
 import install_engine
+import messages
 import lang_detect
 import packaging_core
 import packaging_settings
@@ -121,7 +122,7 @@ def resolve_language(flag):
     if flag:
         return flag
     return lang_detect.detect_system_language(
-        install_engine.LANGUAGES, install_engine.DEFAULT_LANGUAGE)
+        messages.LANGUAGES, messages.DEFAULT_LANGUAGE)
 
 
 def _strip_html(message):
@@ -148,7 +149,7 @@ def build_arg_parser():
     pack_p = sub.add_parser("pack", help="驗證設定並編譯出安裝檔")
     pack_p.add_argument(
         "--lang", dest="lang", default=None,
-        help=f"訊息語言（{'／'.join(install_engine.LANGUAGES)}），未指定時依系統語言",
+        help=f"訊息語言（{'／'.join(messages.LANGUAGES)}），未指定時依系統語言",
     )
     pack_p.add_argument("--config", default=None, help="JSON 設定檔路徑（選填，沒給就完全靠底下的 flag）")
     pack_p.add_argument("--workspace-dir", default=None, help="編譯工作目錄，預設用 packaging_core.get_workspace_dir()")
@@ -213,7 +214,7 @@ def build_arg_parser():
     )
     msix_p.add_argument(
         "--lang", dest="lang", default=None,
-        help=f"訊息語言（{'／'.join(install_engine.LANGUAGES)}），未指定時依系統語言",
+        help=f"訊息語言（{'／'.join(messages.LANGUAGES)}），未指定時依系統語言",
     )
     msix_p.add_argument("--config", default=None, help="JSON 設定檔路徑")
     msix_p.add_argument("--output", default=None, help="輸出的 .msix 路徑，預設用套件身分名稱")
