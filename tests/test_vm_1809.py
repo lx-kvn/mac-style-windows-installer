@@ -134,6 +134,24 @@ class CommandAssemblyTests(unittest.TestCase):
         self.assertLess(cmd.index(r"C:\powershell.exe"), cmd.index("-File"))
         self.assertLess(cmd.index("-File"), cmd.index("job.ps1"))
 
+    def test_run_program_runs_outside_the_desktop_by_default(self):
+        """預設落在工作階段 0（服務階段），畫面上看不到。"""
+        run = FakeRun()
+        make_vm(run).run_program(r"C:\x.exe")
+        self.assertNotIn("-interactive", run.calls[0])
+
+    def test_run_program_can_target_the_interactive_desktop(self):
+        """要在使用者看得到的桌面上跑（例如安裝精靈）就得加這個旗標。
+
+        實測：不加時客體回報工作階段 0，加了是工作階段 1。旗標必須排在
+        程式路徑之前，那是 vmrun 接受的位置。
+        """
+        run = FakeRun()
+        make_vm(run).run_program(r"C:\x.exe", interactive=True)
+        cmd = run.calls[0]
+        self.assertIn("-interactive", cmd)
+        self.assertLess(cmd.index("-interactive"), cmd.index(r"C:\x.exe"))
+
     def test_run_program_can_return_failure_without_raising(self):
         """有些情境預期客體程式失敗（例如驗證側載預設是關的），那不是錯誤。"""
         run = FakeRun([FakeCompleted(returncode=1, stderr="denied")])
@@ -175,28 +193,36 @@ class PasswordHandlingTests(unittest.TestCase):
         self.assertIn("***", joined)
 
 
-class ToolsReadinessTests(unittest.TestCase):
-    """開機完成不等於客體已就緒，中間要等 VMware Tools 起來。
+class ReadinessTests(unittest.TestCase):
+    """開機完成不等於客體已就緒，中間要等。
 
-    `vmrun start` 回來時客體才剛開始開機，此時送檔案或執行程式會失敗，
-    而失敗訊息（找不到檔案／登入失敗）不會指向「開太快」這個成因。
+    `vmrun start` 回來時客體可能還沒能接受指令，此時送檔案或執行程式會
+    失敗，而失敗訊息（找不到檔案／認證失敗）不會指向「開太快」這個成因。
+
+    就緒與否**不以 checkToolsState 的字串判斷**：實測它回報 `installed`
+    時，客體其實已經在正常桌面、`runProgramInGuest` 結束碼為 0。同一台
+    虛擬機在不同時候回過 `running` 與 `installed` 兩種值，拿它當條件會
+    在客體明明可用時空等到逾時。改為直接試一個最便宜的客體指令。
     """
 
-    def test_polls_until_tools_report_running(self):
-        run = FakeRun([
-            FakeCompleted(stdout="starting\n"),
-            FakeCompleted(stdout="running\n"),
-        ])
+    def test_polls_until_the_guest_accepts_a_command(self):
+        run = FakeRun([FakeCompleted(returncode=1), FakeCompleted(returncode=0)])
         slept = []
-        make_vm(run, sleep=slept.append).wait_for_tools()
-        self.assertEqual(run.subcommands, ["checkToolsState", "checkToolsState"])
+        make_vm(run, sleep=slept.append).wait_until_ready()
+        self.assertEqual(
+            run.subcommands, ["runProgramInGuest", "runProgramInGuest"])
         self.assertEqual(len(slept), 1)
 
+    def test_the_probe_failing_is_not_an_error(self):
+        """探測失敗只代表還沒好，不是工具壞了——不該丟例外。"""
+        run = FakeRun([FakeCompleted(returncode=1), FakeCompleted(returncode=0)])
+        make_vm(run).wait_until_ready()  # 不應丟出例外
+
     def test_gives_up_with_a_clear_error(self):
-        run = FakeRun([FakeCompleted(stdout="starting\n")] * 50)
+        run = FakeRun([FakeCompleted(returncode=1)] * 50)
         with self.assertRaises(vm_1809.VmError) as caught:
-            make_vm(run, sleep=lambda seconds: None).wait_for_tools(attempts=3)
-        self.assertIn("VMware Tools", str(caught.exception))
+            make_vm(run, sleep=lambda seconds: None).wait_until_ready(attempts=3)
+        self.assertIn("就緒", str(caught.exception))
 
 
 PREFERENCES_SAMPLE = """\
@@ -292,11 +318,7 @@ class PreservedTabTests(unittest.TestCase):
 class FreshBootTests(unittest.TestCase):
     def test_passes_the_display_mode_through(self):
         """模式在 fresh_boot 就要定下來——開機之後再改得先關機重開。"""
-        run = FakeRun([
-            FakeCompleted(),
-            FakeCompleted(),
-            FakeCompleted(stdout="running\n"),
-        ])
+        run = FakeRun()
         vm_1809.fresh_boot(make_vm(run), snapshot="Clean", gui=True)
         start_call = run.calls[1]
         self.assertIn("gui", start_call)
@@ -304,15 +326,11 @@ class FreshBootTests(unittest.TestCase):
 
     def test_reverts_starts_then_waits(self):
         """殘留狀態上跑出來的結果不算數，還原必須排在開機之前。"""
-        run = FakeRun([
-            FakeCompleted(),
-            FakeCompleted(),
-            FakeCompleted(stdout="running\n"),
-        ])
+        run = FakeRun()
         vm_1809.fresh_boot(make_vm(run), snapshot="Clean")
         self.assertEqual(
             run.subcommands,
-            ["revertToSnapshot", "start", "checkToolsState"],
+            ["revertToSnapshot", "start", "runProgramInGuest"],
         )
 
 

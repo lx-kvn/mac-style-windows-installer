@@ -40,11 +40,13 @@ SUBCOMMANDS = frozenset({
     "revertToSnapshot",
     "start",
     "stop",
-    "checkToolsState",
     "CopyFileFromHostToGuest",
     "CopyFileFromGuestToHost",
     "runProgramInGuest",
 })
+
+# 判斷客體是否就緒時執行的程式：存在於任何 Windows、不需參數、瞬間結束。
+READY_PROBE = r"C:\Windows\System32\whoami.exe"
 
 REDACTED = "***"
 
@@ -115,19 +117,28 @@ class Vm:
     def stop(self):
         self._invoke("stop", ["hard"])
 
-    def wait_for_tools(self, attempts=60, delay=2):
-        """等到客體的 VMware Tools 就緒為止。
+    def wait_until_ready(self, attempts=60, delay=2):
+        """等到客體真的接受指令為止。
 
-        `vmrun start` 回來時客體才剛開始開機，此時送檔案或執行程式會失敗，
-        而失敗訊息（找不到檔案／認證失敗）不會指向「開太快」這個成因。
+        `vmrun start` 回來時客體可能還沒能接受指令，此時送檔案或執行程式
+        會失敗，而失敗訊息（找不到檔案／認證失敗）不會指向「開太快」這個
+        成因。
+
+        **不以 checkToolsState 的字串判斷。** 那個指令對同一台虛擬機回過
+        `running` 與 `installed` 兩種值；實測回報 `installed` 時，客體已經
+        在正常桌面、`runProgramInGuest` 結束碼為 0、截圖也正常。把 `running`
+        當成唯一的就緒條件，會在客體明明可用時空等到逾時（實際發生過一次，
+        白等兩分鐘）。改成直接試一個最便宜的客體指令——那正是我們真正需要
+        的能力，不必再從狀態字串推論。
         """
         for _ in range(attempts):
-            result = self._invoke("checkToolsState", [])
-            if result.stdout.strip() == "running":
+            probe = self._invoke(
+                "runProgramInGuest", [READY_PROBE], guest=True, check=False)
+            if probe.returncode == 0:
                 return
             self._sleep(delay)
         raise VmError(
-            "等待 VMware Tools 就緒逾時（已嘗試 " + str(attempts) + " 次）。"
+            "等待客體就緒逾時（已嘗試 " + str(attempts) + " 次）。"
         )
 
     # ---- 客體端操作 ----
@@ -142,6 +153,21 @@ class Vm:
 
     def run_program(self, program, *args, **kwargs):
         """在客體裡執行程式。
+
+        **預設落在工作階段 0**，也就是服務用的階段，不是使用者看得到的
+        桌面（實測：客體回報 SessionId 為 0）。因此以這種方式啟動的視窗
+        程式不會出現在畫面上，截圖也拍不到。要在桌面上跑就傳
+        interactive=True（實測回報 SessionId 為 1）。
+
+        interactive=True 要求客體確實有人以互動方式登入。這個條件在正常
+        流程下成立——`Clean` 快照恢復後就是 Tester 已登入的桌面——但若
+        略過還原直接開機，客體是從硬碟冷開機、停在鎖定畫面，此時 vmrun
+        會回報「使用者必須以互動方式登入」。又一個「一定要先還原快照」的
+        理由。
+
+        客體程式拿到的是**已提升的權限**（實測 IsInRole(Administrator)
+        為 True，且確實寫得進 HKLM 的側載機碼與 LocalMachine\\Root 憑證
+        存放區），因此裝憑證與改側載設定都不需要額外處理。
 
         check=False 時客體程式的非零結束碼不視為錯誤——有些情境預期它失敗
         （例如驗證側載預設為關閉時，部署本來就該被拒絕），把那當成例外會讓
@@ -162,9 +188,11 @@ class Vm:
         來自側載設定，而不是別的原因。
         """
         check = kwargs.pop("check", True)
+        interactive = kwargs.pop("interactive", False)
         if kwargs:
             raise TypeError("未預期的參數：" + ", ".join(sorted(kwargs)))
-        return self._invoke("runProgramInGuest", [program] + list(args),
+        head = ["-interactive"] if interactive else []
+        return self._invoke("runProgramInGuest", head + [program] + list(args),
                             guest=True, check=check)
 
     # ---- 內部 ----
@@ -284,4 +312,4 @@ def fresh_boot(vm, snapshot=SNAPSHOT, gui=False):
     """
     vm.revert(snapshot)
     vm.start(gui=gui)
-    vm.wait_for_tools()
+    vm.wait_until_ready()
