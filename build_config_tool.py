@@ -194,9 +194,14 @@ def build_one_exe(entry_script, output_name, icon_path=None, noconsole=True,
 
     try:
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        # errors="replace"：text=True 未指定 errors 時依系統地區編碼解碼子行程
+        # 輸出（繁體中文 Windows 是 cp950），遇到該編碼無法解碼的位元組會拋出
+        # 例外，被下方的 except 當成「沒有在執行」——偵測失靈且不留痕跡，要到
+        # PyInstaller 覆寫檔案失敗時才顯露。詳見 docs/investigations/子行程輸出的解碼修正.md。
         output = subprocess.check_output(
             ["tasklist", "/FI", f"IMAGENAME eq {exe_name}", "/NH"],
-            text=True, stderr=subprocess.DEVNULL, creationflags=creationflags,
+            text=True, errors="replace",
+            stderr=subprocess.DEVNULL, creationflags=creationflags,
         )
         if exe_name.lower() in output.lower():
             return False, (
@@ -278,9 +283,15 @@ def build_one_exe(entry_script, output_name, icon_path=None, noconsole=True,
 
     try:
         try:
+            # encoding/errors：不使用 text=True 的預設解碼行為（依系統地區
+            # 編碼），PyInstaller 輸出含有非該編碼的位元組時，下方的逐行讀取會
+            # 當場拋出例外，整個打包中斷在一個與真正失敗原因無關的錯誤上。
+            # 指定 UTF-8 是因為 PyInstaller 本身是 Python 程式。
+            # 詳見 docs/investigations/子行程輸出的解碼修正.md。
             process = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1, universal_newlines=True,
+                text=True, encoding="utf-8", errors="replace",
+                bufsize=1, universal_newlines=True,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except FileNotFoundError:

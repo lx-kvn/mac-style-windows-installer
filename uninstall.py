@@ -147,9 +147,13 @@ def is_process_running(exe_name):
         return False
     try:
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        # errors="replace"：解碼失敗會走到下方的 except、回傳 False，等於把
+        # 「主程式正在執行」誤判成沒有執行，解除安裝會漏掉這道保護。
+        # 詳見 docs/investigations/子行程輸出的解碼修正.md。
         output = subprocess.check_output(
             ["tasklist", "/FI", f"IMAGENAME eq {exe_name}", "/NH"],
-            text=True, stderr=subprocess.DEVNULL, creationflags=creationflags,
+            text=True, errors="replace",
+            stderr=subprocess.DEVNULL, creationflags=creationflags,
         )
         return exe_name.lower() in output.lower()
     except Exception:

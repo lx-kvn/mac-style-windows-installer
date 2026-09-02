@@ -277,7 +277,9 @@ class Vm:
         cmd += [subcommand, self.machine.vmx] + [str(arg) for arg in args]
         if self._log:
             self._log(" ".join(self._redact(cmd)))
-        result = self._run(cmd, capture_output=True, text=True)
+        # errors="replace"：解碼失敗時 stdout/stderr 會變成 None，下方的 detail
+        # 變成空字串，VmError 只剩結束碼。詳見 docs/investigations/子行程輸出的解碼修正.md。
+        result = self._run(cmd, capture_output=True, text=True, errors="replace")
         if check and result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()
             raise VmError(

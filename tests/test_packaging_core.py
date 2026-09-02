@@ -26,6 +26,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import _fakes
 import cert_subject
 import install_engine
 import packaging_core
@@ -1636,3 +1637,24 @@ class TestMsixIconDimensions(PackDataValidationTestBase):
         })
         _, error = self._validate(data, png_path=self.big)
         self.assertIsNotNone(error)
+
+
+class SubprocessOutputDecodingTest(unittest.TestCase):
+    """子行程輸出的解碼方式（見 tests/_fakes.py 的解碼探針說明）。
+
+    這些測試真的起一個子行程，讓它輸出一段在系統地區編碼下無法解碼的位元組，
+    再檢查受測函式最後拿到什麼——驗證的是「輸出有沒有被完整取回」，不是實作
+    傳了哪些參數。
+    """
+
+    def test_the_probe_result_survives_bytes_the_locale_cannot_decode(self):
+        """讀不到輸出的代價是把已安裝的套件回報成沒安裝，使用者會被擋在
+        「環境不齊全」的訊息前面，而那個結論是錯的。"""
+        script = _fakes.decode_probe_script(ascii_text="WEBVIEW_OK\nPYWIN32_OK\n")
+        with mock.patch("packaging_core.shutil.which", return_value="python.exe"), \
+             mock.patch("packaging_core.subprocess.run",
+                        side_effect=_fakes.decode_probe_run(script)):
+            result = packaging_core.check_build_environment()
+        self.assertTrue(result["webview_found"])
+        self.assertTrue(result["pywin32_found"])
+

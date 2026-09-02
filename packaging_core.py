@@ -308,9 +308,13 @@ def check_build_environment():
             "    pass\n"
         )
         try:
+            # encoding/errors：解碼失敗時 stdout 會變成 None，兩個探測結果都被
+            # 判成「沒安裝」，使用者會被擋在一個錯誤的「環境不齊全」結論前面。
+            # 指定 UTF-8 是因為子行程是 Python 直譯器。詳見 docs/investigations/子行程輸出的解碼修正.md。
             proc = subprocess.run(
                 [python_path, "-c", probe_script],
-                capture_output=True, timeout=15, creationflags=creationflags, text=True,
+                capture_output=True, timeout=15, creationflags=creationflags,
+                text=True, encoding="utf-8", errors="replace",
             )
             output = proc.stdout or ""
             result["webview_found"] = "WEBVIEW_OK" in output

@@ -21,6 +21,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import _fakes
 from _fakes import FakeWinReg
 import uninstall as un
 
@@ -957,6 +958,21 @@ class TestUninstallManifestDrivenDeletion(unittest.TestCase):
 
         self.assertFalse(os.path.exists(os.path.join(self.install_dir, "assets")), "清空的子目錄應該被清掉")
         self.assertTrue(safe_to_remove_whole_dir)
+
+
+class SubprocessOutputDecodingTest(unittest.TestCase):
+    """子行程輸出的解碼方式（見 tests/_fakes.py 的解碼探針說明）。
+
+    這些測試真的起一個子行程，讓它輸出一段在系統地區編碼下無法解碼的位元組，
+    再檢查受測函式最後拿到什麼——驗證的是「輸出有沒有被完整取回」，不是實作
+    傳了哪些參數。
+    """
+
+    def test_a_running_process_is_still_detected_when_tasklist_output_is_not_decodable(self):
+        script = _fakes.decode_probe_script(ascii_text="MyApp.exe   1234 Console")
+        with mock.patch("uninstall.subprocess.check_output",
+                        side_effect=_fakes.decode_probe_check_output(script)):
+            self.assertTrue(un.is_process_running("MyApp.exe"))
 
 
 if __name__ == "__main__":

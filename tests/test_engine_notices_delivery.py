@@ -124,7 +124,7 @@ class TheBuildReportsThem(unittest.TestCase):
     def _run(self, **overrides):
         messages = []
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist, exist_ok=True)
                 with open(os.path.join(self.dist, "uninstall.exe"), "wb") as f:

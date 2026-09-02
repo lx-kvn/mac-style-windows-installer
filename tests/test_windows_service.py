@@ -10,6 +10,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import _fakes
 import windows_service
 
 
@@ -217,6 +218,24 @@ class TestRemoveServiceLifecycle(unittest.TestCase):
 
         self.assertFalse(result)
         self.assertIn("delete", runner.subcommands)
+
+
+class SubprocessOutputDecodingTest(unittest.TestCase):
+    """子行程輸出的解碼方式（見 tests/_fakes.py 的解碼探針說明）。
+
+    這些測試真的起一個子行程，讓它輸出一段在系統地區編碼下無法解碼的位元組，
+    再檢查受測函式最後拿到什麼——驗證的是「輸出有沒有被完整取回」，不是實作
+    傳了哪些參數。
+    """
+
+    def test_the_service_state_is_still_parsed_when_output_is_not_decodable(self):
+        script = _fakes.decode_probe_script(
+            ascii_text="SERVICE_NAME: MySvc\n        STATE              : 4  RUNNING\n")
+        with mock.patch("windows_service.subprocess.run",
+                        side_effect=_fakes.decode_probe_run(script)):
+            exists, state = windows_service._query_service_state("MySvc")
+        self.assertTrue(exists)
+        self.assertEqual(state, 4)
 
 
 if __name__ == "__main__":

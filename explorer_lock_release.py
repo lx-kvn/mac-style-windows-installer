@@ -172,9 +172,14 @@ def _resolve_image_name(pid, log=_noop_log):
     """
     try:
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        # errors="replace"：解碼失敗會走到下方的 except、回傳空字串，而空字串
+        # 被呼叫端當成「不是 explorer.exe」，強制關殼層的保護就不會啟動——正是
+        # 這個函式的說明要求「一定要留下痕跡」的那類無聲失敗。
+        # 詳見 docs/investigations/子行程輸出的解碼修正.md。
         output = subprocess.check_output(
             f'tasklist /FI "PID eq {pid}" /NH /FO CSV',
-            shell=True, text=True, stderr=subprocess.DEVNULL, creationflags=creationflags,
+            shell=True, text=True, errors="replace",
+            stderr=subprocess.DEVNULL, creationflags=creationflags,
         )
         first_line = output.strip().splitlines()[0] if output.strip() else ""
         image_name = first_line.split(",")[0].strip('"')

@@ -15,7 +15,9 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import _fakes
 import builder
+import sdk_tools
 
 
 def make_fake_run(uninstall_dist_dir):
@@ -23,12 +25,27 @@ def make_fake_run(uninstall_dist_dir):
     dist/ 底下生出一個假的 uninstall.exe，讓 build_all() 後續「檢查產出檔案
     是否存在」那段可以正常通過，不用真的呼叫 pyinstaller。
     """
-    def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+    def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
         if "uninstall.py" in cmd:
             os.makedirs(uninstall_dist_dir, exist_ok=True)
             with open(os.path.join(uninstall_dist_dir, "uninstall.exe"), "wb") as f:
                 f.write(b"FAKE_UNINSTALL_EXE")
         return mock.Mock(returncode=0, stdout="", stderr="")
+    return fake_run
+
+
+def make_decode_probe_run(uninstall_dist_dir, probe_script_name):
+    """回傳假的 subprocess.run：編譯 probe_script_name 的那一道指令改跑
+    tests/_fakes.py 的解碼探針，其餘指令維持 make_fake_run 的行為。
+    """
+    passthrough = make_fake_run(uninstall_dist_dir)
+    probe = _fakes.decode_probe_run(_fakes.decode_probe_script(
+        utf8_text=_fakes.UTF8_PROBE_TEXT, exit_code=1))
+
+    def fake_run(cmd, **kwargs):
+        if probe_script_name not in cmd:
+            return passthrough(cmd, **kwargs)
+        return probe(cmd, **kwargs)
     return fake_run
 
 
@@ -85,7 +102,7 @@ class TestConfigAssembly(BuildAllTestBase):
         """
         captured = {}
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
                 with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
@@ -126,7 +143,7 @@ class TestConfigAssembly(BuildAllTestBase):
     def test_windows_service_field_written_to_config_verbatim(self):
         captured = {}
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
                 with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
@@ -143,7 +160,7 @@ class TestConfigAssembly(BuildAllTestBase):
     def test_windows_service_defaults_to_empty_dict(self):
         captured = {}
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
                 with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
@@ -159,7 +176,7 @@ class TestConfigAssembly(BuildAllTestBase):
     def test_scheduled_task_field_written_to_config_verbatim(self):
         captured = {}
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
                 with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
@@ -176,7 +193,7 @@ class TestConfigAssembly(BuildAllTestBase):
     def test_scheduled_task_defaults_to_empty_dict(self):
         captured = {}
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
                 with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
@@ -192,7 +209,7 @@ class TestConfigAssembly(BuildAllTestBase):
     def test_dependencies_min_version_written_to_config_verbatim(self):
         captured = {}
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
                 with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
@@ -209,7 +226,7 @@ class TestConfigAssembly(BuildAllTestBase):
     def test_dependencies_min_version_defaults_to_empty_dict(self):
         captured = {}
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
                 with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
@@ -225,7 +242,7 @@ class TestConfigAssembly(BuildAllTestBase):
     def test_create_restore_point_before_install_written_to_config(self):
         captured = {}
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
                 with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
@@ -241,7 +258,7 @@ class TestConfigAssembly(BuildAllTestBase):
     def test_create_restore_point_before_install_defaults_to_false(self):
         captured = {}
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
                 with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
@@ -257,7 +274,7 @@ class TestConfigAssembly(BuildAllTestBase):
     def test_folder_name_falls_back_to_app_name_when_blank(self):
         captured = {}
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
                 with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
@@ -276,7 +293,7 @@ class TestConfigAssembly(BuildAllTestBase):
         才有意義，見 installer_core.py 的 _compute_default_path()。"""
         captured = {}
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
                 with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
@@ -292,7 +309,7 @@ class TestConfigAssembly(BuildAllTestBase):
     def test_custom_install_dir_defaults_to_empty_string(self):
         captured = {}
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
                 with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
@@ -311,7 +328,7 @@ class TestConfigAssembly(BuildAllTestBase):
             f.write(b"DOC_ICO")
         captured = {}
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
                 with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
@@ -348,7 +365,7 @@ class TestConfigAssembly(BuildAllTestBase):
         captured = {}
         captured_cmd = {}
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
                 with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
@@ -379,7 +396,7 @@ class TestConfigAssembly(BuildAllTestBase):
     def test_no_doc_icons_produces_empty_config_entry(self):
         captured = {}
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
                 with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
@@ -407,7 +424,7 @@ class TestInstallPasswordProtection(BuildAllTestBase):
     def test_password_protected_flag_written_to_config_when_set(self):
         captured = {}
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
                 with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
@@ -424,7 +441,7 @@ class TestInstallPasswordProtection(BuildAllTestBase):
     def test_password_protected_defaults_to_false(self):
         captured = {}
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
                 with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
@@ -443,7 +460,7 @@ class TestInstallPasswordProtection(BuildAllTestBase):
         --add-data 絕對不能直接指向明文的 app_dir』這件事。"""
         captured_cmd = {}
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
                 with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
@@ -464,7 +481,7 @@ class TestInstallPasswordProtection(BuildAllTestBase):
     def test_encrypted_payload_temp_file_cleaned_up_after_build(self):
         temp_files_during_build = {}
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
                 with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
@@ -487,7 +504,7 @@ class TestInstallPasswordProtection(BuildAllTestBase):
         多一道加密/解密流程。"""
         captured_cmd = {}
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
                 with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
@@ -510,7 +527,7 @@ class TestConfigHasNoDeadFields(BuildAllTestBase):
     def test_display_name_is_not_written_to_the_config(self):
         captured = {}
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
                 with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
@@ -537,7 +554,7 @@ class TestInstallPasswordSources(BuildAllTestBase):
     def _build_and_capture(self, **overrides):
         captured = {"config": {}, "encrypt_calls": [], "cmd": []}
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
                 with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
@@ -788,7 +805,7 @@ class TestErrorPaths(BuildAllTestBase):
             self._call_build_all()
 
     def test_uninstall_compile_failure_raises_with_output(self):
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             if "uninstall.py" in cmd:
                 return mock.Mock(returncode=1, stdout="some pyinstaller output", stderr="boom")
             return mock.Mock(returncode=0, stdout="", stderr="")
@@ -798,7 +815,7 @@ class TestErrorPaths(BuildAllTestBase):
         self.assertIn("反安裝程式編譯失敗", str(ctx.exception))
 
     def test_installer_compile_failure_raises_with_output(self):
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
                 with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
@@ -834,7 +851,7 @@ class TestUninstallCompileFlags(BuildAllTestBase):
     def test_uninstall_cmd_has_noconsole_and_ui_data(self):
         captured_cmds = []
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             captured_cmds.append(cmd)
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
@@ -853,7 +870,7 @@ class TestUninstallCompileFlags(BuildAllTestBase):
         captured_cmds = []
         captured_contents = {}
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             captured_cmds.append(cmd)
             version_file_flag = next(arg for arg in cmd if arg.startswith("--version-file="))
             version_file_path = version_file_flag.split("=", 1)[1]
@@ -883,7 +900,7 @@ class TestUninstallCompileFlags(BuildAllTestBase):
     def test_uninstall_cmd_omits_uac_admin_when_no_admin_install(self):
         captured_cmds = []
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             captured_cmds.append(cmd)
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
@@ -923,7 +940,7 @@ class TestMsixEngineBuild(BuildAllTestBase):
     def _msix_build(self, **overrides):
         commands = []
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             commands.append(cmd)
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
@@ -974,7 +991,7 @@ class TestMsixEngineBuild(BuildAllTestBase):
     def test_the_traditional_engine_still_builds_the_uninstaller(self):
         commands = []
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             commands.append(cmd)
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
@@ -995,7 +1012,7 @@ class TestMsixConfigFields(BuildAllTestBase):
             f.write(b"PK")
         captured = {}
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             config_path = os.path.join(self.workspace_dir, "installer_config.json")
             if os.path.exists(config_path):
                 with open(config_path, encoding="utf-8") as f:
@@ -1010,7 +1027,7 @@ class TestMsixConfigFields(BuildAllTestBase):
     def test_the_traditional_engine_records_itself_too(self):
         captured = {}
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             if "uninstall.py" in cmd:
                 os.makedirs(self.dist_dir, exist_ok=True)
                 with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
@@ -1046,7 +1063,7 @@ class TestSignedMsixSurvivesCleanup(BuildAllTestBase):
 
         seen = {}
 
-        def fake_run(cmd, cwd=None, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
             for part in cmd:
                 if part.startswith("--add-data=") and ".msix" in part:
                     source = part[len("--add-data="):].split(";")[0]
@@ -1070,6 +1087,53 @@ class TestSignedMsixSurvivesCleanup(BuildAllTestBase):
                                  returncode=0, stdout="", stderr=""))
         leftovers = [n for n in os.listdir(self.workspace_dir) if n.endswith(".msix")]
         self.assertEqual(leftovers, [], f"工作目錄留下暫存副本：{leftovers}")
+
+
+class TestSubprocessOutputDecoding(BuildAllTestBase):
+    """子行程輸出的解碼方式：不沿用系統地區編碼。
+
+    真實踩到的狀況（繁體中文 Windows 11，地區編碼為 cp950）：PyInstaller 的
+    輸出含有非 cp950 的位元組時，subprocess 讀取管線的背景執行緒會拋出
+    UnicodeDecodeError。該例外發生在背景執行緒、不會傳到呼叫端，因此
+    returncode 仍然拿得到，但 stdout 與 stderr 全部變成 None。編譯成功時看
+    不出異狀；編譯失敗時，唯一能說明失敗原因的那段輸出整個消失，工具只回報
+    一句沒有內容的失敗。
+
+    這裡不斷言 builder.py 傳了哪些參數——那只是覆述實作自己寫下的常數。測試
+    真的起一個子行程，讓它輸出 UTF-8 編碼的中文，加上一個在 cp950 與 UTF-8
+    都不合法的位元組，再檢查 builder.py 組出來的錯誤訊息裡有沒有那段中文。
+    如此一來，在任何地區設定的機器上預期結果都相同。
+    """
+
+    def test_signing_failure_reports_what_signtool_actually_printed(self):
+        located = sdk_tools.ToolLocation(
+            os.path.join(self.workspace_dir, "signtool.exe"), "manual", "", "signtool.exe")
+        signing = {
+            "cert_path": os.path.join(self.workspace_dir, "cert.pfx"),
+            "cert_password_env": "TEST_CERT_PW_NOT_SET",
+            "timestamp_url": "http://timestamp.example/",
+        }
+
+        with self.assertRaises(Exception) as ctx:
+            builder._sign_file(
+                os.path.join(self.workspace_dir, "installer_core.py"), signing,
+                find_tool=lambda name: located,
+                run=_fakes.decode_probe_run(_fakes.decode_probe_script(
+                    utf8_text=_fakes.UTF8_PROBE_TEXT, exit_code=1)),
+            )
+        self.assertIn(_fakes.UTF8_PROBE_TEXT, str(ctx.exception))
+
+    def test_uninstall_compile_failure_reports_what_pyinstaller_printed(self):
+        with self.assertRaises(Exception) as ctx:
+            self._call_build_all(
+                run_side_effect=make_decode_probe_run(self.dist_dir, "uninstall.py"))
+        self.assertIn(_fakes.UTF8_PROBE_TEXT, str(ctx.exception))
+
+    def test_installer_compile_failure_reports_what_pyinstaller_printed(self):
+        with self.assertRaises(Exception) as ctx:
+            self._call_build_all(
+                run_side_effect=make_decode_probe_run(self.dist_dir, "installer_core.py"))
+        self.assertIn(_fakes.UTF8_PROBE_TEXT, str(ctx.exception))
 
 
 if __name__ == "__main__":

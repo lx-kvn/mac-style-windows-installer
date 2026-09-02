@@ -54,6 +54,30 @@ import sdk_tools
 
 CONFIG_FILE_NAME = "installer_config.json"
 
+# 呼叫子行程並取回其文字輸出時共用的參數。三個呼叫端（signtool 簽章、編譯
+# uninstall.exe、編譯主安裝檔）都必須帶上這一組，抽成常數是為了讓「解碼方式」
+# 只有一個定義處，新增第四個呼叫端時不會漏掉。
+#
+# 不使用 text=True 的預設解碼行為（依系統地區編碼解碼），因為在繁體中文
+# Windows 上地區編碼是 cp950：子行程輸出含有非 cp950 的位元組時，subprocess
+# 讀取管線的背景執行緒會拋出 UnicodeDecodeError。該例外發生在背景執行緒、
+# 不會傳到呼叫端，因此 returncode 照樣拿得到，但 stdout 與 stderr 會變成
+# None——編譯成功時完全看不出異狀，編譯失敗時卻讓唯一能說明失敗原因的那段
+# 輸出整段消失，工具只能回報一句沒有內容的失敗。
+#
+# 指定 UTF-8 而不是系統地區編碼，因為實際觀察到無法解碼的位元組來自 UTF-8
+# 編碼的內容。反過來說，子行程若以地區編碼輸出非 ASCII 文字，這裡會把那段
+# 文字換成替代字元；此取捨可接受，因為輸出的骨幹（ASCII 的錯誤訊息與模組
+# 名稱）在兩種情況下都完整保留。errors="replace" 則保證任何位元組組合都不會
+# 讓讀取失敗，這是上述症狀不再發生的關鍵。整份調查（含其他模組同類呼叫端的
+# 處理方式）記在 docs/investigations/子行程輸出的解碼修正.md。
+SUBPROCESS_TEXT_KWARGS = {
+    "capture_output": True,
+    "text": True,
+    "encoding": "utf-8",
+    "errors": "replace",
+}
+
 
 def _file_sha256(path, chunk_size=1024 * 1024):
     """算檔案的 SHA-256 摘要（十六進位小寫字串）。
@@ -168,7 +192,7 @@ def _sign_file(target_path, signing, find_tool=None, run=None, log=None):
             "/td", "sha256",
             target_path,
         ],
-        creationflags=creationflags, capture_output=True, text=True,
+        creationflags=creationflags, **SUBPROCESS_TEXT_KWARGS,
     )
     if result.returncode != 0:
         # 錯誤訊息不印密碼（signtool 本身的輸出也不會回顯密碼，這裡只是不
@@ -507,7 +531,7 @@ def build_all(
         # 視窗被隱藏之後，失敗時的診斷資訊只能靠這個，不能再讓使用者盯著閃過的視窗自己看。
         res_un = subprocess.run(
             uninstall_cmd, cwd=workspace_dir, creationflags=creationflags,
-            capture_output=True, text=True,
+            **SUBPROCESS_TEXT_KWARGS,
         )
         if res_un.returncode != 0:
             tail = ((res_un.stdout or "") + "\n" + (res_un.stderr or ""))[-1500:]
@@ -645,7 +669,7 @@ def build_all(
 
         res_installer = subprocess.run(
             cmd, cwd=workspace_dir, creationflags=creationflags,
-            capture_output=True, text=True,
+            **SUBPROCESS_TEXT_KWARGS,
         )
     finally:
         # 步驟 4：清理暫存中間檔案（不管上面是正常結束還是中途拋例外）

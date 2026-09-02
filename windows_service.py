@@ -68,9 +68,11 @@ def _query_service_state(service_name):
     code，這裡一律當成 (False, None)；exists=True 但解析不出 STATE 那行
     （理論上不會發生，保留當防呆）時 state_code 是 None。"""
     try:
+        # errors="replace"：解碼失敗時 stdout 會變成 None，服務會被回報成「存在
+        # 但狀態不明」，停止服務的等待邏輯因此拿不到正確狀態。詳見 docs/investigations/子行程輸出的解碼修正.md。
         result = subprocess.run(
             ["sc.exe", "query", service_name], creationflags=_CREATE_NO_WINDOW, timeout=30,
-            capture_output=True, text=True,
+            capture_output=True, text=True, errors="replace",
         )
         if result.returncode != 0:
             return False, None

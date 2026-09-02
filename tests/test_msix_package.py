@@ -20,6 +20,7 @@ import xml.etree.ElementTree as ET
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import _fakes
 import msix_manifest
 import msix_package
 
@@ -255,6 +256,31 @@ class PackTest(unittest.TestCase):
         messages = []
         self.pack(log=messages.append)
         self.assertTrue(any("makeappx" in m for m in messages))
+
+
+class SubprocessOutputDecodingTest(unittest.TestCase):
+    """子行程輸出的解碼方式（見 tests/_fakes.py 的解碼探針說明）。
+
+    這些測試真的起一個子行程，讓它輸出一段在系統地區編碼下無法解碼的位元組，
+    再檢查受測函式最後拿到什麼——驗證的是「輸出有沒有被完整取回」，不是實作
+    傳了哪些參數。
+    """
+
+    def test_the_failure_message_carries_what_the_tool_printed(self):
+        """打包工具失敗時，這段輸出是唯一能說明「清單哪裡不合法」的東西。"""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        staging = os.path.join(tmp, "staging")
+        os.makedirs(staging)
+        with open(os.path.join(staging, "AppxManifest.xml"), "w") as f:
+            f.write("<Package/>")
+        script = _fakes.decode_probe_script(
+            ascii_text="MakeAppx : error: manifest is invalid", exit_code=1)
+        with self.assertRaises(Exception) as ctx:
+            msix_package.pack(staging, os.path.join(tmp, "out.msix"),
+                              find_tool=fake_find_tool,
+                              run=_fakes.decode_probe_run(script))
+        self.assertIn("manifest is invalid", str(ctx.exception))
 
 
 if __name__ == "__main__":
