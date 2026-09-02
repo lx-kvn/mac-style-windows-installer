@@ -1658,9 +1658,24 @@ spike 驗證（見「已完成之待辦」）。以下為仍待解決者：
 
 ## 待辦事項
 
-1. 將 `packaging_core.py` 的欄位驗證訊息一併改為可翻譯的 key。目前只有
-   `install_engine.py` 完成，兩者的訊息顯示在同一個彈窗裡，英文介面下會
-   中英混雜（第十四輪決議第九項刻意分階段，見 `docs/adr/0011`）。
+1. 將 `packaging_core.py` 的欄位驗證訊息改為可翻譯的 key。四個訊息來源
+   中的最後一個——`install_engine`、`png_size`、`cert_subject`、
+   `msix_settings` 已完成，`packaging_core` 未完成，因此英文介面下的錯誤
+   彈窗仍會中英混雜（見 `docs/adr/0011` 決定五）。
+
+   **動手前要知道的三件事**（實際嘗試過一次後退回所得）：
+
+   - 訊息約 43 則，且**多則不只一句**：`<br>` 之後往往還有一整段解釋
+     （例如安裝密碼那則接著說明「設定檔是一份會被存進專案、傳給別人的
+     普通文字檔」）。憑印象重寫中文會把那些段落整段丟掉，而測試多半只
+     斷言關鍵字，不會叫。**中文一律逐字從原始碼取出，不重打。**
+   - Python 3.12 起 f-string 的 token 類型與一般字串不同，用 tokenizer
+     抓取時兩者要分開處理（單用 `tokenize.STRING` 會漏掉全部 f-string）。
+   - 「欄位驗證失敗：<br>」這個前綴出現在四十幾處，應由統一的輔助函式
+     加上，不寫進每一則訊息。
+
+   `lang` 需一路串到 `_validate_signing_config`、`_validate_custom_dependencies`、
+   `_normalize_version` 等數個模組層級的輔助函式。
 
 ## 已知限制（如實記錄）
 
