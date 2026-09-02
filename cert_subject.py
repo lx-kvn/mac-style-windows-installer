@@ -32,6 +32,8 @@ import ctypes
 import ctypes.wintypes as wintypes
 import os
 
+import messages
+
 X509_ASN_ENCODING = 0x00000001
 # CERT_X500_NAME_STR：X.500 的字串表示（`CN=..., O=...`）。
 # CERT_NAME_STR_REVERSE_FLAG：以與 DER 相反的順序輸出，即 X.500 的慣例。
@@ -40,8 +42,49 @@ CERT_X500_NAME_STR = 3
 CERT_NAME_STR_REVERSE_FLAG = 0x02000000
 
 
+
+# 訊息表。機制在 messages.py，那裡也說明了為什麼表留在各模組。
+MESSAGES = {
+    "zh-TW": {
+        "empty_subject": "憑證主體是空的，無法取得發行者名稱。",
+        "unparsable": "無法從憑證主體取得發行者名稱：Windows 無法解析這份主體資料。",
+        "empty_result": "無法從憑證主體取得發行者名稱：轉換結果為空。",
+        "not_found": "找不到憑證檔案：{path}",
+        "missing_dependency": "缺少 cryptography 套件，無法讀取憑證：{reason}",
+        "load_failed": "無法讀取憑證 {name}：{reason}（密碼不正確、或檔案不是有效的 .pfx 都會造成這個結果）",
+        "key_only": "憑證檔案 {name} 裡沒有憑證，只有私鑰。",
+    },
+    "en": {
+        "empty_subject": "The certificate subject is empty; the publisher name cannot be read.",
+        "unparsable": "Cannot read the publisher name from the certificate subject: Windows could not parse this subject data.",
+        "empty_result": "Cannot read the publisher name from the certificate subject: the conversion produced nothing.",
+        "not_found": "Certificate file not found: {path}",
+        "missing_dependency": "The cryptography package is missing, so the certificate cannot be read: {reason}",
+        "load_failed": "Cannot read the certificate {name}: {reason} (a wrong password, or a file that is not a valid .pfx, both produce this result)",
+        "key_only": "The certificate file {name} contains no certificate, only a private key.",
+    },
+}
+
+
+def _t(key, lang=messages.DEFAULT_LANGUAGE, **params):
+    return messages.translate(MESSAGES, key, lang, **params)
+
+
 class CertificateReadError(Exception):
-    """憑證讀不出來，或主體無法轉成字串。"""
+    """憑證讀不出來，或主體無法轉成字串。
+
+    攜帶的是訊息表的鍵與參數，不是現成的句子——留著現成句子的話，呼叫端
+    會直接印它，翻譯就永遠只做了一半。`str(e)` 仍然給出預設語言的句子，
+    讓「直接印出例外」這種既有寫法的行為不變。
+    """
+
+    def __init__(self, key, **params):
+        self.key = key
+        self.params = params
+        super().__init__(_t(key, **params))
+
+    def localized(self, lang=messages.DEFAULT_LANGUAGE):
+        return _t(self.key, lang, **self.params)
 
 
 class _CERT_NAME_BLOB(ctypes.Structure):
@@ -56,7 +99,7 @@ def subject_string_from_der(der_bytes):
     安裝失敗時才會顯現。
     """
     if not der_bytes:
-        raise CertificateReadError("憑證主體是空的，無法取得發行者名稱。")
+        raise CertificateReadError("empty_subject")
     buffer = (ctypes.c_byte * len(der_bytes)).from_buffer_copy(der_bytes)
     blob = _CERT_NAME_BLOB(
         len(der_bytes), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_byte))
@@ -67,13 +110,11 @@ def subject_string_from_der(der_bytes):
     # 空字元，因此 1 代表「只有結尾空字元」，也就是轉不出任何內容。
     size = crypt32.CertNameToStrW(X509_ASN_ENCODING, ctypes.byref(blob), flags, None, 0)
     if size <= 1:
-        raise CertificateReadError(
-            "無法從憑證主體取得發行者名稱：Windows 無法解析這份主體資料。"
-        )
+        raise CertificateReadError("unparsable")
     out = ctypes.create_unicode_buffer(size)
     crypt32.CertNameToStrW(X509_ASN_ENCODING, ctypes.byref(blob), flags, out, size)
     if not out.value:
-        raise CertificateReadError("無法從憑證主體取得發行者名稱：轉換結果為空。")
+        raise CertificateReadError("empty_result")
     return out.value
 
 
@@ -85,11 +126,11 @@ def read_from_pfx(pfx_path, password):
     的安裝密碼保護也用它），不因此新增相依。
     """
     if not pfx_path or not os.path.isfile(pfx_path):
-        raise CertificateReadError(f"找不到憑證檔案：{pfx_path}")
+        raise CertificateReadError("not_found", path=pfx_path)
     try:
         from cryptography.hazmat.primitives.serialization import pkcs12
     except ImportError as e:  # pragma: no cover - 相依缺失由呼叫端的環境檢查涵蓋
-        raise CertificateReadError(f"缺少 cryptography 套件，無法讀取憑證：{e}")
+        raise CertificateReadError("missing_dependency", reason=e)
     try:
         with open(pfx_path, "rb") as f:
             data = f.read()
@@ -97,12 +138,7 @@ def read_from_pfx(pfx_path, password):
             data, (password or "").encode("utf-8")
         )
     except Exception as e:
-        raise CertificateReadError(
-            f"無法讀取憑證 {os.path.basename(pfx_path)}：{e}"
-            "（密碼不正確、或檔案不是有效的 .pfx 都會造成這個結果）"
-        )
+        raise CertificateReadError("load_failed", name=os.path.basename(pfx_path), reason=e)
     if certificate is None:
-        raise CertificateReadError(
-            f"憑證檔案 {os.path.basename(pfx_path)} 裡沒有憑證，只有私鑰。"
-        )
+        raise CertificateReadError("key_only", name=os.path.basename(pfx_path))
     return subject_string_from_der(certificate.subject.public_bytes())

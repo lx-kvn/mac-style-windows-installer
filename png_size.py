@@ -35,11 +35,50 @@ png_size.py
 """
 import struct
 
+import messages
+
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+# 訊息表。機制在 messages.py，那裡也說明了為什麼表留在各模組而不是集中一張。
+MESSAGES = {
+    "zh-TW": {
+        "unreadable": "讀不到圖片檔案：{reason}",
+        "truncated": "圖片檔案不完整，讀不到尺寸資訊。",
+        "not_png": "這個檔案的內容不是 PNG（副檔名可能與實際格式不符）。",
+        "bad_header": "PNG 檔頭的結構不符合規格，讀不到尺寸資訊。",
+        "not_square": "套件圖示必須是正方形，這張是 {width}×{height}。MSIX 的三個圖示位置都是正方形，長方形的圖會被拉扁。",
+        "too_small": "套件圖示的邊長至少要 {minimum} 像素，這張是 {width}×{height}。小於這個尺寸時 Windows 顯示它必須放大，而放大會讓圖示明顯糊掉（縮小則是安全的，所以大圖不受限制）。",
+    },
+    "en": {
+        "unreadable": "Cannot read the image file: {reason}",
+        "truncated": "The image file is incomplete; its dimensions cannot be read.",
+        "not_png": "This file's contents are not PNG (the extension may not match the actual format).",
+        "bad_header": "The PNG header does not follow the specification; its dimensions cannot be read.",
+        "not_square": "A package icon must be square; this one is {width}×{height}. All three MSIX icon positions are square, so a rectangular image gets squashed.",
+        "too_small": "A package icon needs edges of at least {minimum} pixels; this one is {width}×{height}. Below that size Windows has to scale it up, and scaling up leaves it visibly blurry (scaling down is safe, so large images are not restricted).",
+    },
+}
+
+
+def _t(key, lang=messages.DEFAULT_LANGUAGE, **params):
+    return messages.translate(MESSAGES, key, lang, **params)
 
 
 class NotAPng(Exception):
-    """檔案讀不到、不是 PNG、或檔頭不完整。"""
+    """檔案讀不到、不是 PNG、或檔頭不完整。
+
+    攜帶的是訊息表的鍵與參數，不是現成的句子——留著現成句子的話，呼叫端會
+    直接印它，翻譯就永遠只做了一半。`str(e)` 仍然給出預設語言的句子，讓
+    「直接印出例外」這種既有寫法的行為不變。
+    """
+
+    def __init__(self, key, **params):
+        self.key = key
+        self.params = params
+        super().__init__(_t(key, **params))
+
+    def localized(self, lang=messages.DEFAULT_LANGUAGE):
+        return _t(self.key, lang, **self.params)
 
 
 def read(path):
@@ -52,21 +91,21 @@ def read(path):
         with open(path, "rb") as f:
             header = f.read(24)
     except OSError as e:
-        raise NotAPng(f"讀不到圖片檔案：{e}")
+        raise NotAPng("unreadable", reason=e)
 
     if len(header) < 24:
-        raise NotAPng("圖片檔案不完整，讀不到尺寸資訊。")
+        raise NotAPng("truncated")
     if header[:8] != PNG_SIGNATURE:
-        raise NotAPng("這個檔案的內容不是 PNG（副檔名可能與實際格式不符）。")
+        raise NotAPng("not_png")
     # 規格要求 IHDR 是第一個區塊。不檢查的話，遇到不符規格的檔案會把另一個
     # 區塊的內容當成寬高讀出來，得到一組看起來合理的假尺寸。
     if header[12:16] != b"IHDR":
-        raise NotAPng("PNG 檔頭的結構不符合規格，讀不到尺寸資訊。")
+        raise NotAPng("bad_header")
     width, height = struct.unpack(">II", header[16:24])
     return width, height
 
 
-def describe_problem(path, minimum):
+def describe_problem(path, minimum, lang=messages.DEFAULT_LANGUAGE):
     """檢查一張圖能不能當 MSIX 的套件圖示，沒問題回傳 None。
 
     判斷與訊息放在一起，讓每個呼叫點不必各自組一次措辭——三個圖示位置加上
@@ -75,17 +114,10 @@ def describe_problem(path, minimum):
     try:
         width, height = read(path)
     except NotAPng as e:
-        return str(e)
+        return e.localized(lang)
 
     if width != height:
-        return (
-            f"套件圖示必須是正方形，這張是 {width}×{height}。"
-            "MSIX 的三個圖示位置都是正方形，長方形的圖會被拉扁。"
-        )
+        return _t("not_square", lang, width=width, height=height)
     if width < minimum:
-        return (
-            f"套件圖示的邊長至少要 {minimum} 像素，這張是 {width}×{height}。"
-            "小於這個尺寸時 Windows 顯示它必須放大，而放大會讓圖示明顯糊掉"
-            "（縮小則是安全的，所以大圖不受限制）。"
-        )
+        return _t("too_small", lang, minimum=minimum, width=width, height=height)
     return None
