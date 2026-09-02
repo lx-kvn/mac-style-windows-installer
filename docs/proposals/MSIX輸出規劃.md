@@ -44,16 +44,12 @@
 
 ### 量測不到、而非未決定的
 
-- **Windows 10 1809 的實機驗證**：最低版本 `10.0.17763.0` 的依據是微軟
-  支援矩陣，未經實機確認（第六輪查證結果）。**這一項已不再是量測不到**
-  ——2026-09-03 建立了 Windows 10 Enterprise LTSC 2019（17763.316）的驗證
-  虛擬機並確認可自動化操作（見 `tools/vms.py` 與
-  `.claude/skills/run-test-vm`），驗證本身尚未執行，見待辦第 1 項。
 - **不宣告圖示時系統實際使用哪個圖示**：CI 探針量測失敗，對照組亦無回應，
   當時如實回報測不到（ADR-0010 已知限制）。
 
-安裝介面在缺少 WebView2 Runtime 時的行為原本也列於此處，已於 2026-09-03
-量測完畢，移入「已完成之待辦」。
+以下兩項原本也列於此處，皆已於 2026-09-03 量測完畢，移入「已完成之待辦」：
+Windows 10 1809 的實機驗證（最低版本宣告與側載預設值，見 `tools/vms.py`、
+`tools/verify_msix_1809.py`），以及安裝介面在缺少 WebView2 Runtime 時的行為。
 
 ### 明確排除、不是遺漏的
 
@@ -1756,51 +1752,31 @@ spike 驗證（見「已完成之待辦」）。以下為仍待解決者：
   記載的「畫面會直接空白或報錯」已一併更正為實測所見。驗證環境與操作方式
   記於 `.claude/skills/run-test-vm`。
 
+- **1809（組建 17763）的兩項實機驗證**（原待辦第 1 項）——已於 2026-09-03
+  在 Windows 10 Enterprise LTSC 2019（17763.316）的虛擬機上完成，兩項皆
+  成立：
+
+  - **`MinVersion=10.0.17763.0` 確實能在組建 17763 完成部署。** 套件被系統
+    接收，版本與發行者皆與送入的套件一致，`InstallLocation` 確實存在。這連帶
+    確認「避開 `uap10:RuntimeBehavior`、改用
+    `EntryPoint="windows.fullTrustApplication"`」的判斷正確——該判斷若有誤，
+    會在 17763 上當場失敗。
+  - **未設定側載登錄值時部署被拒**，第六輪查證結果第一項成立。
+
+  驗證腳本為 `tools/verify_msix_1809.py`，虛擬機的操作方式見
+  `.claude/skills/run-test-vm`。兩項的執行順序不可對調，理由與判定方式記於
+  該模組的說明文字。
+
+  **過程中發現一項產品缺陷，另行處理：** 第一次執行時第一項失敗，原因並非
+  版本宣告，而是安裝檔內部缺少 `winrt-*` 綁定（安裝紀錄為
+  `No module named 'winrt'`）。打包機器未安裝該組套件時，工具照樣回報編譯
+  成功並產出一顆必定失敗的安裝檔；本文原先「`Setup_XXX.exe` 是自足的
+  （`winrt-*` 已內嵌）」的敘述，只在打包機器已安裝該組套件時成立。CI 涵蓋
+  不到此缺陷，因為 CI 每次都明確安裝那五個套件。
+
 ## 待辦事項
 
-1. 以 Windows 10 Enterprise LTSC 2019 的虛擬機驗證兩項只有官方文件、
-   沒有實機確認的敘述。該版本即 build 17763，與 1809 同一組建；一般版的
-   1809 已終止支援、無法取得合法安裝媒體，因此驗到的是「同組建、不同
-   版本」，這一點要如實記載。
-
-   一台虛擬機可同時驗掉兩件事：
-
-   - `MinVersion=10.0.17763.0` 是否真的能在該組建完成部署（連帶驗證
-     「避開 `uap10:RuntimeBehavior`、改用
-     `EntryPoint="windows.fullTrustApplication"`」這個決定是否正確——
-     `uap10:` 需要 2004，判斷若有誤會在 17763 上當場失敗）。
-   - 企業版／教育版／LTSC 在 2004 之前預設關閉側載（第六輪查證結果
-     第一項）。LTSC 2019 正是該情境本身。
-
-   **用 VMware Workstation，不用 Hyper-V。** 這台開發機已裝有 VMware
-   Workstation 17.6.1，其 `vmrun.exe` 提供的自動化介面足以把整套驗證寫成
-   腳本，形狀與 `test-msix-engine` job 相同：`revertToSnapshot` →
-   `start nogui` → `CopyFileFromHostToGuest`（送入 `Setup_XXX.exe` 與測試
-   憑證）→ `runProgramInGuest`（`/S` 安裝、`Get-AppxPackage` 查詢）→
-   `CopyFileFromGuestToHost`（取回結果）→ `stop`。主機端拿到結果檔即可
-   斷言。失敗時另有 `captureScreen` 可存證。
-
-   採快照而非「獨立-非持續」磁碟模式：後者關機即自動丟棄、更省事，但只有
-   單一乾淨狀態。本項要驗的兩件事需要「未開啟側載」與「已開啟側載」兩個
-   狀態各測一次，快照給得了，非持續磁碟給不了。
-
-   前置條件與注意事項：
-
-   - guest 內必須安裝 VMware Tools，否則 `runProgramInGuest` 與
-     `CopyFile*` 皆無法使用，只剩開關機。
-   - `runProgramInGuest` 需要 guest 的帳號密碼。VM 為用完即丟的測試環境、
-     不含真實資料，但該密碼不寫死在會進版控的檔案裡，比照本專案既有作法
-     走環境變數。
-   - VM 內不需要開發環境：`Setup_XXX.exe` 是自足的（`winrt-*` 已內嵌）。
-   - 關閉 guest 的自動更新，否則 VHD 會持續長大。
-   - GitHub Actions 沒有 1809 的 runner，這件事只能本機做。
-
-   已知的副作用：這台機器為此啟用了 Hyper-V，而 Hyper-V 啟用後 VMware
-   只能跑在 Windows Hypervisor Platform 之上，效能低於獨佔硬體虛擬化時。
-   若既有的 VMware 虛擬機明顯變慢，可考慮關閉 Hyper-V——代價是 Windows
-   沙箱一併不能用（見下一項）。
-
-2. 評估安裝程式是否應在啟動前偵測 WebView2 Runtime 是否存在。
+1. 評估安裝程式是否應在啟動前偵測 WebView2 Runtime 是否存在。
 
    原待辦「驗證缺少 WebView2 時的行為」已於 2026-09-03 完成（見「已完成
    之待辦」），實測結果比原先設想的更不利：畫面看起來像是仍在載入，使用者
