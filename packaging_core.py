@@ -31,6 +31,140 @@ import msix_settings
 import png_size
 import windows_service
 
+# 訊息表。機制在 messages.py，那裡也說明了為什麼表留在各模組而不是集中一張。
+#
+# 繁中的內容是從原本寫死在各呼叫點的字串**逐字**搬過來的（工具見
+# scratchpad 的 msgtool.py：以 AST 抽取，隱式串接與 f-string 都能正確處理）。
+# 先前一次嘗試憑印象重寫，改掉了十六則的措辭、並把數則「<br>」之後的整段
+# 解釋丟掉，而測試多半只斷言關鍵字、全數通過——那正是不重打的理由。
+#
+# 「欄位驗證失敗：<br>」這個前綴出現在四十幾處，不寫進每一則訊息：每則各
+# 寫一次的結果是改一次措辭要改四十幾處，而且英文版還會出現幾則忘了翻的。
+# 由 _invalid() 統一加上。
+MESSAGES = {
+    "zh-TW": {
+        "admin.restore_point_conflict": "「免管理員權限安裝」與「安裝前建立系統還原點」不能同時使用。<br>建立系統還原點需要系統管理員權限，但免權限安裝的整個流程都在一般權限下執行，還原點必定建立失敗。請擇一取消。",
+        "admin.service_conflict": "「免管理員權限安裝」與「建立 Windows 服務」不能同時使用。<br>建立 Windows 服務（sc.exe）需要系統管理員權限，但免權限安裝的整個流程都在一般權限下執行，服務必定建立失敗。請擇一取消。",
+        "app_dir.empty": "所選的應用程式資料夾內部是空的，請確認已放入軟體檔案。",
+        "app_dir.invalid": "請選擇有效的應用程式內容資料夾。",
+        "app_dir.read_failed": "讀取資料夾失敗: {reason}",
+        "bundle_dep.not_selected": "bundle_dependencies 的「{key}」必須同時列在 dependencies 清單裡，才知道要內嵌哪個相依元件。",
+        "custom_dep.bad_sha256": "custom_dependencies 的「{key}」sha256 格式不正確，必須是 64 位十六進位字元（SHA-256 摘要）。",
+        "custom_dep.builtin_clash": "custom_dependencies 的 key「{key}」跟內建的相依元件撞名，請改用其他名稱。",
+        "custom_dep.duplicate": "custom_dependencies 的 key「{key}」重複了。",
+        "custom_dep.insecure_url": "custom_dependencies 的「{key}」download_url 必須是 https:// 開頭，不接受未加密的下載連結。",
+        "custom_dep.missing_fields": "custom_dependencies 裡每一筆都必須填 key、display_name、download_url、registry_check.path。",
+        "custom_dep.not_object": "custom_dependencies 裡每一筆都必須是物件（字典）。",
+        "doc_icon.ext_bad_format": "副檔名「{ext}」指定的專屬圖示不是有效的 {label} 檔案，請重新選擇。{reason}",
+        "doc_icon.ext_not_listed": "幫副檔名「{ext}」設定了專屬圖示，但它不在檔案關聯清單裡，請先把它加進檔案關聯清單，或移除這個圖示設定。",
+        "doc_icon.format": "已勾選自訂文件圖示，請選擇一顆 {label} 檔案，或取消勾選改沿用應用程式圖示。{reason}",
+        "doc_icon.msix_png_reason": "（MSIX 模式的檔案關聯圖示只能是 PNG：套件清單能用的宣告不接受 ICO，而接受 ICO 的那個宣告需要的 Windows 版本遠高於本工具宣告的最低版本。請把同一張圖另存一份 PNG。）",
+        "eula.no_default_lang": "已新增多語言 EULA，請從中選擇一個「預設/回退語言」。",
+        "file_assoc.empty": "已勾選「需要註冊檔案關聯」，請填入至少一個副檔名，或取消勾選。",
+        "ico_icon.required": "請選擇執行檔封面專用的 ICO 圖示檔案。",
+        "local_appdata.not_found": "指定改裝到 %LOCALAPPDATA% 的檔案「{rel}」不存在於應用程式資料夾中，請重新選擇。",
+        "main_exe.not_found": "選擇的主要執行檔不存在於應用程式資料夾中，請重新選擇。",
+        "main_exe.required": "請選擇應用程式的主要執行檔（.exe），這是建立捷徑、偵測執行中狀態、立即執行等功能所必需的。",
+        "min_version.builtin_only": "dependencies_min_version 只支援內建相依元件（vcredist_x64/dotnet_desktop）；自訂相依元件「{key}」的最低版本請改用 custom_dependencies 裡對應項目的 registry_check.min_version。",
+        "min_version.not_enabled": "dependencies_min_version 的「{key}」沒有在 dependencies 清單裡啟用，這個最低版本設定不會生效。",
+        "password.env_missing": "環境變數「{name}」目前沒有值，請先設定好安裝密碼再打包。",
+        "password.inline_in_config": "設定檔不支援直接寫入安裝密碼（`install_password`）。<br>設定檔是一份會被存進專案、傳給別人的普通文字檔，密碼寫在裡面等於整個保護失效。請改用 `install_password_env` 填入存放密碼的環境變數名稱；想直接輸入密碼請改用配置精靈（GUI）。",
+        "password.missing_dependency": "安裝密碼保護需要 `cryptography` 套件，目前找不到它。<br>請先執行 <code>pip install cryptography</code> 再打包，或取消「啟用安裝密碼保護」。",
+        "password.none_given": "已勾選「啟用安裝密碼保護」，請輸入密碼、或填入存放密碼的環境變數名稱，或取消勾選。",
+        "password.two_ways": "安裝密碼只能擇一指定：直接輸入密碼，或填入存放密碼的環境變數名稱，不能兩種同時給。",
+        "path_target.not_found": "「加入 PATH」指定的執行檔不存在於應用程式資料夾中，請重新選擇。",
+        "png_icon.required": "請選擇介面拖拽專用的 PNG 圖示檔案。",
+        "prefix.invalid": "欄位驗證失敗：<br>",
+        "prefix.refused": "拒絕編譯：<br>",
+        "script.not_found": "指定的{stage}腳本「{path}」不存在於應用程式資料夾中，請重新選擇。",
+        "script.stage_post": "安裝後置",
+        "script.stage_pre": "安裝前置",
+        "service.bad_start_type": "windows_service 的 start_type「{value}」不是有效值，必須是 {valid} 其中之一。",
+        "service.exe_not_found": "windows_service 指定的執行檔「{exe}」不存在於應用程式資料夾中，請重新選擇。",
+        "service.incomplete": "windows_service 的 service_name 跟 exe_relative_path 必須同時填寫，或都留空不使用這個功能。",
+        "signing.cert_password_env": "signing.cert_password_env 必須指定存放憑證密碼的環境變數名稱（密碼本身不放在設定檔裡）。",
+        "signing.cert_password_missing": "環境變數「{name}」目前沒有值，請先設定好憑證密碼再打包。",
+        "signing.cert_path": "signing.cert_path 必須指向一個實際存在的憑證檔案（.pfx）。",
+        "task.exe_not_found": "scheduled_task 指定的執行檔「{exe}」不存在於應用程式資料夾中，請重新選擇。",
+        "task.incomplete": "scheduled_task 的 task_name 跟 exe_relative_path 必須同時填寫，或都留空不使用這個功能。",
+        "text_fields.required": "所有文字欄位（名稱、版本、發行者、安裝檔名）皆為必填項目，請檢查是否有欄位遺漏。",
+        "version.bad_format": "版本號「{version}」格式不正確。<br>格式為 1 到 4 段非負整數，可選擇在後面加上連字號與預發布後綴，例如 1.0.0、1.2.3.4、1.0.0-rc1。",
+        "version.empty_suffix": "版本號「{version}」的連字號後面是空的，預發布後綴不能留空（例如 1.0.0-rc1）。",
+        "version.too_many_segments": "版本號「{version}」的數字段超過 4 段。<br>Windows 的版本資源固定只有 4 個數字欄位，放不下第 5 段。",
+        "workspace.prepare_failed": "無法在工作目錄（{dir}）準備必要的建置檔案：{reason}。請確認這個資料夾有寫入權限（例如不要放在 C:\\Program Files 底下），或改把打包工具移到有寫入權限的資料夾再執行。",
+    },
+    "en": {
+        "admin.restore_point_conflict": "\"Install without administrator rights\" and \"create a system restore point before installing\" cannot be used together.<br>Creating a restore point requires administrator rights, but the whole no-elevation install runs unelevated, so the restore point is guaranteed to fail. Turn one of them off.",
+        "admin.service_conflict": "\"Install without administrator rights\" and \"create a Windows service\" cannot be used together.<br>Creating a Windows service (sc.exe) requires administrator rights, but the whole no-elevation install runs unelevated, so the service is guaranteed to fail. Turn one of them off.",
+        "app_dir.empty": "The chosen application folder is empty; check that the files to package are in it.",
+        "app_dir.invalid": "Choose a valid application content folder.",
+        "app_dir.read_failed": "Reading the folder failed: {reason}",
+        "bundle_dep.not_selected": "The bundle_dependencies entry \"{key}\" must also be listed in dependencies, otherwise there is no way to know which prerequisite to embed.",
+        "custom_dep.bad_sha256": "The sha256 for custom_dependencies entry \"{key}\" is malformed; it must be 64 hexadecimal characters (a SHA-256 digest).",
+        "custom_dep.builtin_clash": "The custom_dependencies key \"{key}\" collides with a built-in prerequisite; use a different name.",
+        "custom_dep.duplicate": "The custom_dependencies key \"{key}\" appears more than once.",
+        "custom_dep.insecure_url": "The download_url for custom_dependencies entry \"{key}\" must start with https:// — unencrypted download links are not accepted.",
+        "custom_dep.missing_fields": "Every entry in custom_dependencies must fill in key, display_name, download_url and registry_check.path.",
+        "custom_dep.not_object": "Every entry in custom_dependencies must be an object (a dictionary).",
+        "doc_icon.ext_bad_format": "The icon set for the extension \"{ext}\" is not a valid {label} file; choose it again.{reason}",
+        "doc_icon.ext_not_listed": "The extension \"{ext}\" has its own icon, but it is not in the file association list. Add it to the list first, or remove the icon setting.",
+        "doc_icon.format": "A custom document icon is ticked. Choose a {label} file, or untick it and reuse the application icon.{reason}",
+        "doc_icon.msix_png_reason": " (File association icons must be PNG in MSIX mode: the manifest declaration available to the package does not accept ICO, and the declaration that does accept ICO requires a Windows version far above the minimum this tool declares. Save the same image as a PNG.)",
+        "eula.no_default_lang": "Several EULA languages were added; choose one of them as the default/fallback language.",
+        "file_assoc.empty": "\"Register file associations\" is ticked. Enter at least one extension, or untick it.",
+        "ico_icon.required": "Choose the ICO icon used as the executable's file icon.",
+        "local_appdata.not_found": "The file \"{rel}\", set to install into %LOCALAPPDATA%, is not in the application folder; choose it again.",
+        "main_exe.not_found": "The chosen main executable is not in the application folder; choose it again.",
+        "main_exe.required": "Choose the application's main executable (.exe). Shortcuts, the running-process check and launch-after-install all need it.",
+        "min_version.builtin_only": "dependencies_min_version only supports the built-in prerequisites (vcredist_x64/dotnet_desktop). For the custom prerequisite \"{key}\", set registry_check.min_version on its custom_dependencies entry instead.",
+        "min_version.not_enabled": "The dependencies_min_version entry \"{key}\" is not enabled in the dependencies list, so that minimum version has no effect.",
+        "password.env_missing": "The environment variable \"{name}\" currently has no value. Set the install password before packaging.",
+        "password.inline_in_config": "The config file does not support writing the install password directly (`install_password`).<br>A config file is an ordinary text file that gets committed to a project and passed around; a password written into it means the protection is void. Use `install_password_env` to name the environment variable holding the password instead; to type a password directly, use the configuration wizard (GUI).",
+        "password.missing_dependency": "Install password protection needs the `cryptography` package, which cannot be found.<br>Run <code>pip install cryptography</code> before packaging, or untick \"Enable install password protection\".",
+        "password.none_given": "\"Enable install password protection\" is ticked. Enter a password, name the environment variable holding it, or untick the option.",
+        "password.two_ways": "Pick one way to supply the install password: type it in, or name the environment variable holding it — not both.",
+        "path_target.not_found": "The executable chosen for \"add to PATH\" is not in the application folder; choose it again.",
+        "png_icon.required": "Choose the PNG icon used by the drag-to-install screen.",
+        "prefix.invalid": "Field validation failed:<br>",
+        "prefix.refused": "Build refused:<br>",
+        "script.not_found": "The {stage} script \"{path}\" is not in the application folder; choose it again.",
+        "script.stage_post": "post-install",
+        "script.stage_pre": "pre-install",
+        "service.bad_start_type": "The windows_service start_type \"{value}\" is not valid; it must be one of {valid}.",
+        "service.exe_not_found": "The executable \"{exe}\" named by windows_service is not in the application folder; choose it again.",
+        "service.incomplete": "windows_service needs both service_name and exe_relative_path filled in, or both left empty to skip the feature.",
+        "signing.cert_password_env": "signing.cert_password_env must name the environment variable holding the certificate password (the password itself does not go in the config file).",
+        "signing.cert_password_missing": "The environment variable \"{name}\" currently has no value. Set the certificate password before packaging.",
+        "signing.cert_path": "signing.cert_path must point at a certificate file (.pfx) that actually exists.",
+        "task.exe_not_found": "The executable \"{exe}\" named by scheduled_task is not in the application folder; choose it again.",
+        "task.incomplete": "scheduled_task needs both task_name and exe_relative_path filled in, or both left empty to skip the feature.",
+        "text_fields.required": "Every text field (name, version, publisher, installer filename) is required; check whether one was left blank.",
+        "version.bad_format": "The version number \"{version}\" is malformed.<br>The format is 1 to 4 non-negative integers, optionally followed by a hyphen and a prerelease suffix — 1.0.0, 1.2.3.4 or 1.0.0-rc1, for instance.",
+        "version.empty_suffix": "The version number \"{version}\" has nothing after the hyphen; a prerelease suffix cannot be empty (1.0.0-rc1, for instance).",
+        "version.too_many_segments": "The version number \"{version}\" has more than 4 numeric groups.<br>The Windows version resource has exactly 4 numeric fields; there is no room for a fifth.",
+        "workspace.prepare_failed": "Cannot prepare the required build files in the workspace ({dir}): {reason}. Check that this folder is writable (do not put it under C:\\Program Files, for instance), or move the packaging tool to a folder you can write to and run it again.",
+    },
+}
+
+
+def _t(key, lang=messages.DEFAULT_LANGUAGE, /, **params):
+    return messages.translate(MESSAGES, key, lang, **params)
+
+
+def _invalid(key, lang=messages.DEFAULT_LANGUAGE, /, **params):
+    """組出一則帶「欄位驗證失敗」前綴的訊息。"""
+    return _t("prefix.invalid", lang) + _t(key, lang, **params)
+
+
+def _refused(key, lang=messages.DEFAULT_LANGUAGE, /, **params):
+    """組出一則帶「拒絕編譯」前綴的訊息。
+
+    這個前綴與「欄位驗證失敗」不同：後者是「這一格填錯了」，前者是「這份
+    設定本身不能拿去編譯」。兩者對使用者的意義不同，不合併。
+    """
+    return _t("prefix.refused", lang) + _t(key, lang, **params)
+
+
 # installer_core.py/uninstall.py 這兩支 entry point 實際 import 的專案內部
 # 深模組。真實抓到的 bug：install_scope.py/self_delete.py/system_entries.py
 # 先後都漏列過，導致 frozen exe（mswi-gui.exe/mswi-cli.exe）打包出來的
@@ -203,7 +337,7 @@ def list_app_dir_files(app_dir):
     return sorted(results)
 
 
-def ensure_workspace_files(workspace_dir):
+def ensure_workspace_files(workspace_dir, lang=messages.DEFAULT_LANGUAGE):
     """確保 installer_core.py、uninstall.py、以及 ui/ 資料夾底下所有靜態資源
     （index.html、folder_icon.png 等）都存在於工作目錄。
 
@@ -259,13 +393,11 @@ def ensure_workspace_files(workspace_dir):
         return None
     except Exception as e:
         return (
-            f"無法在工作目錄（{workspace_dir}）準備必要的建置檔案：{e}。"
-            f"請確認這個資料夾有寫入權限（例如不要放在 C:\\Program Files 底下），"
-            f"或改把打包工具移到有寫入權限的資料夾再執行。"
+            _t("workspace.prepare_failed", lang, dir=workspace_dir, reason=e)
         )
 
 
-def _validate_signing_config(signing_raw):
+def _validate_signing_config(signing_raw, lang=messages.DEFAULT_LANGUAGE):
     """驗證 signing 設定，回傳 (signing_dict_or_None, error_or_None)。
 
     signing 的驗證規則（憑證檔案存在、密碼環境變數有值）只跟 signing 自己
@@ -279,11 +411,11 @@ def _validate_signing_config(signing_raw):
     cert_password_env = str(signing_raw.get("cert_password_env", "")).strip()
     timestamp_url = str(signing_raw.get("timestamp_url", "")).strip()
     if not cert_path or not os.path.exists(cert_path):
-        return None, "欄位驗證失敗：<br>signing.cert_path 必須指向一個實際存在的憑證檔案（.pfx）。"
+        return None, _invalid("signing.cert_path", lang)
     if not cert_password_env:
-        return None, "欄位驗證失敗：<br>signing.cert_password_env 必須指定存放憑證密碼的環境變數名稱（密碼本身不放在設定檔裡）。"
+        return None, _invalid("signing.cert_password_env", lang)
     if not os.environ.get(cert_password_env):
-        return None, f"欄位驗證失敗：<br>環境變數「{cert_password_env}」目前沒有值，請先設定好憑證密碼再打包。"
+        return None, _invalid("signing.cert_password_missing", lang, name=cert_password_env)
     return {
         "cert_path": cert_path,
         "cert_password_env": cert_password_env,
@@ -307,7 +439,8 @@ def _encryption_backend_available():
 
 
 def _validate_install_password(need_install_password, install_password_env_raw,
-                               has_inline_password, has_plaintext_field):
+                               has_inline_password, has_plaintext_field,
+                               lang=messages.DEFAULT_LANGUAGE):
     """驗證安裝密碼保護的設定，回傳
     (install_password_env_or_empty_string, error_or_None)。
 
@@ -324,39 +457,34 @@ def _validate_install_password(need_install_password, install_password_env_raw,
     """
     if has_plaintext_field:
         return None, (
-            "欄位驗證失敗：<br>設定檔不支援直接寫入安裝密碼（`install_password`）。"
-            "<br>設定檔是一份會被存進專案、傳給別人的普通文字檔，密碼寫在裡面等於"
-            "整個保護失效。請改用 `install_password_env` 填入存放密碼的環境變數名稱；"
-            "想直接輸入密碼請改用配置精靈（GUI）。"
+            _invalid("password.inline_in_config", lang)
         )
 
     install_password_env = str(install_password_env_raw or "").strip()
 
     if has_inline_password and install_password_env:
         return None, (
-            "欄位驗證失敗：<br>安裝密碼只能擇一指定：直接輸入密碼，或填入存放密碼的"
-            "環境變數名稱，不能兩種同時給。"
+            _invalid("password.two_ways", lang)
         )
 
     if need_install_password and not has_inline_password and not install_password_env:
         return None, (
-            "欄位驗證失敗：<br>已勾選「啟用安裝密碼保護」，請輸入密碼、或填入存放密碼的"
-            "環境變數名稱，或取消勾選。"
+            _invalid("password.none_given", lang)
         )
 
     if install_password_env and not os.environ.get(install_password_env):
-        return None, f"欄位驗證失敗：<br>環境變數「{install_password_env}」目前沒有值，請先設定好安裝密碼再打包。"
+        return None, _invalid("password.env_missing", lang, name=install_password_env)
 
     if (has_inline_password or install_password_env) and not _encryption_backend_available():
         return None, (
-            "欄位驗證失敗：<br>安裝密碼保護需要 `cryptography` 套件，目前找不到它。"
-            "<br>請先執行 <code>pip install cryptography</code> 再打包，或取消「啟用安裝密碼保護」。"
+            _invalid("password.missing_dependency", lang)
         )
 
     return install_password_env, None
 
 
-def _validate_dependency_policy(dependencies, custom_dependencies_raw, bundle_dependencies_raw):
+def _validate_dependency_policy(dependencies, custom_dependencies_raw, bundle_dependencies_raw,
+                               lang=messages.DEFAULT_LANGUAGE):
     """驗證 custom_dependencies/bundle_dependencies，回傳
     (custom_dependencies, bundle_dependencies, error_or_None)。
 
@@ -375,23 +503,23 @@ def _validate_dependency_policy(dependencies, custom_dependencies_raw, bundle_de
     seen_custom_keys = set()
     for entry in custom_dependencies_raw:
         if not isinstance(entry, dict):
-            return None, None, "欄位驗證失敗：<br>custom_dependencies 裡每一筆都必須是物件（字典）。"
+            return None, None, _invalid("custom_dep.not_object", lang)
         key = str(entry.get("key", "")).strip()
         display_name = str(entry.get("display_name", "")).strip()
         download_url = str(entry.get("download_url", "")).strip()
         registry_check = entry.get("registry_check", {}) or {}
         if not key or not display_name or not download_url or not registry_check.get("path"):
-            return None, None, "欄位驗證失敗：<br>custom_dependencies 裡每一筆都必須填 key、display_name、download_url、registry_check.path。"
+            return None, None, _invalid("custom_dep.missing_fields", lang)
         # 真實抓到的安全性問題：download_url 原本沒有限制協定，http:// 的
         # 相依元件會被安裝端下載後直接執行——中間人可以竄改成任意惡意
         # 程式，這支安裝程式預設是 --uac-admin 編譯的，等於是遠端程式碼
         # 執行。打包階段就擋掉，不要等使用者的機器上才出事。
         if not download_url.lower().startswith("https://"):
-            return None, None, f"欄位驗證失敗：<br>custom_dependencies 的「{key}」download_url 必須是 https:// 開頭，不接受未加密的下載連結。"
+            return None, None, _invalid("custom_dep.insecure_url", lang, key=key)
         if key in built_in_dependency_keys:
-            return None, None, f"欄位驗證失敗：<br>custom_dependencies 的 key「{key}」跟內建的相依元件撞名，請改用其他名稱。"
+            return None, None, _invalid("custom_dep.builtin_clash", lang, key=key)
         if key in seen_custom_keys:
-            return None, None, f"欄位驗證失敗：<br>custom_dependencies 的 key「{key}」重複了。"
+            return None, None, _invalid("custom_dep.duplicate", lang, key=key)
         seen_custom_keys.add(key)
 
         # sha256（選填）：下載完成後、執行前用來驗證檔案完整性/沒被竄改，
@@ -402,7 +530,7 @@ def _validate_dependency_policy(dependencies, custom_dependencies_raw, bundle_de
         if sha256_raw:
             sha256_candidate = str(sha256_raw).strip().lower()
             if not re.fullmatch(r"[0-9a-f]{64}", sha256_candidate):
-                return None, None, f"欄位驗證失敗：<br>custom_dependencies 的「{key}」sha256 格式不正確，必須是 64 位十六進位字元（SHA-256 摘要）。"
+                return None, None, _invalid("custom_dep.bad_sha256", lang, key=key)
             sha256 = sha256_candidate
 
         custom_dependencies.append({
@@ -434,12 +562,12 @@ def _validate_dependency_policy(dependencies, custom_dependencies_raw, bundle_de
     known_dependency_keys = set(dependencies) | seen_custom_keys | built_in_dependency_keys
     for key in bundle_dependencies:
         if key not in known_dependency_keys or key not in dependencies:
-            return None, None, f"欄位驗證失敗：<br>bundle_dependencies 的「{key}」必須同時列在 dependencies 清單裡，才知道要內嵌哪個相依元件。"
+            return None, None, _invalid("bundle_dep.not_selected", lang, key=key)
 
     return custom_dependencies, bundle_dependencies, None
 
 
-def _validate_version_string(version):
+def _validate_version_string(version, lang=messages.DEFAULT_LANGUAGE):
     """驗證版本號格式，通過回傳 None，不通過回傳錯誤訊息字串。
 
     F10：這個檢查原本不在這裡——`validate_and_build_pack_data()` 對版本號
@@ -461,20 +589,17 @@ def _validate_version_string(version):
     """
     numeric_part, hyphen, suffix = version.partition("-")
     if hyphen and not suffix.strip():
-        return f"欄位驗證失敗：<br>版本號「{version}」的連字號後面是空的，預發布後綴不能留空（例如 1.0.0-rc1）。"
+        return _invalid("version.empty_suffix", lang, version=version)
 
     segments = numeric_part.split(".")
     if len(segments) > 4:
         return (
-            f"欄位驗證失敗：<br>版本號「{version}」的數字段超過 4 段。"
-            "<br>Windows 的版本資源固定只有 4 個數字欄位，放不下第 5 段。"
+            _invalid("version.too_many_segments", lang, version=version)
         )
     for segment in segments:
         if not (segment.isascii() and segment.isdigit()):
             return (
-                f"欄位驗證失敗：<br>版本號「{version}」格式不正確。"
-                "<br>格式為 1 到 4 段非負整數，可選擇在後面加上連字號與預發布後綴，"
-                "例如 1.0.0、1.2.3.4、1.0.0-rc1。"
+                _invalid("version.bad_format", lang, version=version)
             )
     return None
 
@@ -555,7 +680,9 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     try:
         engine = install_engine.normalize(data)
     except install_engine.UnknownEngine as e:
-        return None, f"欄位驗證失敗：<br>{e}"
+        # 直接用例外自己的翻譯，不透過本模組的訊息表轉一手：那則訊息
+        # 屬於 install_engine，而 str(e) 只會給預設語言。
+        return None, _t("prefix.invalid", lang) + e.localized(lang)
 
     app_name = data.get("app_name", "").strip()
     folder_name = data.get("folder_name", "").strip() or app_name
@@ -605,42 +732,42 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     create_restore_point_before_install = bool(data.get("create_restore_point_before_install", False))
 
     if not app_name or not version or not publisher or not exe_name:
-        return None, "欄位驗證失敗：<br>所有文字欄位（名稱、版本、發行者、安裝檔名）皆為必填項目，請檢查是否有欄位遺漏。"
+        return None, _invalid("text_fields.required", lang)
 
-    version_error = _validate_version_string(version)
+    version_error = _validate_version_string(version, lang)
     if version_error:
         return None, version_error
 
     if need_file_assoc and not file_assoc_raw:
-        return None, "欄位驗證失敗：<br>已勾選「需要註冊檔案關聯」，請填入至少一個副檔名，或取消勾選。"
+        return None, _invalid("file_assoc.empty", lang)
 
     if eula_texts and eula_default_lang not in eula_texts:
-        return None, "欄位驗證失敗：<br>已新增多語言 EULA，請從中選擇一個「預設/回退語言」。"
+        return None, _invalid("eula.no_default_lang", lang)
 
     if not app_dir or not os.path.exists(app_dir):
-        return None, "欄位驗證失敗：<br>請選擇有效的應用程式內容資料夾。"
+        return None, _invalid("app_dir.invalid", lang)
 
     if not png_path or not png_path.lower().endswith('.png'):
-        return None, "欄位驗證失敗：<br>請選擇介面拖拽專用的 PNG 圖示檔案。"
+        return None, _invalid("png_icon.required", lang)
 
     if not ico_path or not ico_path.lower().endswith('.ico'):
-        return None, "欄位驗證失敗：<br>請選擇執行檔封面專用的 ICO 圖示檔案。"
+        return None, _invalid("ico_icon.required", lang)
 
     if not main_exe:
-        return None, "欄位驗證失敗：<br>請選擇應用程式的主要執行檔（.exe），這是建立捷徑、偵測執行中狀態、立即執行等功能所必需的。"
+        return None, _invalid("main_exe.required", lang)
 
     if not os.path.exists(os.path.join(app_dir, main_exe)):
-        return None, "欄位驗證失敗：<br>選擇的主要執行檔不存在於應用程式資料夾中，請重新選擇。"
+        return None, _invalid("main_exe.not_found", lang)
 
     if add_to_path and path_target_exe and not os.path.exists(os.path.join(app_dir, path_target_exe)):
-        return None, "欄位驗證失敗：<br>「加入 PATH」指定的執行檔不存在於應用程式資料夾中，請重新選擇。"
+        return None, _invalid("path_target.not_found", lang)
 
     if isinstance(local_appdata_files_raw, str):
         local_appdata_files_raw = local_appdata_files_raw.replace("，", ",").split(",")
     local_appdata_files = [str(f).strip().replace("\\", "/") for f in local_appdata_files_raw if str(f).strip()]
     for rel in local_appdata_files:
         if not os.path.exists(os.path.join(app_dir, rel)):
-            return None, f"欄位驗證失敗：<br>指定改裝到 %LOCALAPPDATA% 的檔案「{rel}」不存在於應用程式資料夾中，請重新選擇。"
+            return None, _invalid("local_appdata.not_found", lang, rel=rel)
 
     # 檔案關聯圖示的格式依引擎而不同（見 docs/adr/0010）：傳統引擎寫的是
     # 登錄表的 DefaultIcon，吃的就是 ICO；MSIX 的 uap:Logo 不吃 ICO，而吃
@@ -649,26 +776,23 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     doc_icon_extension = ".png" if engine == install_engine.MSIX else ".ico"
     doc_icon_label = "PNG" if engine == install_engine.MSIX else "ICO"
     msix_icon_reason = (
-        "（MSIX 模式的檔案關聯圖示只能是 PNG：套件清單能用的宣告不接受 ICO，"
-        "而接受 ICO 的那個宣告需要的 Windows 版本遠高於本工具宣告的最低版本。"
-        "請把同一張圖另存一份 PNG。）"
+        _t("doc_icon.msix_png_reason", lang)
     ) if engine == install_engine.MSIX else ""
 
     doc_icon_path = ""
     if use_custom_doc_icon:
         if not doc_icon_path_selected or not doc_icon_path_selected.lower().endswith(doc_icon_extension):
             return None, (
-                f"欄位驗證失敗：<br>已勾選自訂文件圖示，請選擇一顆 {doc_icon_label} 檔案，"
-                f"或取消勾選改沿用應用程式圖示。{msix_icon_reason}"
+                _invalid("doc_icon.format", lang, label=doc_icon_label, reason=msix_icon_reason)
             )
         doc_icon_path = doc_icon_path_selected
 
     try:
         folder_contents = os.listdir(app_dir)
         if len(folder_contents) == 0:
-            return None, "拒絕編譯：<br>所選的應用程式資料夾內部是空的，請確認已放入軟體檔案。"
+            return None, _refused("app_dir.empty", lang)
     except Exception as e:
-        return None, f"讀取資料夾失敗: {e}"
+        return None, _t("app_dir.read_failed", lang, reason=e)
 
     # 解析副檔名清單："txt, .abc,xyz" -> [".txt", ".abc", ".xyz"]
     file_associations = []
@@ -697,17 +821,21 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
         if not icon_path:
             continue
         if ext not in file_associations:
-            return None, f"欄位驗證失敗：<br>幫副檔名「{ext}」設定了專屬圖示，但它不在檔案關聯清單裡，請先把它加進檔案關聯清單，或移除這個圖示設定。"
+            return None, _invalid("doc_icon.ext_not_listed", lang, ext=ext)
         if not icon_path.lower().endswith(doc_icon_extension):
             return None, (
-                f"欄位驗證失敗：<br>副檔名「{ext}」指定的專屬圖示不是有效的 {doc_icon_label} 檔案，"
-                f"請重新選擇。{msix_icon_reason}"
+                _invalid("doc_icon.ext_bad_format", lang, ext=ext, label=doc_icon_label, reason=msix_icon_reason)
             )
         doc_icons[ext] = icon_path
 
     for script_field, script_rel in (("pre_install_script", pre_install_script), ("post_install_script", post_install_script)):
         if script_rel and not os.path.exists(os.path.join(app_dir, script_rel)):
-            return None, f"欄位驗證失敗：<br>指定的{'安裝前置' if script_field == 'pre_install_script' else '安裝後置'}腳本「{script_rel}」不存在於應用程式資料夾中，請重新選擇。"
+            # 階段名稱也走訊息表：留成內聯的中文字面值，這一則的英文版就會
+            # 中間夾一個中文詞。
+            stage_key = ("script.stage_pre" if script_field == "pre_install_script"
+                         else "script.stage_post")
+            return None, _invalid("script.not_found", lang,
+                                  stage=_t(stage_key, lang), path=script_rel)
 
     # windows_service/scheduled_task：真實抓到的問題——這兩個新欄位原本
     # 完全沒有驗證，半填的設定（例如只填了名稱、執行檔還沒選）會直接
@@ -728,16 +856,16 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
         service_name = str(windows_service_raw.get("service_name", "")).strip()
         exe_rel = str(windows_service_raw.get("exe_relative_path", "")).strip()
         if not service_name or not exe_rel:
-            return None, "欄位驗證失敗：<br>windows_service 的 service_name 跟 exe_relative_path 必須同時填寫，或都留空不使用這個功能。"
+            return None, _invalid("service.incomplete", lang)
         if not os.path.exists(os.path.join(app_dir, exe_rel)):
-            return None, f"欄位驗證失敗：<br>windows_service 指定的執行檔「{exe_rel}」不存在於應用程式資料夾中，請重新選擇。"
+            return None, _invalid("service.exe_not_found", lang, exe=exe_rel)
         start_type = str(windows_service_raw.get("start_type", "auto")).strip()
         # A3：合法值從 windows_service.VALID_START_TYPES 讀，不是這裡自己
         # 另外寫死一份——windows_service.py 才是真正知道 sc.exe 支援哪些
         # start_type 值的模組。
         if start_type not in windows_service.VALID_START_TYPES:
             valid_list = "/".join(sorted(windows_service.VALID_START_TYPES))
-            return None, f"欄位驗證失敗：<br>windows_service 的 start_type「{start_type}」不是有效值，必須是 {valid_list} 其中之一。"
+            return None, _invalid("service.bad_start_type", lang, value=start_type, valid=valid_list)
         windows_service_normalized = {
             "service_name": service_name,
             "exe_relative_path": exe_rel,
@@ -749,9 +877,9 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
         task_name = str(scheduled_task_raw.get("task_name", "")).strip()
         exe_rel = str(scheduled_task_raw.get("exe_relative_path", "")).strip()
         if not task_name or not exe_rel:
-            return None, "欄位驗證失敗：<br>scheduled_task 的 task_name 跟 exe_relative_path 必須同時填寫，或都留空不使用這個功能。"
+            return None, _invalid("task.incomplete", lang)
         if not os.path.exists(os.path.join(app_dir, exe_rel)):
-            return None, f"欄位驗證失敗：<br>scheduled_task 指定的執行檔「{exe_rel}」不存在於應用程式資料夾中，請重新選擇。"
+            return None, _invalid("task.exe_not_found", lang, exe=exe_rel)
         scheduled_task_normalized = {
             "task_name": task_name,
             "exe_relative_path": exe_rel,
@@ -770,15 +898,11 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     # 觸發的工作不需要管理員權限。
     if no_admin_install and windows_service_normalized:
         return None, (
-            "欄位驗證失敗：<br>「免管理員權限安裝」與「建立 Windows 服務」不能同時使用。"
-            "<br>建立 Windows 服務（sc.exe）需要系統管理員權限，但免權限安裝的整個流程都在"
-            "一般權限下執行，服務必定建立失敗。請擇一取消。"
+            _invalid("admin.service_conflict", lang)
         )
     if no_admin_install and create_restore_point_before_install:
         return None, (
-            "欄位驗證失敗：<br>「免管理員權限安裝」與「安裝前建立系統還原點」不能同時使用。"
-            "<br>建立系統還原點需要系統管理員權限，但免權限安裝的整個流程都在一般權限下執行，"
-            "還原點必定建立失敗。請擇一取消。"
+            _invalid("admin.restore_point_conflict", lang)
         )
 
     # dependencies_min_version：真實抓到的問題——key 完全沒有跟 dependencies
@@ -789,20 +913,20 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     # 都會被靜默忽略，使用者以為設定生效了、其實完全沒有。
     for dep_key in dependencies_min_version_raw:
         if dep_key not in dependencies:
-            return None, f"欄位驗證失敗：<br>dependencies_min_version 的「{dep_key}」沒有在 dependencies 清單裡啟用，這個最低版本設定不會生效。"
+            return None, _invalid("min_version.not_enabled", lang, key=dep_key)
         if dep_key not in dependency_defs.BUILT_IN_DEPENDENCIES:
-            return None, f"欄位驗證失敗：<br>dependencies_min_version 只支援內建相依元件（vcredist_x64/dotnet_desktop）；自訂相依元件「{dep_key}」的最低版本請改用 custom_dependencies 裡對應項目的 registry_check.min_version。"
+            return None, _invalid("min_version.builtin_only", lang, key=dep_key)
 
     # custom_dependencies/bundle_dependencies 只跟彼此有關，驗證規則收在
     # _validate_dependency_policy()（見上方），這裡不用知道細節。
     custom_dependencies, bundle_dependencies, error = _validate_dependency_policy(
-        dependencies, custom_dependencies_raw, bundle_dependencies_raw
+        dependencies, custom_dependencies_raw, bundle_dependencies_raw, lang
     )
     if error:
         return None, error
 
     # signing 只跟自己有關，驗證規則收在 _validate_signing_config()（見上方）。
-    signing, error = _validate_signing_config(signing_raw)
+    signing, error = _validate_signing_config(signing_raw, lang)
     if error:
         return None, error
 
@@ -811,7 +935,7 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     # docs/adr/0004。
     install_password_env, error = _validate_install_password(
         need_install_password, install_password_env_raw, has_inline_password,
-        has_plaintext_password_field,
+        has_plaintext_password_field, lang,
     )
     if error:
         return None, error

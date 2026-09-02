@@ -55,7 +55,20 @@ MOOT = "moot"
 
 
 class UnknownEngine(Exception):
-    """`install_engine` 填了不認得的值。"""
+    """`install_engine` 填了不認得的值。
+
+    攜帶訊息表的鍵與參數而非現成句子，理由同其他模組的例外。這一則在
+    第十四輪 key 化時被漏掉了——它是唯一不在 check_settings() 路徑上的
+    使用者可見訊息，因此沒被那次的清點涵蓋。
+    """
+
+    def __init__(self, key, **params):
+        self.key = key
+        self.params = params
+        super().__init__(_t(key, **params))
+
+    def localized(self, lang=messages.DEFAULT_LANGUAGE):
+        return _t(self.key, lang, **self.params)
 
 
 class Report(namedtuple("Report", "blocking notices")):
@@ -118,9 +131,8 @@ def normalize(data):
     if not value:
         return TRADITIONAL
     if value not in ENGINES:
-        raise UnknownEngine(
-            f"{SETTING_FIELD} 只能是 {' 或 '.join(ENGINES)}，收到的是「{value}」。"
-        )
+        raise UnknownEngine("engine.unknown", field=SETTING_FIELD,
+                            choices=" / ".join(ENGINES), value=value)
     return value
 
 
@@ -192,6 +204,7 @@ MESSAGES = {
         "field.folder_name": "folder_name：安裝資料夾名稱。MSIX 套件的位置由系統決定，不存在使用者會操作的安裝資料夾。",
         "field.local_appdata_files": "local_appdata_files：個別檔案改裝到使用者目錄。MSIX 套件本來就安裝於使用者層級，這個設定原本的目的已經成立。",
         "notice.moot_paths": "{fields} 在 MSIX 引擎下不會有作用，也不需要：套件的位置由系統決定，不存在使用者會操作的安裝資料夾。設定 local_appdata_files 的目的（讓命令列工具不需提權即可執行）在 MSIX 下本來就成立，因為套件本來就安裝於使用者層級。若 path_target_exe 指向其中一個檔案，加入 PATH 的會是套件內的執行檔。",
+        "engine.unknown": "{field} 只能是 {choices}，收到的是「{value}」。",
         "list.separator": "、",
     },
     "en": {
@@ -214,12 +227,13 @@ MESSAGES = {
         "field.folder_name": "folder_name: the install folder name. The location of an MSIX package is decided by the system; there is no install folder for the user to work with.",
         "field.local_appdata_files": "local_appdata_files: redirecting individual files to the user directory. An MSIX package already installs at user level, so what this setting was for already holds.",
         "notice.moot_paths": "{fields}: no effect under the MSIX engine, and not needed. The package location is decided by the system, and there is no install folder for the user to work with. What local_appdata_files was for — letting a command-line tool run without elevation — already holds under MSIX, because the package installs at user level to begin with. If path_target_exe points at one of those files, what goes onto PATH is the executable inside the package.",
+        "engine.unknown": "{field} must be one of {choices}; received \"{value}\".",
         "list.separator": ", ",
     },
 }
 
 
-def _t(key, lang=messages.DEFAULT_LANGUAGE, **params):
+def _t(key, lang=messages.DEFAULT_LANGUAGE, /, **params):
     """本模組訊息表的查表捷徑。機制在 messages.py，那裡也說明了為什麼
     訊息表留在各模組而不是集中一張。
     """

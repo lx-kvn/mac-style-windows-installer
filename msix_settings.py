@@ -110,7 +110,7 @@ MESSAGES = {
 }
 
 
-def _t(key, lang=messages.DEFAULT_LANGUAGE, **params):
+def _t(key, lang=messages.DEFAULT_LANGUAGE, /, **params):
     return messages.translate(MESSAGES, key, lang, **params)
 
 

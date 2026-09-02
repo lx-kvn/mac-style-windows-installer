@@ -33,11 +33,16 @@ LANGUAGES = ("zh-TW", "en")
 DEFAULT_LANGUAGE = "zh-TW"
 
 
-def translate(table, key, lang=DEFAULT_LANGUAGE, **params):
+def translate(table, key, lang=DEFAULT_LANGUAGE, /, **params):
     """從 `table` 取出 `key` 對應的訊息。
 
     退回順序：指定的語言 → 預設語言 → 鍵本身。逐鍵退回而不是整張表退回：
     某個語言少了一則訊息時，只有那一則會變成中文，其餘仍是該語言。
+
+    `table`／`key`／`lang` 是僅限位置參數（`/`）：訊息本身的參數名不受限，
+    可以叫 `key`、`lang` 或任何名字。真實抓到的缺陷——`custom_dep.insecure_url`
+    要帶的正是 `key=key`，在沒有 `/` 的情況下會撞成
+    「got multiple values for argument 'key'」。
     """
     localized = table.get(lang) or {}
     fallback = table.get(DEFAULT_LANGUAGE) or {}

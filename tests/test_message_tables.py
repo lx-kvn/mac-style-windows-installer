@@ -93,3 +93,30 @@ class NoModuleKeepsItsOwnTranslateFunction(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class ParameterNamesCannotCollideWithTheHelpersOwn(unittest.TestCase):
+    """真實抓到的缺陷：`_t(key, lang, **params)` 的前兩個參數叫 `key` 與
+    `lang`，而訊息的參數也可能叫這兩個名字——`custom_dep.insecure_url` 要帶
+    的正是 `key=key`，於是 `TypeError: got multiple values for argument 'key'`。
+
+    這是潛伏的陷阱：其他模組現在沒撞到只是碰巧沒有同名的參數。把前兩個參數
+    改成僅限位置（`/`）之後，訊息的參數叫什麼都不會撞。
+    """
+
+    def test_every_helper_takes_its_first_two_arguments_positionally_only(self):
+        import inspect
+        for name in MODULES + ["messages"]:
+            module = importlib.import_module(name)
+            fn = getattr(module, "_t", None) or getattr(module, "translate", None)
+            self.assertIsNotNone(fn, f"{name} 沒有取訊息的函式")
+            kinds = [p.kind for p in inspect.signature(fn).parameters.values()]
+            self.assertIn(inspect.Parameter.POSITIONAL_ONLY, kinds,
+                          f"{name} 的取訊息函式沒有僅限位置參數，"
+                          f"訊息參數若與它同名就會撞")
+
+    def test_a_message_parameter_named_key_actually_works(self):
+        """直接驗行為，不只驗簽章。"""
+        import packaging_core
+        rendered = packaging_core._invalid("custom_dep.duplicate", "zh-TW", key="abc")
+        self.assertIn("abc", rendered)
