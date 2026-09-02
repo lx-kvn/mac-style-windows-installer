@@ -422,7 +422,7 @@ class SignExecutableUsesSharedLookupTest(TempDirTestCase):
         make_tool(os.path.dirname(resolved), "signtool.exe")
         recorded = {}
 
-        def fake_run(cmd, creationflags=0, capture_output=True, text=True):
+        def fake_run(cmd, creationflags=0, **kwargs):
             recorded["cmd"] = cmd
             return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
