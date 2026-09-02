@@ -16,6 +16,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import _fakes
 import installer_core as ic
 import install_journal
 import install_encryption
@@ -2607,3 +2608,35 @@ class TestMsixEngineDispatch(unittest.TestCase):
                 mock.patch.object(api, "_app_contents_dir", return_value="C:\nope"):
             api._trigger_installation_impl_inner(True, False, [], lambda m: None)
         self.assertEqual(msix.call_count, 0)
+
+
+class SubprocessOutputDecodingTest(unittest.TestCase):
+    """子行程輸出的解碼方式（見 tests/_fakes.py 的解碼探針說明）。
+
+    這些測試真的起一個子行程，讓它輸出一段在系統地區編碼下無法解碼的位元組，
+    再檢查受測函式最後拿到什麼——驗證的是「輸出有沒有被完整取回」，不是實作
+    傳了哪些參數。
+    """
+
+    def test_a_running_process_is_still_detected_when_tasklist_output_is_not_decodable(self):
+        script = _fakes.decode_probe_script(ascii_text="MyApp.exe   1234 Console")
+        with mock.patch("installer_core.subprocess.check_output",
+                        side_effect=_fakes.decode_probe_check_output(script)):
+            self.assertTrue(ic._is_process_running("MyApp.exe"))
+
+    def test_the_install_script_failure_message_carries_the_script_output(self):
+        """腳本失敗時，這段輸出是使用者唯一能知道「為什麼失敗」的東西。"""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        script_path = os.path.join(tmp, "post_install.bat")
+        with open(script_path, "w", encoding="utf-8") as f:
+            f.write("@echo off")
+        probe = _fakes.decode_probe_script(ascii_text="ERR: config missing", exit_code=3)
+        api = make_installer_api()
+        with mock.patch.object(ic, "get_resource_path", return_value=script_path), \
+             mock.patch("installer_core.subprocess.run",
+                        side_effect=_fakes.decode_probe_run(probe)):
+            ok, message = api._run_install_script("post_install.bat")
+        self.assertFalse(ok)
+        self.assertIn("config missing", message)
+

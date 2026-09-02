@@ -9,13 +9,13 @@ import os
 import sys
 import json
 import shutil
-import subprocess
 import tempfile
 import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import _fakes
 import builder
 import sdk_tools
 
@@ -34,43 +34,18 @@ def make_fake_run(uninstall_dist_dir):
     return fake_run
 
 
-DECODE_PROBE_MARKER = "編譯失敗：找不到模組 foo"
-# 子行程的原始碼保持純 ASCII（格式化用的 !a 會把中文轉成 Unicode 逸出序列），
-# 避免這段程式碼本身在命令列上再經歷一次編碼轉換，混淆要驗證的目標。尾端那個
-# 0x88 位元組在 cp950 與 UTF-8 兩種編碼下都不合法，用來確認解碼不會整段失敗。
-DECODE_PROBE_SCRIPT = (
-    "import sys;"
-    "sys.stdout.buffer.write({marker!a}.encode('utf-8') + b'\\x88');"
-    "sys.stdout.buffer.flush();"
-    "sys.exit(1)"
-).format(marker=DECODE_PROBE_MARKER)
-
-
-# 探針要呼叫的是「真正的」subprocess.run。測試會用 mock.patch 換掉 subprocess
-# 模組上的 run，而探針正是在那個 patch 生效期間被呼叫的——不先把原函式綁
-# 起來，探針的呼叫會轉回假的那一份，子行程根本不會被執行。
-_REAL_SUBPROCESS_RUN = subprocess.run
-
-
-def run_decode_probe(cmd, **kwargs):
-    """假的 subprocess.run：指令換成上面那支會吐出非 ASCII 位元組的小程式，
-    但把呼叫端傳來的解碼相關參數原封不動轉給真正的 subprocess.run——被測的
-    正是那組參數對真實子行程輸出的解碼結果。
-    """
-    kwargs.pop("cwd", None)
-    return _REAL_SUBPROCESS_RUN([sys.executable, "-c", DECODE_PROBE_SCRIPT], **kwargs)
-
-
 def make_decode_probe_run(uninstall_dist_dir, probe_script_name):
-    """回傳假的 subprocess.run：編譯 probe_script_name 的那一道指令改跑解碼
-    探針，其餘指令維持 make_fake_run 的行為。
+    """回傳假的 subprocess.run：編譯 probe_script_name 的那一道指令改跑
+    tests/_fakes.py 的解碼探針，其餘指令維持 make_fake_run 的行為。
     """
     passthrough = make_fake_run(uninstall_dist_dir)
+    probe = _fakes.decode_probe_run(_fakes.decode_probe_script(
+        utf8_text=_fakes.UTF8_PROBE_TEXT, exit_code=1))
 
     def fake_run(cmd, **kwargs):
         if probe_script_name not in cmd:
             return passthrough(cmd, **kwargs)
-        return run_decode_probe(cmd, **kwargs)
+        return probe(cmd, **kwargs)
     return fake_run
 
 
@@ -1142,21 +1117,23 @@ class TestSubprocessOutputDecoding(BuildAllTestBase):
         with self.assertRaises(Exception) as ctx:
             builder._sign_file(
                 os.path.join(self.workspace_dir, "installer_core.py"), signing,
-                find_tool=lambda name: located, run=run_decode_probe,
+                find_tool=lambda name: located,
+                run=_fakes.decode_probe_run(_fakes.decode_probe_script(
+                    utf8_text=_fakes.UTF8_PROBE_TEXT, exit_code=1)),
             )
-        self.assertIn(DECODE_PROBE_MARKER, str(ctx.exception))
+        self.assertIn(_fakes.UTF8_PROBE_TEXT, str(ctx.exception))
 
     def test_uninstall_compile_failure_reports_what_pyinstaller_printed(self):
         with self.assertRaises(Exception) as ctx:
             self._call_build_all(
                 run_side_effect=make_decode_probe_run(self.dist_dir, "uninstall.py"))
-        self.assertIn(DECODE_PROBE_MARKER, str(ctx.exception))
+        self.assertIn(_fakes.UTF8_PROBE_TEXT, str(ctx.exception))
 
     def test_installer_compile_failure_reports_what_pyinstaller_printed(self):
         with self.assertRaises(Exception) as ctx:
             self._call_build_all(
                 run_side_effect=make_decode_probe_run(self.dist_dir, "installer_core.py"))
-        self.assertIn(DECODE_PROBE_MARKER, str(ctx.exception))
+        self.assertIn(_fakes.UTF8_PROBE_TEXT, str(ctx.exception))
 
 
 if __name__ == "__main__":

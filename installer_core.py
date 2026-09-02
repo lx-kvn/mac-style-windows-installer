@@ -113,9 +113,13 @@ def _is_process_running(exe_name):
         return False
     try:
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        # errors="replace"：解碼失敗會走到下方的 except、回傳 False，等於把
+        # 「主程式正在執行」誤判成沒有執行，安裝流程會去覆寫一支執行中的檔案。
+        # 詳見 docs/investigations/子行程輸出的解碼修正.md。
         output = subprocess.check_output(
             ["tasklist", "/FI", f"IMAGENAME eq {exe_name}", "/NH"],
-            text=True, stderr=subprocess.DEVNULL, creationflags=creationflags,
+            text=True, errors="replace",
+            stderr=subprocess.DEVNULL, creationflags=creationflags,
         )
         return exe_name.lower() in output.lower()
     except Exception:
@@ -714,9 +718,14 @@ class InstallerAPI:
             return True, ""
         try:
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            # errors="replace"：腳本是使用者自備的，輸出內容無法預期。解碼
+            # 失敗時 stdout/stderr 會變成 None，下方組出來的訊息就只剩一個結束
+            # 碼，使用者無從得知腳本為什麼失敗。這裡不指定 encoding、沿用系統
+            # 地區編碼，因為批次檔與主控台程式正是以該編碼輸出。
+            # 詳見 docs/investigations/子行程輸出的解碼修正.md。
             result = subprocess.run(
                 [script_path], creationflags=creationflags, timeout=timeout,
-                capture_output=True, text=True,
+                capture_output=True, text=True, errors="replace",
             )
             if result.returncode != 0:
                 tail = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()[-500:]

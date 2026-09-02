@@ -202,3 +202,102 @@ def make_installer_api(**overrides):
     for key, value in overrides.items():
         setattr(api, key, value)
     return api
+# ---------------------------------------------------------------------------
+# 子行程輸出的解碼探針
+# ---------------------------------------------------------------------------
+# 用途：驗證呼叫子行程的程式碼「拿不拿得回輸出」，而不是驗證它傳了哪些參數
+# ——後者只是覆述實作自己寫下的常數。這裡的作法是真的起一個子行程，讓它輸出
+# 一段刻意選過的位元組，再檢查受測函式最後拿到什麼。
+#
+# 背景：subprocess 的 text=True 若未指定 encoding，會依系統地區編碼解碼子行程
+# 輸出（繁體中文 Windows 上是 cp950）。遇到該編碼無法解碼的位元組時：
+#   - capture_output 走的是背景讀取執行緒，例外不會傳到呼叫端，stdout 與
+#     stderr 直接變成 None，輸出整段消失且毫無跡象；
+#   - check_output 與逐行讀取 Popen.stdout 則會在呼叫端當場拋出例外，往往被
+#     外層的 except 吞掉，變成「偵測不到」這種靜默的錯誤結果。
+UNDECODABLE_BYTES = b"\x81\x8d"
+# 選這兩個位元組的理由：在 cp950（0x8d 不是合法的第二位元組）、cp1252
+# （0x81 未定義）與 UTF-8（0x81 是沒有前導位元組的接續位元組）底下都無法解碼，
+# 因此測試結果不隨執行機器的地區設定改變。
+
+UTF8_PROBE_TEXT = "子行程輸出的中文訊息"
+
+
+def decode_probe_script(ascii_text="", utf8_text="", exit_code=0, stream="stdout"):
+    """組出一小段子行程程式碼：把指定內容寫到 stdout 或 stderr，尾端接上
+    UNDECODABLE_BYTES，然後以 exit_code 結束。
+
+    回傳的程式碼本身保持純 ASCII（中文以 Unicode 逸出序列表示），避免這段
+    程式碼在命令列上再經歷一次編碼轉換，混淆要驗證的目標。
+    """
+    payload = "{!a}.encode('utf-8')".format(ascii_text + utf8_text)
+    return (
+        "import sys;"
+        "sys.{stream}.buffer.write({payload} + {undecodable!r});"
+        "sys.{stream}.buffer.flush();"
+        "sys.exit({exit_code})"
+    ).format(stream=stream, payload=payload,
+             undecodable=UNDECODABLE_BYTES, exit_code=exit_code)
+
+
+def _probe_command(script):
+    import sys
+    return [sys.executable, "-c", script]
+
+
+# 探針要呼叫的是「真正的」subprocess 函式。測試會用 mock.patch 換掉 subprocess
+# 模組上的對應名稱，而探針正是在那個 patch 生效期間被呼叫的——不先把原函式綁
+# 起來，探針的呼叫會轉回假的那一份，子行程根本不會被執行。
+def _real(name):
+    import subprocess
+    return getattr(subprocess, name)
+
+
+_REAL_RUN = _real("run")
+_REAL_CHECK_OUTPUT = _real("check_output")
+_REAL_POPEN = _real("Popen")
+
+# 這些參數描述的是「要跑什麼、在哪裡跑」，探針既然換掉了指令，就不該沿用；
+# 其餘參數（capture_output/text/encoding/errors/timeout 等）全部原封不動轉交，
+# 因為被測的正是那組參數對真實輸出的解碼結果。
+_PROBE_DROPPED_KWARGS = ("cwd", "shell")
+
+
+def _forward(real_func, script, kwargs):
+    """把 kwargs 轉給真正的 subprocess 函式，指令換成探針。
+
+    轉呼叫期間要暫時把 subprocess.Popen 換回真的那一份：check_output 與 run
+    內部都是靠 Popen 起子行程，測試若同時 patch 了 Popen（例如同一個測試也在
+    頂替 PyInstaller 的呼叫），探針會拿到那個假物件而起不了子行程，錯誤又被
+    受測程式的 except 吞掉，看起來就像修正沒有生效。
+    """
+    import subprocess
+    for name in _PROBE_DROPPED_KWARGS:
+        kwargs.pop(name, None)
+    patched_popen = subprocess.Popen
+    subprocess.Popen = _REAL_POPEN
+    try:
+        return real_func(_probe_command(script), **kwargs)
+    finally:
+        subprocess.Popen = patched_popen
+
+
+def decode_probe_run(script):
+    """回傳假的 subprocess.run，把解碼相關參數轉給真正的 subprocess.run。"""
+    def fake_run(cmd=None, *args, **kwargs):
+        return _forward(_REAL_RUN, script, kwargs)
+    return fake_run
+
+
+def decode_probe_check_output(script):
+    """回傳假的 subprocess.check_output（同上，但走 check_output）。"""
+    def fake_check_output(cmd=None, *args, **kwargs):
+        return _forward(_REAL_CHECK_OUTPUT, script, kwargs)
+    return fake_check_output
+
+
+def decode_probe_popen(script):
+    """回傳假的 subprocess.Popen（同上，但走 Popen，供逐行讀取的呼叫端使用）。"""
+    def fake_popen(cmd=None, *args, **kwargs):
+        return _forward(_REAL_POPEN, script, kwargs)
+    return fake_popen

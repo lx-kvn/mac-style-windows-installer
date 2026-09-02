@@ -22,6 +22,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import _fakes
 from tools import vms
 
 
@@ -421,6 +422,23 @@ class FreshBootTests(unittest.TestCase):
             run.subcommands,
             ["revertToSnapshot", "start", "runProgramInGuest"],
         )
+
+
+class SubprocessOutputDecodingTest(unittest.TestCase):
+    """子行程輸出的解碼方式（見 tests/_fakes.py 的解碼探針說明）。
+
+    這些測試真的起一個子行程，讓它輸出一段在系統地區編碼下無法解碼的位元組，
+    再檢查受測函式最後拿到什麼——驗證的是「輸出有沒有被完整取回」，不是實作
+    傳了哪些參數。
+    """
+
+    def test_the_failure_message_carries_what_vmrun_printed(self):
+        script = _fakes.decode_probe_script(
+            ascii_text="Error: The virtual machine is not powered on",
+            exit_code=1, stream="stderr")
+        with self.assertRaises(vms.VmError) as ctx:
+            make_vm(_fakes.decode_probe_run(script)).start()
+        self.assertIn("not powered on", str(ctx.exception))
 
 
 if __name__ == "__main__":

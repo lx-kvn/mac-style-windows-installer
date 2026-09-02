@@ -13,6 +13,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import _fakes
 import build_config_tool as bct
 
 
@@ -288,6 +289,49 @@ class TestRunCli(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(calls, ["lx.k", "lx.k"])
+
+
+class SubprocessOutputDecodingTest(unittest.TestCase):
+    """子行程輸出的解碼方式（見 tests/_fakes.py 的解碼探針說明）。
+
+    這些測試真的起一個子行程，讓它輸出一段在系統地區編碼下無法解碼的位元組，
+    再檢查受測函式最後拿到什麼——驗證的是「輸出有沒有被完整取回」，不是實作
+    傳了哪些參數。
+    """
+
+    def setUp(self):
+        self.work_dir = tempfile.mkdtemp()
+        self.old_cwd = os.getcwd()
+        os.chdir(self.work_dir)
+
+    def tearDown(self):
+        os.chdir(self.old_cwd)
+        shutil.rmtree(self.work_dir, ignore_errors=True)
+
+    def test_a_running_exe_is_still_detected_when_tasklist_output_is_not_decodable(self):
+        """偵測失敗的代價不是報錯，而是靜默放行：外層的 except 會把解碼例外
+        當成「沒有在執行」，PyInstaller 接著才在覆寫檔案時失敗。"""
+        script = _fakes.decode_probe_script(ascii_text="MyTool.exe   1234 Console")
+        with mock.patch("build_config_tool.subprocess.check_output",
+                        side_effect=_fakes.decode_probe_check_output(script)), \
+             mock.patch("build_config_tool.subprocess.Popen",
+                        side_effect=lambda *a, **k: FakeCompletedProcess([])):
+            ok, message, _ = bct.build_one_exe("entry.py", "MyTool")
+        self.assertFalse(ok)
+        self.assertIn("正在執行中", message)
+
+    def test_pyinstaller_output_lines_survive_bytes_the_locale_cannot_decode(self):
+        """這一處是逐行讀取，解碼失敗會當場在主流程拋出例外，不是被吞掉。"""
+        script = _fakes.decode_probe_script(
+            ascii_text="ERROR: ", utf8_text=_fakes.UTF8_PROBE_TEXT, exit_code=1)
+        lines = []
+        with mock.patch("build_config_tool.subprocess.check_output", return_value=""), \
+             mock.patch("build_config_tool.subprocess.Popen",
+                        side_effect=_fakes.decode_probe_popen(script)):
+            ok, message, _ = bct.build_one_exe("entry.py", "MyTool", on_log=lines.append)
+        self.assertFalse(ok)
+        self.assertTrue(any(_fakes.UTF8_PROBE_TEXT in line for line in lines),
+                        "PyInstaller 的輸出沒有完整傳到記錄裡：%r" % (lines,))
 
 
 if __name__ == "__main__":

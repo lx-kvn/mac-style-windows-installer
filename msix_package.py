@@ -108,8 +108,10 @@ def stage(app_dir, staging_dir, png_icon, identity_name, certificate_subject,
 
 def _run_tool(run, tool_path, args, log, what):
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    # errors="replace"：解碼失敗時 stdout/stderr 會變成 None，下方的 tail 變成
+    # 空字串，使用者只看得到「XX 失敗」而沒有任何原因。詳見 docs/investigations/子行程輸出的解碼修正.md。
     result = run([tool_path] + list(args), creationflags=creationflags,
-                 capture_output=True, text=True)
+                 capture_output=True, text=True, errors="replace")
     if result.returncode != 0:
         tail = ((result.stdout or "") + "\n" + (result.stderr or ""))[-1500:]
         raise Exception(f"{what}失敗：\n{tail}")

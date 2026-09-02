@@ -69,7 +69,8 @@ CONFIG_FILE_NAME = "installer_config.json"
 # 編碼的內容。反過來說，子行程若以地區編碼輸出非 ASCII 文字，這裡會把那段
 # 文字換成替代字元；此取捨可接受，因為輸出的骨幹（ASCII 的錯誤訊息與模組
 # 名稱）在兩種情況下都完整保留。errors="replace" 則保證任何位元組組合都不會
-# 讓讀取失敗，這是上述症狀不再發生的關鍵。
+# 讓讀取失敗，這是上述症狀不再發生的關鍵。整份調查（含其他模組同類呼叫端的
+# 處理方式）記在 docs/investigations/子行程輸出的解碼修正.md。
 SUBPROCESS_TEXT_KWARGS = {
     "capture_output": True,
     "text": True,
