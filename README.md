@@ -75,7 +75,7 @@ pip install pyinstaller pywebview pywin32 cryptography
 - `pyinstaller` and `pywebview` are required — the Builder Tool checks for both on launch and tells you if either is missing.
 - `pywin32` is optional; it only affects whether shortcuts get created.
 
-The **installers it produces** are fully standalone — your end users don't need Python at all. The only external dependency is the **WebView2 Runtime**, a Windows system component that's pre-installed on Windows 11 and most up-to-date Windows 10 machines; it may be missing on older, un-updated Windows 10 installs.
+The **installers it produces** are fully standalone — your end users don't need Python at all. The only external dependency is the **WebView2 Runtime**, a Windows system component that's pre-installed on Windows 11 and most up-to-date Windows 10 machines; it may be missing on older, un-updated Windows 10 installs. When it is missing, the installer window opens but neither the CSS nor the JavaScript takes effect: the side-by-side icon and destination collapse into a vertical stack that overflows the window, the arrow, checkbox and close button are not visible, and the app-name field stays on its "載入中..." placeholder. No error message is ever shown and the process does not exit — verified on Windows 10 Enterprise LTSC 2019 (build 17763.316) on 2026-09-03.
 
 ### Usage
 
@@ -106,7 +106,7 @@ Full documentation: see [`使用說明書.md`](docs/使用說明書.md) (Traditi
 - Neither the Builder Tool nor the installers it produces are code-signed yet (see Roadmap).
 - Dependency checks (VC++ Redistributable, .NET Desktop Runtime) are detection-only; the tool won't silently install the dependency itself.
 - No multi-language UI yet — everything is in Traditional Chinese.
-- Very old, un-updated Windows 10 machines may need the WebView2 Runtime installed separately.
+- Very old, un-updated Windows 10 machines may need the WebView2 Runtime installed separately. The installer does not detect whether it is present, so on such a machine it silently hangs on its loading placeholder instead of explaining what is missing.
 
 ### License
 
@@ -177,7 +177,7 @@ pip install pyinstaller pywebview pywin32 cryptography
 - `pyinstaller` 跟 `pywebview` 是必要的——打包工具開啟時會檢查兩者，缺了會告訴你。
 - `pywin32` 是選用的，只影響捷徑會不會被建立。
 
-**打包工具產出的安裝檔**是完全獨立的，終端使用者完全不需要裝 Python。唯一的外部依賴是 **WebView2 Runtime**，這是 Windows 的系統元件，Windows 11 跟大多數更新過的 Windows 10 都已經內建；比較舊、沒更新過的 Windows 10 可能會缺這個元件。
+**打包工具產出的安裝檔**是完全獨立的，終端使用者完全不需要裝 Python。唯一的外部依賴是 **WebView2 Runtime**，這是 Windows 的系統元件，Windows 11 跟大多數更新過的 Windows 10 都已經內建；比較舊、沒更新過的 Windows 10 可能會缺這個元件。缺少時安裝視窗會開啟，但 CSS 與 JavaScript 都不會生效：原本左右並排的圖示與安裝目的地變成直向堆疊並溢出視窗，箭頭、核取方塊與關閉鈕看不到，應用程式名稱停在佔位文字「載入中...」，且全程不顯示任何錯誤訊息——2026-09-03 於 Windows 10 Enterprise LTSC 2019（組建 17763.316）實測確認。
 
 ### 使用方式
 
