@@ -36,6 +36,7 @@ from window_drag import WindowDragController
 from disk_space import required_install_size, check_drive_space, format_size
 import file_assoc
 import lang_detect
+import webview2_runtime
 import restart_manager
 import system_entries
 import explorer_lock_release
@@ -1616,6 +1617,29 @@ if __name__ == '__main__':
             _lock_message = f"「{api.app_name}」安裝程式已經在執行中。"
         ctypes.windll.user32.MessageBoxW(0, _lock_message, _lock_title, 0x30)
         sys.exit(0)
+
+    # WebView2 Runtime：缺少它時視窗開得起來，但 CSS 與 JavaScript 都不生效
+    # ——版面塌掉、應用程式名稱停在「載入中...」，而且不報錯、行程也不結束。
+    # 使用者只會看到一個像是還在載入的畫面（見 webview2_runtime 的說明）。
+    # 這一步必須排在 create_window() 之前：偵測結果沒辦法顯示在那個頁面裡，
+    # 因為那個頁面正是打不開的東西。
+    _wv_lang = lang_detect.detect_system_language(SUPPORTED_UI_LANGUAGES, DEFAULT_UI_LANGUAGE)
+    _wv_result = webview2_runtime.ensure_available(
+        ask=lambda: webview2_runtime.confirm(
+            webview2_runtime.text("ask.title", _wv_lang),
+            webview2_runtime.text("ask.body", _wv_lang)),
+        install=webview2_runtime.acquire,
+    )
+    if _wv_result.state in (webview2_runtime.DECLINED, webview2_runtime.FAILED):
+        # 使用者拒絕、下載失敗、或裝完仍偵測不到，三者收斂到同一個結局：
+        # 說明原因並結束。放行只會回到那個「停在載入中」的畫面。
+        webview2_runtime.open_download_page()
+        webview2_runtime.notify(
+            webview2_runtime.text("unavailable.title", _wv_lang),
+            webview2_runtime.text("unavailable.body", _wv_lang,
+                                  url=webview2_runtime.DOWNLOAD_PAGE_URL))
+        # 非零結束碼：讓寫腳本的人分得出「使用者取消」與「裝好了」。
+        sys.exit(2)
 
     html_path = get_resource_path(os.path.join('ui', 'index.html'))
 

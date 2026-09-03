@@ -22,6 +22,7 @@ MODULES = [
     "cert_subject",
     "msix_settings",
     "packaging_core",
+    "webview2_runtime",
 ]
 
 
@@ -108,7 +109,13 @@ class ParameterNamesCannotCollideWithTheHelpersOwn(unittest.TestCase):
         import inspect
         for name in MODULES + ["messages"]:
             module = importlib.import_module(name)
-            fn = getattr(module, "_t", None) or getattr(module, "translate", None)
+            # `_t` 是模組自用的慣例名稱；`text` 用於訊息要給其他模組呼叫的
+            # 情況（webview2_runtime 的對話框由三個進入點各自顯示），那種
+            # 情況下底線開頭的名字會誤導。名稱不是這條測試的重點，僅限位置
+            # 參數才是——找不到任何一個仍然算失敗。
+            fn = (getattr(module, "_t", None)
+                  or getattr(module, "text", None)
+                  or getattr(module, "translate", None))
             self.assertIsNotNone(fn, f"{name} 沒有取訊息的函式")
             kinds = [p.kind for p in inspect.signature(fn).parameters.values()]
             self.assertIn(inspect.Parameter.POSITIONAL_ONLY, kinds,

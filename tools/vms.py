@@ -283,6 +283,10 @@ class Vm:
         為 True，且確實寫得進 HKLM 的側載機碼與 LocalMachine\\Root 憑證
         存放區），因此裝憑證與改側載設定都不需要額外處理。
 
+        **會停下來等使用者的程式一定要傳 no_wait=True。** vmrun 預設等客體
+        程式結束；若那支程式正停在一個等人回答的對話框上，兩邊會互相等到
+        逾時，而症狀是「指令沒有回來」，看不出成因（實際踩到過）。
+
         **客體端請用 powershell.exe，不要用 cmd.exe。** vmrun 會把每個參數
         各自加上引號再交給客體，powershell.exe 接受被引號包住的參數（實測
         `-NoProfile` `-Command` `<script>` 分開傳，客體確實執行並寫出檔案），
@@ -303,9 +307,14 @@ class Vm:
         """
         check = kwargs.pop("check", True)
         interactive = kwargs.pop("interactive", False)
+        no_wait = kwargs.pop("no_wait", False)
         if kwargs:
             raise TypeError("未預期的參數：" + ", ".join(sorted(kwargs)))
-        head = ["-interactive"] if interactive else []
+        head = []
+        if interactive:
+            head.append("-interactive")
+        if no_wait:
+            head.append("-noWait")
         return self._invoke("runProgramInGuest", head + [program] + list(args),
                             guest=True, check=check)
 

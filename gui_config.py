@@ -46,6 +46,7 @@ import splash
 import builder
 import threading
 import lang_detect
+import webview2_runtime
 import install_engine
 import messages
 import packaging_settings
@@ -483,6 +484,26 @@ class ConfigAPI:
 if __name__ == '__main__':
     splash.set_dpi_aware()
     splash.show("正在啟動配置精靈...")
+
+    # WebView2 Runtime：這個工具本身也是 pywebview 程式，缺少它時會跟安裝端
+    # 一樣開得起視窗卻永遠停在載入中（見 webview2_runtime 的說明）。
+    # check_build_environment() 檢查的是 pyinstaller／python／pywebview 套件，
+    # 那是 Python 層級的相依，不涵蓋這個 Windows 系統元件；而且它的結果顯示
+    # 在 ui/config.html 裡——正是打不開的那個頁面。
+    #
+    # **這裡只告知，不代為安裝。** 這個工具的使用者是開發者，他本來就被要求
+    # 自行安裝 Python 與 PyInstaller；「告訴他缺什麼、附上連結」與這個工具
+    # 既有的環境檢查哲學一致。決策理由見 docs/adr/0012。
+    if not webview2_runtime.find_version():
+        splash.close()
+        _wv_lang = lang_detect.detect_system_language(
+            BUILDER_UI_LANGUAGES, DEFAULT_BUILDER_UI_LANGUAGE)
+        webview2_runtime.open_download_page()
+        webview2_runtime.notify(
+            webview2_runtime.text("builder.title", _wv_lang),
+            webview2_runtime.text("builder.body", _wv_lang,
+                                  url=webview2_runtime.DOWNLOAD_PAGE_URL))
+        sys.exit(2)
 
     api = ConfigAPI()
 

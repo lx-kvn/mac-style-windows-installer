@@ -248,5 +248,94 @@ class BootstrapperTests(unittest.TestCase):
                                                            run=fake_run))
 
 
+class DialogTests(unittest.TestCase):
+    """原生對話框。三個進入點共用，因此放在模組裡而不是各自寫一份。"""
+
+    def test_confirm_reports_yes(self):
+        calls = []
+
+        def fake_box(hwnd, body, title, flags):
+            calls.append((body, title, flags))
+            return webview2_runtime.IDYES
+
+        self.assertTrue(webview2_runtime.confirm("t", "b", message_box=fake_box))
+        self.assertEqual(calls[0][2],
+                         webview2_runtime.MB_YESNO | webview2_runtime.MB_ICONQUESTION)
+
+    def test_confirm_reports_anything_else_as_no(self):
+        """關掉對話框（右上角的 X）不是「是」。"""
+        self.assertFalse(webview2_runtime.confirm(
+            "t", "b", message_box=lambda *a: 7))
+
+    def test_notify_uses_a_warning_icon(self):
+        calls = []
+        webview2_runtime.notify("t", "b",
+                                message_box=lambda h, b, t, f: calls.append(f))
+        self.assertEqual(calls, [webview2_runtime.MB_ICONWARNING])
+
+    def test_a_broken_message_box_is_not_a_crash(self):
+        """對話框失敗不該讓安裝程式以未處理例外收場——那比原本的症狀更糟。"""
+        def boom(*args):
+            raise OSError("模擬 user32 呼叫失敗")
+        self.assertFalse(webview2_runtime.confirm("t", "b", message_box=boom))
+        webview2_runtime.notify("t", "b", message_box=boom)
+
+
+class AcquireTests(unittest.TestCase):
+    def test_downloads_then_runs(self):
+        order = []
+
+        def fake_download(url, dest, **kwargs):
+            order.append("download")
+            return True
+
+        def fake_run(path, **kwargs):
+            order.append("run")
+            return True
+
+        self.assertTrue(webview2_runtime.acquire(
+            download_fn=fake_download, run_fn=fake_run))
+        self.assertEqual(order, ["download", "run"])
+
+    def test_a_failed_download_does_not_run_anything(self):
+        ran = []
+        self.assertFalse(webview2_runtime.acquire(
+            download_fn=lambda url, dest, **k: False,
+            run_fn=lambda path, **k: ran.append(True)))
+        self.assertEqual(ran, [])
+
+
+class MessageTests(unittest.TestCase):
+    """對話框的文字。
+
+    這幾則都在 webview 視窗建立之前顯示，因此不能用 `ui/*.html` 的翻譯表
+    ——那正是缺少這個元件時打不開的東西。改用模組自己的訊息表，語言由
+    `lang_detect` 的偵測結果決定，與單一實例鎖的對話框同一個作法。
+
+    鍵集合的一致性由 tests/test_message_tables.py 統一檢查，這裡只驗證
+    取用方式與參數代入。
+    """
+
+    def test_asks_in_the_detected_language(self):
+        zh = webview2_runtime.text("ask.body", "zh-TW")
+        en = webview2_runtime.text("ask.body", "en")
+        self.assertIn("WebView2", zh)
+        self.assertIn("WebView2", en)
+        self.assertNotEqual(zh, en)
+
+    def test_the_download_page_is_spelled_out(self):
+        """MessageBoxW 的網址不能點，使用者只能照著打，所以一定要完整寫出來。"""
+        body = webview2_runtime.text("unavailable.body", "zh-TW",
+                                     url=webview2_runtime.DOWNLOAD_PAGE_URL)
+        self.assertIn(webview2_runtime.DOWNLOAD_PAGE_URL, body)
+
+    def test_the_uninstall_prompt_names_the_application(self):
+        body = webview2_runtime.text("uninstall.body", "zh-TW", app="MyApp")
+        self.assertIn("MyApp", body)
+
+    def test_an_unknown_language_falls_back_rather_than_failing(self):
+        self.assertTrue(webview2_runtime.text("ask.title", "ja"))
+
+
 if __name__ == "__main__":
     unittest.main()

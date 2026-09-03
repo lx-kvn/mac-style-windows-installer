@@ -190,8 +190,9 @@ SHARED_DEEP_MODULES = [
     "msix_deploy.py", "msix_install.py",
     # 兩種引擎都要：安裝介面本身依賴 WebView2 Runtime，缺少它時視窗開得起來
     # 但畫面永遠停在載入中（見該模組的說明）。偵測必須在建立視窗之前完成，
-    # 因此這支不能只存在於打包端。
-    "webview2_runtime.py",
+    # 因此這支不能只存在於打包端。messages.py 是它的相依——那幾則對話框在
+    # 視窗建立之前顯示，用不到 ui/*.html 的翻譯表。
+    "webview2_runtime.py", "messages.py",
 ]
 
 # `ui/` 底下「使用者可能自己換掉」的靜態資源。ensure_workspace_files() 只有

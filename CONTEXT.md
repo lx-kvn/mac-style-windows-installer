@@ -33,6 +33,7 @@
 - [SDK 工具（SDK Tools）](#sdk-工具sdk-tools)
 - [傳統引擎與 MSIX 引擎](#傳統引擎與-msix-引擎)
 - [套件身分名稱（Package Identity Name）](#套件身分名稱package-identity-name)
+- [WebView2 Runtime（webview2_runtime.py）](#webview2-runtimewebview2_runtimepy)
 
 ## 檔案關聯（File Association）
 
@@ -631,3 +632,23 @@ MSIX 套件清單中，系統用來判定「兩包套件是否為同一個應用
 `CN=某某, O=某某, C=TW`），對不上時系統直接拒絕安裝。這與現有的
 `publisher` 欄位（自由文字，寫進 exe 的 VERSIONINFO 當公司名）也是不同
 的東西。
+
+## WebView2 Runtime（webview2_runtime.py）
+
+Windows 的**系統元件**，不是 Python 套件——這個區分是關鍵：`pywebview` 是
+Python 套件（用 pip 安裝），它需要 WebView2 Runtime 才畫得出畫面，而後者
+由 Windows 或 Microsoft 的安裝程式提供。三個進入點（安裝介面、解除安裝
+介面、配置精靈）都依賴它。
+
+缺少它時的行為不是「打不開」，而是**視窗開得起來但 CSS 與 JavaScript 都不
+生效**：版面塌成直向堆疊並溢出視窗，應用程式名稱停在 `ui/index.html` 的
+預設佔位文字「載入中...」，全程不顯示錯誤訊息、行程也不結束。使用者看到的
+是一個像是還在載入的畫面。
+
+**它不能被當成一般的「相依元件」處理。** `dependency_install.py` 那一套的
+偵測、詢問與進度全都呈現在 `ui/index.html` 裡，而那個頁面正是缺少它時打不開
+的東西——雞生蛋。因此偵測與處置全程在 Python 內完成，實作在
+`webview2_runtime.py`，介面用原生 `MessageBoxW`。
+
+三個進入點的處置**刻意不同**（安裝端代為安裝、解除安裝端改走靜默路徑、配置
+精靈只告知），理由見 `docs/adr/0012`；那不是遺漏，不要統一。

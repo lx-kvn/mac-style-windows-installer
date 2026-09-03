@@ -98,6 +98,7 @@ from datetime import datetime
 import file_assoc
 import restart_manager
 import lang_detect
+import webview2_runtime
 import self_delete
 import system_entries
 import explorer_lock_release
@@ -808,6 +809,24 @@ def main():
         return
 
     if silent:
+        sys.exit(run_silent_uninstall(ctx, sys.argv))
+
+    # WebView2 Runtime：缺少它時這個視窗開得起來但畫面不會正常（跟安裝端
+    # 同一個成因，見 webview2_runtime 的說明）。這條路真的走得到——靜默安裝
+    # 不建立視窗，因此一台沒有 WebView2 的機器可以合法地裝好程式，而「設定
+    # → 應用程式」的解除安裝按鈕用的是 UninstallString，那是有畫面的。
+    #
+    # **這裡不代為安裝 WebView2。** 為了移除一個軟體而先叫使用者下載安裝一個
+    # 執行階段並不合理；而解除安裝本身沒有任何非問不可的選擇（安裝要問裝到
+    # 哪、要不要捷徑，解除安裝只是一個確認），原生對話框就足夠。確認之後走
+    # 既有的靜默路徑——那條路本來就存在也被測過。決策理由見 docs/adr/0012。
+    if not webview2_runtime.find_version():
+        _wv_lang = lang_detect.detect_system_language(SUPPORTED_UI_LANGUAGES, DEFAULT_UI_LANGUAGE)
+        if not webview2_runtime.confirm(
+                webview2_runtime.text("uninstall.title", _wv_lang),
+                webview2_runtime.text("uninstall.body", _wv_lang,
+                                      app=ctx.get("app_name", ""))):
+            sys.exit(0)
         sys.exit(run_silent_uninstall(ctx, sys.argv))
 
     # 讓 Windows 在非 100% 縮放比例下不要把整個視窗畫面當點陣圖拉伸，避免

@@ -384,6 +384,24 @@ class CommandAssemblyTests(unittest.TestCase):
         self.assertIn("-interactive", cmd)
         self.assertLess(cmd.index("-interactive"), cmd.index(r"C:\x.exe"))
 
+    def test_run_program_can_return_without_waiting(self):
+        """會停下來等使用者的程式一定要用這個，否則主機端會跟著一起等。
+
+        實際踩到過：以 interactive=True 啟動一支會跳出對話框的安裝程式而沒有
+        加 -noWait，vmrun 等安裝程式結束、安裝程式等使用者回答，兩邊互相等到
+        逾時。症狀是「指令沒有回來」，看不出成因。
+        """
+        run = FakeRun()
+        make_vm(run).run_program(r"C:\x.exe", no_wait=True)
+        cmd = run.calls[0]
+        self.assertIn("-noWait", cmd)
+        self.assertLess(cmd.index("-noWait"), cmd.index(r"C:\x.exe"))
+
+    def test_run_program_waits_by_default(self):
+        run = FakeRun()
+        make_vm(run).run_program(r"C:\x.exe")
+        self.assertNotIn("-noWait", run.calls[0])
+
     def test_run_program_can_return_failure_without_raising(self):
         """有些情境預期客體程式失敗（例如驗證側載預設是關的），那不是錯誤。"""
         run = FakeRun([FakeCompleted(returncode=1, stderr="denied")])

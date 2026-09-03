@@ -32,6 +32,8 @@ import subprocess
 import time
 import urllib.request
 
+import messages
+
 try:
     import winreg
 except ImportError:  # 非 Windows 平台只為了讓測試能匯入這個模組
@@ -61,6 +63,71 @@ INSTALLED = "installed"
 JUST_INSTALLED = "just_installed"
 DECLINED = "declined"
 FAILED = "failed"
+
+
+# 訊息表。機制在 messages.py，那裡也說明了為什麼表留在各模組而不是集中一張。
+#
+# 這幾則都在 webview 視窗建立之前顯示，因此不能用 ui/*.html 的翻譯表——那
+# 正是缺少這個元件時打不開的東西。語言由 lang_detect 的偵測結果決定，與單一
+# 實例鎖的對話框同一個作法。
+#
+# 網址完整寫出來而不是只說「請至官網下載」：MessageBoxW 的文字不能點，
+# 使用者只能照著打。
+MESSAGES = {
+    "zh-TW": {
+        "ask.title": "安裝應用程式",
+        "ask.body": "這個安裝程式需要 Microsoft Edge WebView2 Runtime 才能顯示"
+                    "安裝畫面，而這台電腦上找不到它。\n\n"
+                    "要現在下載並安裝嗎？下載約 1.7 MB，安裝過程會由 Microsoft "
+                    "自己的安裝程式顯示進度。\n\n"
+                    "選擇「否」則不繼續安裝。",
+        "unavailable.title": "安裝應用程式",
+        "unavailable.body": "沒有 Microsoft Edge WebView2 Runtime，這個安裝程式"
+                            "無法顯示安裝畫面。\n\n"
+                            "請先安裝它再重新執行。已為你開啟下載頁面：\n{url}",
+        "uninstall.title": "解除安裝",
+        "uninstall.body": "沒有 Microsoft Edge WebView2 Runtime，無法顯示解除"
+                          "安裝畫面。\n\n要直接解除安裝「{app}」嗎？",
+        "builder.title": "安裝軟體生成器",
+        "builder.body": "找不到 Microsoft Edge WebView2 Runtime，這個工具無法"
+                        "顯示操作介面。\n\n"
+                        "請先安裝它再重新執行。已為你開啟下載頁面：\n{url}",
+    },
+    "en": {
+        "ask.title": "Installer",
+        "ask.body": "This installer needs the Microsoft Edge WebView2 Runtime to "
+                    "show its window, and it is not present on this computer.\n\n"
+                    "Download and install it now? The download is about 1.7 MB; "
+                    "Microsoft's own installer will show the progress.\n\n"
+                    "Choosing No will stop the installation.",
+        "unavailable.title": "Installer",
+        "unavailable.body": "Without the Microsoft Edge WebView2 Runtime this "
+                            "installer cannot show its window.\n\n"
+                            "Please install it and run this again. The download "
+                            "page has been opened for you:\n{url}",
+        "uninstall.title": "Uninstall",
+        "uninstall.body": "Without the Microsoft Edge WebView2 Runtime the "
+                          "uninstall window cannot be shown.\n\n"
+                          "Uninstall \"{app}\" directly instead?",
+        "builder.title": "Installer Builder",
+        "builder.body": "The Microsoft Edge WebView2 Runtime was not found, so "
+                        "this tool cannot show its interface.\n\n"
+                        "Please install it and run this again. The download page "
+                        "has been opened for you:\n{url}",
+    },
+}
+
+
+def text(key, lang=None, /, **params):
+    """取出對話框文字。
+
+    前兩個參數是「僅限位置」的：訊息裡的代入參數（例如 {app}、{url}）由
+    **params 收下，若哪天出現名為 key 或 lang 的參數，沒有這個限制就會與這
+    個函式自己的參數撞名，錯誤訊息是「got multiple values for argument」，
+    完全指不到成因。
+    """
+    return messages.translate(MESSAGES, key, lang or messages.DEFAULT_LANGUAGE,
+                              **params)
 
 Outcome = collections.namedtuple("Outcome", "state version")
 
@@ -156,6 +223,72 @@ def run_bootstrapper(path, run=None):
         return run([path]).returncode == 0
     except Exception:
         return False
+
+
+# MessageBoxW 的旗標。這是視窗建立之前唯一可用的介面——HTML 打不開（那正是
+# 缺少這個元件的後果），Tkinter 不在安裝檔裡。
+MB_YESNO = 0x4
+MB_ICONQUESTION = 0x20
+MB_ICONWARNING = 0x30
+IDYES = 6
+
+
+def _message_box():
+    import ctypes
+    return ctypes.windll.user32.MessageBoxW
+
+
+def confirm(title, body, message_box=None):
+    """跳出「是／否」對話框，使用者選「是」才回傳 True。
+
+    只有 IDYES 算同意：關掉對話框（右上角的 X）與按「否」都是不同意。
+    對話框本身失敗時也回傳 False——那種情況下不該擅自代替使用者同意下載並
+    執行一個外部安裝程式。
+    """
+    box = message_box or _message_box()
+    try:
+        return box(0, body, title, MB_YESNO | MB_ICONQUESTION) == IDYES
+    except Exception:
+        return False
+
+
+def notify(title, body, message_box=None):
+    """跳出只有「確定」的訊息。失敗不往外拋——安裝程式以未處理例外收場，
+    比原本那個「停在載入中」的症狀更糟。"""
+    box = message_box or _message_box()
+    try:
+        box(0, body, title, MB_ICONWARNING)
+    except Exception:
+        pass
+
+
+def open_download_page(opener=None, url=None):
+    """用預設瀏覽器開啟下載頁面。
+
+    MessageBoxW 的文字不能點，使用者只能照著網址打字。順手開一次頁面，
+    省掉那件事；失敗也無所謂，訊息裡本來就寫了完整網址。
+    """
+    try:
+        import webbrowser
+        (opener or webbrowser.open)(url or DOWNLOAD_PAGE_URL)
+    except Exception:
+        pass
+
+
+def acquire(download_fn=None, run_fn=None, workdir=None):
+    """下載並執行載入器。成功回傳 True。
+
+    下載失敗時不執行任何東西——半截或不存在的檔案沒有執行的意義，而
+    download() 失敗時已經把殘檔刪掉了。
+    """
+    import tempfile
+    download_fn = download_fn or download
+    run_fn = run_fn or run_bootstrapper
+    folder = workdir or tempfile.mkdtemp(prefix="mswi_webview2_")
+    target = os.path.join(folder, "MicrosoftEdgeWebview2Setup.exe")
+    if not download_fn(BOOTSTRAPPER_URL, target):
+        return False
+    return run_fn(target)
 
 
 def ensure_available(ask, install, registry=None, sleep=None, recheck_delay=2):
