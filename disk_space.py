@@ -9,6 +9,32 @@ import os
 import shutil
 
 
+_KB = 1024
+_MB = 1024 * 1024
+_GB = 1024 * 1024 * 1024
+
+
+def format_size(byte_count):
+    """把位元組數格式化成給使用者看的大小。
+
+    依數值大小換單位，而不是一律用整數 MB。2026-09-03 實機驗收時取得的訊息
+    是「磁碟空間不足：E: 需要約 0 MB、剩餘 0 MB。」——需求量（約 700 KB）與
+    剩餘量（200 KB）都被整數 MB 捨去成 0，讀起來像程式出錯而不像空間不足。
+    攔截本身正確，錯的是呈現。
+
+    KB 與 MB 用整數（那個級距下小數沒有資訊量），GB 保留一位小數，否則
+    1.1 GB 與 1.9 GB 會顯示成同一個數字。任何大於零的值至少顯示 1 KB，
+    不讓非零的量出現在畫面上時變成零——那正是本函式要解決的問題。
+    """
+    if byte_count <= 0:
+        return "0 KB"
+    if byte_count >= _GB:
+        return "{0:.1f} GB".format(byte_count / _GB)
+    if byte_count >= _MB:
+        return "{0} MB".format(round(byte_count / _MB))
+    return "{0} KB".format(max(1, round(byte_count / _KB)))
+
+
 def required_install_size(src_dir):
     """加總 src_dir 底下所有檔案的大小（遞迴），算出這次安裝實際需要的空間。"""
     total = 0

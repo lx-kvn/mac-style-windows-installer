@@ -515,6 +515,59 @@ class TestTriggerInstallationIsNotReentrant(unittest.TestCase):
         self.assertTrue(second.get("message"), "被擋下來時要有可以顯示給使用者看的訊息")
 
 
+class TestDiskSpaceShortfallMessageIsReadable(unittest.TestCase):
+    """磁碟空間不足的訊息要讓人看得出是空間問題。
+
+    2026-09-03 實機驗收 F08 時取得的實際訊息是「磁碟空間不足：E: 需要約
+    0 MB、剩餘 0 MB。」——需求量（約 700 KB）與剩餘量（200 KB）都被整數 MB
+    捨去成 0，讀起來像程式出錯而不像空間不足。攔截本身是正確的，錯的是呈現。
+
+    先前的測試驗的是「有沒有擋下來」，因此驗收前沒有任何測試會失敗。
+    """
+
+    def setUp(self):
+        self.resource_dir = tempfile.mkdtemp()
+        self.app_contents_dir = os.path.join(self.resource_dir, "app_contents")
+        os.makedirs(self.app_contents_dir)
+        with open(os.path.join(self.app_contents_dir, "app.exe"), "wb") as f:
+            f.write(b"fake-app")
+        self.install_dir = tempfile.mkdtemp()
+        shutil.rmtree(self.install_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.resource_dir, ignore_errors=True)
+        shutil.rmtree(self.install_dir, ignore_errors=True)
+
+    def _resource_path(self, relative_path):
+        return os.path.join(self.resource_dir, relative_path)
+
+    def _run_with_shortfall(self, drive, free, required):
+        api = make_installer_api(
+            app_name="MyApp", main_exe="", selected_path=self.install_dir,
+            file_associations=[], add_to_path=False,
+        )
+        with mock.patch("installer_core.get_resource_path", side_effect=self._resource_path), \
+             mock.patch.object(api, "check_existing_install", return_value={"exists": False}), \
+             mock.patch.object(api, "_check_disk_space", return_value=(False, [
+                 {"drive": drive, "free": free, "required": required,
+                  "sufficient": False},
+             ])):
+            return api.trigger_installation(create_desktop_shortcut=False)
+
+    def test_a_sub_megabyte_shortfall_is_not_reported_as_zero(self):
+        result = self._run_with_shortfall("E:", 200 * 1024, 700 * 1024)
+        self.assertEqual(result["status"], "error")
+        self.assertIn("700 KB", result["message"])
+        self.assertIn("200 KB", result["message"])
+        self.assertNotIn("0 MB", result["message"])
+
+    def test_larger_shortfalls_still_read_naturally(self):
+        result = self._run_with_shortfall(
+            "C:", 500 * 1024 * 1024, 3 * 1024 * 1024 * 1024)
+        self.assertIn("3.0 GB", result["message"])
+        self.assertIn("500 MB", result["message"])
+
+
 class TestUpgradeFlowDoesNotRepeatItself(unittest.TestCase):
     """F15：覆蓋安裝流程裡的兩處冗餘。
 

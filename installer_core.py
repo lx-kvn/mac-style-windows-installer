@@ -33,7 +33,7 @@ import zlib
 import webview
 from datetime import datetime
 from window_drag import WindowDragController
-from disk_space import required_install_size, check_drive_space
+from disk_space import required_install_size, check_drive_space, format_size
 import file_assoc
 import lang_detect
 import restart_manager
@@ -973,9 +973,11 @@ class InstallerAPI:
             # 磁碟空間檢查（依落地磁碟分組，可能不只一顆——見 _check_disk_space()）
             ok, drive_reports = self._check_disk_space(existing_install_path)
             if not ok:
+                # 大小一律經 format_size()：整數 MB 會把小於 1 MB 的量顯示成
+                # 0，訊息讀起來會像程式出錯而不像空間不足。
                 detail = "、".join(
-                    f"{d['drive']} 需要約 {d['required'] // (1024 * 1024)} MB、"
-                    f"剩餘 {d['free'] // (1024 * 1024)} MB"
+                    f"{d['drive']} 需要約 {format_size(d['required'])}、"
+                    f"剩餘 {format_size(d['free'])}"
                     for d in drive_reports if not d["sufficient"]
                 )
                 return {"status": "error", "message": f"磁碟空間不足：{detail}。"}
@@ -983,7 +985,8 @@ class InstallerAPI:
                 log(
                     "磁碟空間檢查通過（"
                     + "、".join(
-                        f"{d['drive']} 約需 {d['required'] // (1024 * 1024)} MB" for d in drive_reports
+                        f"{d['drive']} 約需 {format_size(d['required'])}"
+                        for d in drive_reports
                     )
                     + "）"
                 )

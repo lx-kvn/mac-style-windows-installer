@@ -15,6 +15,48 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import disk_space
 
 
+KB = 1024
+MB = 1024 * 1024
+GB = 1024 * 1024 * 1024
+
+
+class TestFormatSize(unittest.TestCase):
+    """把位元組數格式化成人看得懂的大小。
+
+    起因是實機驗收 F08 時取得的訊息：「磁碟空間不足：E: 需要約 0 MB、剩餘
+    0 MB。」——需求量（約 700 KB）與剩餘量（200 KB）都被整數 MB 捨去成 0，
+    看起來像程式出錯而不像空間不足。單元測試抓不到這種問題：它們斷言的是
+    「有沒有擋下來」，不是「訊息讀不讀得懂」。
+    """
+
+    def test_below_one_megabyte_uses_kilobytes(self):
+        self.assertEqual(disk_space.format_size(700 * KB), "700 KB")
+        self.assertEqual(disk_space.format_size(200 * KB), "200 KB")
+
+    def test_megabyte_range_uses_megabytes(self):
+        self.assertEqual(disk_space.format_size(5 * MB), "5 MB")
+        self.assertEqual(disk_space.format_size(1 * MB), "1 MB")
+
+    def test_gigabyte_range_keeps_one_decimal(self):
+        """GB 只用整數會把 1.9 GB 與 1.1 GB 顯示成同一個數字。"""
+        self.assertEqual(disk_space.format_size(2 * GB + 512 * MB), "2.5 GB")
+        self.assertEqual(disk_space.format_size(1 * GB), "1.0 GB")
+
+    def test_never_renders_a_nonzero_size_as_zero(self):
+        """這是本函式存在的理由，直接釘住。"""
+        for size in (1, KB, 10 * KB, 700 * KB, MB - 1):
+            with self.subTest(size=size):
+                self.assertNotIn("0 MB", disk_space.format_size(size))
+                self.assertFalse(disk_space.format_size(size).startswith("0 "))
+
+    def test_zero_is_still_zero(self):
+        self.assertEqual(disk_space.format_size(0), "0 KB")
+
+    def test_negative_is_treated_as_zero(self):
+        """剩餘空間理論上不會是負的，但把它顯示成「-1 KB」只會更難懂。"""
+        self.assertEqual(disk_space.format_size(-5), "0 KB")
+
+
 class TestRequiredInstallSize(unittest.TestCase):
     def test_sums_all_files_recursively(self):
         tmp_dir = tempfile.mkdtemp()
