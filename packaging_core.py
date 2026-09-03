@@ -188,6 +188,10 @@ SHARED_DEEP_MODULES = [
     # msix_deploy 對 winrt 的匯入是延遲的，因此不會讓傳統引擎的安裝檔綁上
     # 那個相依（見該模組的 _default_manager()）。
     "msix_deploy.py", "msix_install.py",
+    # 兩種引擎都要：安裝介面本身依賴 WebView2 Runtime，缺少它時視窗開得起來
+    # 但畫面永遠停在載入中（見該模組的說明）。偵測必須在建立視窗之前完成，
+    # 因此這支不能只存在於打包端。
+    "webview2_runtime.py",
 ]
 
 # `ui/` 底下「使用者可能自己換掉」的靜態資源。ensure_workspace_files() 只有
