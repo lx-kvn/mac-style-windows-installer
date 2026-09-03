@@ -7,8 +7,10 @@
 的推斷、環境檢查失敗/驗證失敗的 exit code 與輸出。
 """
 import argparse
+import importlib
 import io
 import os
+import re
 import sys
 import json
 import shutil
@@ -812,6 +814,48 @@ class TestMsixBindingsAreRequiredBeforePacking(unittest.TestCase):
         使用者才會看到真正該修的那一項。"""
         _, output, _, _ = self._run(msix_backend_found=False)
         self.assertNotIn("找不到 ui", output)
+
+
+class TerminalOutputCarriesNoMarkup(unittest.TestCase):
+    """訊息表是給配置精靈的 innerHTML 用的，CLI 直接印會把標籤原樣印出來。
+
+    真實看到的輸出（2026-09-03，在缺少 `winrt-*` 的環境跑 `pack`）：
+
+        請先執行 <code>pip install -r requirements.txt</code> 再打包
+
+    `<br>` 早就被處理掉了，`<code>` 沒有——`_strip_html()` 當初只認得 `<br>`，
+    因為那時只有帶 `<br>` 的訊息，而後來新增帶其他標籤的訊息不會有任何地方
+    報錯。
+
+    斷言的對象是「所有訊息表經過 `_strip_html()` 之後不含任何標籤」，不是
+    列舉目前用到哪幾個標籤：後者在下次有人用到第三種標籤時照樣會通過。
+    """
+
+    # 與 tests/test_message_tables.py 同一份清單：有訊息表的模組。
+    MODULES = ("packaging_core", "install_engine", "msix_settings",
+               "cert_subject", "png_size")
+
+    def test_no_message_reaches_the_terminal_with_markup(self):
+        offenders = []
+        for name in self.MODULES:
+            table = getattr(importlib.import_module(name), "MESSAGES", None)
+            if table is None:
+                continue
+            for lang, entries in table.items():
+                for key, text in entries.items():
+                    rendered = builder_cli._strip_html(str(text))
+                    for tag in re.findall(r"<[^>]{1,40}>", rendered):
+                        offenders.append(f"{name}.{lang}.{key} 殘留 {tag}")
+        self.assertEqual(offenders, [], "終端機輸出殘留標籤：\n" + "\n".join(offenders))
+
+    def test_line_breaks_become_real_newlines(self):
+        """既有行為，一併鎖住：`<br>` 是換行，不是被刪掉。"""
+        self.assertEqual(builder_cli._strip_html("甲<br>乙"), "甲\n乙")
+
+    def test_the_text_inside_a_tag_is_kept(self):
+        """去掉的是標籤，不是標籤包住的內容——那段內容正是要照做的指令。"""
+        rendered = builder_cli._strip_html("請先執行 <code>pip install -r requirements.txt</code>")
+        self.assertIn("pip install -r requirements.txt", rendered)
 
 
 if __name__ == "__main__":

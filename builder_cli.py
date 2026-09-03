@@ -27,6 +27,7 @@ builder_cli.py
 import argparse
 import json
 import os
+import re
 import sys
 
 import builder
@@ -125,10 +126,28 @@ def resolve_language(flag):
         messages.LANGUAGES, messages.DEFAULT_LANGUAGE)
 
 
+# 訊息表用到的標記只有 `<br>` 與 `<code>`，這個樣板刻意寫得比那兩個寬：
+# 新增第四種標籤時不需要回來改這裡。訊息表裡沒有任何非標記用途的
+# 角括號（例如 `<版本號>` 這類佔位字），因此不會誤傷。
+_TAG = re.compile(r"<[^>]{1,40}>")
+
+
 def _strip_html(message):
-    """validate_and_build_pack_data() 回傳的錯誤訊息帶 <br> 是給 GUI
-    innerHTML 用的，終端機印出來要換成真正的換行。"""
-    return (message or "").replace("<br>", "\n")
+    """訊息表的標記是給配置精靈的 innerHTML 用的，終端機要先去掉。
+
+    `<br>` 換成真正的換行；其餘標籤整個拿掉，保留它包住的文字——那段文字
+    通常正是要照做的指令（例如 `<code>pip install -r requirements.txt</code>`）。
+
+    真實看到的輸出（2026-09-03，在缺少 `winrt-*` 的環境跑 `pack`）：
+
+        請先執行 <code>pip install -r requirements.txt</code> 再打包
+
+    原本這裡只認得 `<br>`，因為當初只有帶 `<br>` 的訊息。後來新增帶其他標籤
+    的訊息時，不會有任何地方報錯——症狀只出現在使用者的終端機上。改成通用的
+    去標籤，新增第三種標籤時不需要再回來改這裡
+    （`tests/test_builder_cli.py` 會比對所有訊息表）。
+    """
+    return _TAG.sub("", (message or "").replace("<br>", "\n"))
 
 
 def build_arg_parser():
