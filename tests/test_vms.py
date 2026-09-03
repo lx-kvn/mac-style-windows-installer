@@ -162,6 +162,93 @@ class ProfileTests(unittest.TestCase):
         self.assertIn("nope", message)
 
 
+VMX_SAMPLE = (
+    'displayName = "Demo"\n'
+    'sata0:0.fileName = "Demo.vmdk"\n'
+    'sata0:1.deviceType = "cdrom-image"\n'
+    'sata0:1.fileName = "C:\\Downloads\\windows.iso"\n'
+    'sata0:1.present = "TRUE"\n'
+    'sata0:1.startConnected = "FALSE"\n'
+    'memsize = "4096"\n'
+)
+
+
+class CdromImageTests(unittest.TestCase):
+    """把光碟機指到指定的 ISO。
+
+    存在的理由是速度：`CopyFileFromHostToGuest` 走 VMware Tools 的控制通道，
+    那條管線是設計來傳設定值這類小東西的，實測 GB 級別的檔案只有 1.8 MB/s
+    ——2.23 GB 要跑二十分鐘。改由虛擬光碟讀取，客體是以虛擬磁碟的速度存取
+    主機上的檔案，且安裝檔可以直接從光碟執行，複製那一步整個消失。
+
+    改的是既有的光碟機，不新增硬體；而且在「還原快照之後、開機之前」套用，
+    不留下永久變更。
+    """
+
+    def test_points_the_existing_drive_at_the_image(self):
+        updated = vms.set_cdrom_image(VMX_SAMPLE, r"D:\payload.iso")
+        self.assertIn('sata0:1.fileName = "D:\\payload.iso"', updated)
+        self.assertNotIn("windows.iso", updated)
+
+    def test_connects_the_drive_at_power_on(self):
+        """原本是 FALSE——不改的話開機後客體看不到那台光碟機。"""
+        updated = vms.set_cdrom_image(VMX_SAMPLE, r"D:\payload.iso")
+        self.assertIn('sata0:1.startConnected = "TRUE"', updated)
+        self.assertNotIn('sata0:1.startConnected = "FALSE"', updated)
+
+    def test_adds_the_setting_when_the_file_does_not_have_it(self):
+        without = VMX_SAMPLE.replace('sata0:1.startConnected = "FALSE"\n', "")
+        updated = vms.set_cdrom_image(without, r"D:\payload.iso")
+        self.assertIn('sata0:1.startConnected = "TRUE"', updated)
+
+    def test_leaves_everything_else_alone(self):
+        updated = vms.set_cdrom_image(VMX_SAMPLE, r"D:\payload.iso")
+        self.assertIn('sata0:0.fileName = "Demo.vmdk"', updated)
+        self.assertIn('memsize = "4096"', updated)
+        self.assertIn('displayName = "Demo"', updated)
+
+    def test_a_machine_without_a_cdrom_is_a_clear_error(self):
+        without = "\n".join(line for line in VMX_SAMPLE.splitlines()
+                            if "sata0:1" not in line)
+        with self.assertRaises(vms.VmError) as caught:
+            vms.set_cdrom_image(without, r"D:\payload.iso")
+        self.assertIn("光碟機", str(caught.exception))
+
+    def test_reads_and_writes_using_the_declared_encoding(self):
+        """`.vmx` 第一行宣告自己的編碼，實測這台機器的是 Big5。
+
+        以 UTF-8 讀寫會在檔案裡出現非 ASCII 字元時把設定檔寫壞（虛擬機名稱
+        用中文就會踩到），而寫壞的症狀是虛擬機開不起來——不會有人聯想到是
+        掛 ISO 這個動作造成的。
+        """
+        path = os.path.join(tempfile.mkdtemp(), "demo.vmx")
+        original = ('.encoding = "Big5"\n'
+                    'displayName = "測試用虛擬機"\n'
+                    + VMX_SAMPLE)
+        with open(path, "wb") as handle:
+            handle.write(original.encode("big5"))
+
+        vms.write_vmx(path, vms.set_cdrom_image(vms.read_vmx(path),
+                                                r"D:\payload.iso"))
+
+        with open(path, "rb") as handle:
+            written = handle.read().decode("big5")
+        self.assertIn("測試用虛擬機", written)
+        self.assertIn('sata0:1.fileName = "D:\\payload.iso"', written)
+
+    def test_defaults_to_utf8_when_no_encoding_is_declared(self):
+        path = os.path.join(tempfile.mkdtemp(), "demo.vmx")
+        with open(path, "wb") as handle:
+            handle.write(VMX_SAMPLE.encode("utf-8"))
+        self.assertIn("sata0:1", vms.read_vmx(path))
+
+    def test_applying_it_twice_is_the_same_as_once(self):
+        """每次還原快照之後都會重新套用，重複套用不能越改越亂。"""
+        once = vms.set_cdrom_image(VMX_SAMPLE, r"D:\payload.iso")
+        twice = vms.set_cdrom_image(once, r"D:\payload.iso")
+        self.assertEqual(once, twice)
+
+
 class PasswordTests(unittest.TestCase):
     def test_reads_the_named_variable(self):
         self.assertEqual(vms.password_from_env("PLAIN_PW", {"PLAIN_PW": "s3cret"}),
@@ -462,6 +549,54 @@ class FreshBootTests(unittest.TestCase):
         self.assertIn("gui", start_call)
         self.assertNotIn("nogui", start_call)
 
+    def test_mounting_an_iso_forces_a_cold_boot(self):
+        """`startConnected` 只在冷開機時套用。
+
+        實測：還原快照後掛上 ISO 再恢復，客體回報「媒體已載入 = False」，
+        連在客體內重新開機也無效——恢復時裝置狀態是從記憶體映像還原的，
+        不重新列舉硬體。先恢復一次再強制關機，把記憶體狀態丟掉，之後那次
+        `start` 才是真正的冷開機（實測耗時 17.8 秒，客體隨即看得到光碟）。
+
+        掛載排在關機之後：虛擬機關機時 VMware 會重寫 `.vmx`，在那之前改
+        有被覆寫的風險。
+        """
+        run = FakeRun()
+        attached = []
+
+        def fake_attach(vm, iso):
+            attached.append((iso, list(run.subcommands)))
+
+        vms.fresh_boot(make_vm(run), iso="payload.iso", attach=fake_attach)
+        self.assertEqual(len(attached), 1)
+        iso, before = attached[0]
+        self.assertEqual(iso, "payload.iso")
+        self.assertEqual(before[-1], "stop")
+        self.assertEqual(run.subcommands[:5],
+                         ["revertToSnapshot", "start", "runProgramInGuest",
+                          "stop", "start"])
+
+    def test_no_iso_means_no_extra_boot(self):
+        """沒有要掛東西時不該多付一次開機的時間。"""
+        run = FakeRun()
+        vms.fresh_boot(make_vm(run))
+        self.assertNotIn("stop", run.subcommands)
+
+    def test_stops_the_guest_from_falling_asleep(self):
+        """自動化全程沒有使用者輸入，Windows 因此認定客體閒置並進入睡眠。
+
+        實際發生過：送入一個 2.23 GB 的檔案時，客體在傳輸途中發出 ACPI S1
+        睡眠要求，VMware 隨即暫停虛擬機，主機端拿到的錯誤是「虛擬機需要處於
+        開機狀態」——訊息指向電源狀態，完全看不出成因是客體自己睡著了。
+
+        短操作（數秒）永遠碰不到這條線，因此這個問題直到有 GB 級別的傳輸才
+        浮現。設定在快照還原後才套用，隨快照一起丟棄，不動到快照本身。
+        """
+        run = FakeRun()
+        vms.fresh_boot(make_vm(run))
+        joined = " ".join(" ".join(call) for call in run.calls)
+        self.assertIn("powercfg", joined)
+        self.assertIn("standby-timeout-ac", joined)
+
     def test_reverts_starts_then_waits(self):
         """殘留狀態上跑出來的結果不算數，還原必須排在開機之前。
 
@@ -470,10 +605,14 @@ class FreshBootTests(unittest.TestCase):
         """
         run = FakeRun()
         vms.fresh_boot(make_vm(run))
+        # 前三個是還原、開機、就緒探測；其後是關閉睡眠的幾道設定（見上一項
+        # 測試），數量不斷言，以免加減一項設定就要改這裡。
         self.assertEqual(
-            run.subcommands,
+            run.subcommands[:3],
             ["revertToSnapshot", "start", "runProgramInGuest"],
         )
+        self.assertTrue(
+            all(name == "runProgramInGuest" for name in run.subcommands[3:]))
 
 
 class SubprocessOutputDecodingTest(unittest.TestCase):

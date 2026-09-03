@@ -345,6 +345,99 @@ class Vm:
         return text
 
 
+_CDROM_DEVICE = re.compile(
+    r'^\s*([\w:]+)\.deviceType\s*=\s*"cdrom-(?:image|raw)"\s*$')
+
+
+def set_cdrom_image(vmx_text, iso_path):
+    """把 vmx 文字裡既有的光碟機指到 iso_path，並設為開機時連線。
+
+    存在的理由是速度：`CopyFileFromHostToGuest` 走 VMware Tools 的控制通道，
+    那條管線是設計來傳設定值這類小東西的，實測 GB 級別的檔案只有 1.8 MB/s
+    ——2.23 GB 要跑二十分鐘。改由虛擬光碟讀取，客體是以虛擬磁碟的速度存取
+    主機上的檔案，且安裝檔可以直接從光碟執行，複製那一步整個消失。
+
+    只改既有的光碟機，不新增硬體。回傳新的文字，不碰檔案——寫入的時機
+    （必須在關機狀態下）由呼叫端決定，見 attach_iso()。
+
+    重複套用的結果與套用一次相同：每次還原快照之後都會重新套用，若每次都
+    追加一行，檔案會越改越亂。
+    """
+    lines = vmx_text.splitlines()
+    device = None
+    for line in lines:
+        matched = _CDROM_DEVICE.match(line)
+        if matched:
+            device = matched.group(1)
+            break
+    if not device:
+        raise VmError("這台虛擬機的設定裡找不到光碟機，無法掛載 ISO。")
+
+    wanted = {
+        device + ".deviceType": "cdrom-image",
+        device + ".fileName": iso_path,
+        device + ".present": "TRUE",
+        device + ".startConnected": "TRUE",
+    }
+    seen = set()
+    result = []
+    for line in lines:
+        key = line.split("=", 1)[0].strip() if "=" in line else ""
+        if key in wanted:
+            result.append('%s = "%s"' % (key, wanted[key]))
+            seen.add(key)
+        else:
+            result.append(line)
+    for key in sorted(set(wanted) - seen):
+        result.append('%s = "%s"' % (key, wanted[key]))
+
+    ending = "\r\n" if "\r\n" in vmx_text else "\n"
+    return ending.join(result) + (ending if vmx_text.endswith(("\n", "\r")) else "")
+
+
+_VMX_ENCODING = re.compile(r'^\s*\.encoding\s*=\s*"([^"]+)"', re.M)
+
+
+def vmx_encoding(raw_bytes):
+    """讀出 `.vmx` 第一行宣告的編碼。
+
+    這個檔案自己宣告用什麼編碼寫成（實測本機這兩台是 Big5）。一律以 UTF-8
+    讀寫會在檔案裡出現非 ASCII 字元時把設定檔寫壞——虛擬機名稱用中文就會
+    踩到，而症狀是虛擬機開不起來，沒有人會聯想到是掛 ISO 造成的。
+
+    宣告行本身必為 ASCII，因此先以 latin-1 解出那一行（latin-1 不會對任何
+    位元組拋例外），再用讀到的編碼解整個檔案。沒有宣告時用 UTF-8。
+    """
+    header = raw_bytes[:512].decode("latin-1", errors="replace")
+    matched = _VMX_ENCODING.search(header)
+    return matched.group(1) if matched else "utf-8"
+
+
+def read_vmx(path):
+    with open(path, "rb") as handle:
+        raw = handle.read()
+    return raw.decode(vmx_encoding(raw), errors="replace")
+
+
+def write_vmx(path, text):
+    with open(path, "rb") as handle:
+        encoding = vmx_encoding(handle.read())
+    with open(path, "wb") as handle:
+        handle.write(text.encode(encoding, errors="replace"))
+
+
+def attach_iso(vm, iso_path):
+    """把 ISO 掛到虛擬機的光碟機上。**必須在關機狀態下呼叫。**
+
+    寫入 `.vmx` 這個動作在虛擬機執行中會被 VMware 覆寫回去，因此呼叫順序是
+    「還原快照 → 恢復 → 關機 → 掛載 → 冷開機」（見 fresh_boot）。還原會把
+    設定還原成快照當時的樣子，所以每一輪都要重新掛一次；也因為如此，這個
+    改動不會留下永久痕跡。
+    """
+    write_vmx(vm.machine.vmx, set_cdrom_image(read_vmx(vm.machine.vmx),
+                                              iso_path))
+
+
 _TAB_FILE = re.compile(
     r'^pref\.ws\.session\.window\d+\.tab\d+\.file\s*=\s*"(.*)"\s*$')
 
@@ -425,7 +518,7 @@ def preserved_tab(vmx, list_tabs=None, reopen=None):
             reopen(vmx)
 
 
-def fresh_boot(vm, gui=False):
+def fresh_boot(vm, gui=False, iso=None, attach=None):
     """把虛擬機帶回它的快照狀態並開到可用為止。
 
     每一輪驗證都從這裡開始，理由有兩個。其一，若在殘留狀態上執行，測到的
@@ -436,7 +529,53 @@ def fresh_boot(vm, gui=False):
 
     gui 決定這一輪看不看得到畫面，在此定案並往下傳。中途改不了：切換模式
     必須關機重開，而關機重開等於這一輪從頭來過。
+
+    iso 不為 None 時把該映像掛到客體的光碟機上，代價是多一次關機與冷開機
+    （見下方註解）。GB 級別的檔案用這條路送進客體：VMware Tools 的檔案傳輸
+    實測只有 1.8 MB/s，2.23 GB 要跑二十分鐘，而做一片 4 GB 的 ISO 只要
+    3.8 秒、冷開機 17.8 秒。attach 是測試接縫。
     """
     vm.revert()
+    if iso:
+        # `startConnected` 只在冷開機時套用。實測：還原後掛上 ISO 再恢復，
+        # 客體回報「媒體已載入 = False」，連在客體內重新開機也無效——恢復
+        # 時裝置狀態是從記憶體映像還原的，不重新列舉硬體。先恢復一次再強制
+        # 關機把記憶體狀態丟掉，之後那次 start 才是真正的冷開機（實測 17.8
+        # 秒，客體隨即看得到光碟）。
+        #
+        # 掛載排在關機之後：虛擬機關機時 VMware 會重寫 .vmx，在那之前改有
+        # 被覆寫的風險。
+        vm.start(gui=gui)
+        vm.wait_until_ready()
+        vm.stop()
+        (attach or attach_iso)(vm, iso)
     vm.start(gui=gui)
     vm.wait_until_ready()
+    keep_awake(vm)
+
+
+# 關閉閒置逾時的四項。`powercfg /change` 一次只吃一項，因此逐項送出。
+_KEEP_AWAKE_SETTINGS = (
+    "standby-timeout-ac", "hibernate-timeout-ac",
+    "monitor-timeout-ac", "disk-timeout-ac",
+)
+
+POWERCFG = r"C:\Windows\System32\powercfg.exe"
+
+
+def keep_awake(vm):
+    """阻止客體在長時間操作途中進入睡眠。
+
+    自動化全程沒有任何使用者輸入，Windows 因此認定客體閒置並依電源配置進入
+    睡眠。實際發生過：送入一個 2.23 GB 的檔案時，客體在傳輸途中發出 ACPI S1
+    睡眠要求，VMware 隨即暫停虛擬機並寫出記憶體映像，主機端拿到的錯誤是
+    「虛擬機需要處於開機狀態」——訊息指向電源狀態，完全看不出成因是客體
+    自己睡著了。數秒等級的操作永遠碰不到這條線，因此這個問題直到有 GB 級別
+    的傳輸才浮現。
+
+    在快照還原之後才套用，隨快照一起丟棄；快照本身維持原樣，不必為了自動化
+    重拍。單項失敗不中斷流程——設定不成功時最壞的結果是回到原本的行為，
+    為此讓整輪驗證中止並不划算。
+    """
+    for setting in _KEEP_AWAKE_SETTINGS:
+        vm.run_program(POWERCFG, "/change", setting, "0", check=False)
