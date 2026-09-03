@@ -198,5 +198,72 @@ class SigningTest(BuildMsixTestBase):
         self.assertNotIn("hunter2", str(ctx.exception))
 
 
+class StagingDirectoryIsCleanedUpTest(BuildMsixTestBase):
+    """組裝目錄是中間產物，`build_msix()` 結束時不該留在工作目錄裡。
+
+    真實踩到的問題（2026-09-03）：在本機以原始碼執行打包時，工作目錄就是
+    版本庫本身，`msix_staging/` 因此在每次打包之後留在版本庫根目錄，成為
+    一個未追蹤的資料夾。它的內容是應用程式檔案與產生出來的清單，`.msix`
+    做好之後不再有用途，留著只會讓人誤以為那是版本庫的一部分。
+
+    清理採 try/finally 而非「成功才清」：打包或簽章中途失敗時留下的殘留與
+    成功時一樣沒有用途，而失敗那條路正是最容易被忘記的一條。
+    """
+
+    def _staging_path(self):
+        return os.path.join(self.workspace, builder.MSIX_STAGING_DIRNAME)
+
+    def _stage_for_real(self, **kwargs):
+        """假的 stage：只把目錄與一個檔案真的建出來，讓清理與否看得出差別。"""
+        staging = kwargs["staging_dir"]
+        os.makedirs(staging, exist_ok=True)
+        with open(os.path.join(staging, "AppxManifest.xml"), "w", encoding="utf-8") as f:
+            f.write("<Package />")
+
+    def test_it_is_gone_after_a_successful_build(self):
+        with mock.patch("msix_package.stage", side_effect=self._stage_for_real), \
+                mock.patch("msix_package.pack", return_value=self.output):
+            self.call()
+        self.assertFalse(os.path.exists(self._staging_path()),
+                         "打包成功之後組裝目錄仍留在工作目錄裡")
+
+    def test_it_is_gone_after_packing_fails(self):
+        with mock.patch("msix_package.stage", side_effect=self._stage_for_real), \
+                mock.patch("msix_package.pack", side_effect=Exception("makeappx 掛了")):
+            with self.assertRaises(Exception):
+                self.call()
+        self.assertFalse(os.path.exists(self._staging_path()),
+                         "打包失敗之後組裝目錄仍留在工作目錄裡")
+
+    def test_it_is_gone_after_signing_fails(self):
+        """簽章發生在打包之後，是最後一個可能中途離開這個函式的地方。"""
+
+        def run(cmd, **kwargs):
+            self.commands.append(cmd)
+            if "signtool.exe" in cmd[0]:
+                return mock.Mock(returncode=1, stdout="", stderr="簽章失敗")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch("msix_package.stage", side_effect=self._stage_for_real), \
+                mock.patch("msix_package.pack", return_value=self.output):
+            with self.assertRaises(Exception):
+                self.call(signing=self.signing_config(), run=run)
+        self.assertFalse(os.path.exists(self._staging_path()),
+                         "簽章失敗之後組裝目錄仍留在工作目錄裡")
+
+    def test_the_packed_output_survives_the_cleanup(self):
+        """輸出路徑在工作目錄底下（一體式流程的中間產物就放在那裡），
+        清理若掃得太寬會把剛做好的套件一起刪掉。"""
+        def pack(staging_dir, output_path, **kwargs):
+            with open(output_path, "wb") as f:
+                f.write(b"PK fake msix")
+            return output_path
+
+        with mock.patch("msix_package.stage", side_effect=self._stage_for_real), \
+                mock.patch("msix_package.pack", side_effect=pack):
+            result = self.call()
+        self.assertTrue(os.path.exists(result), "清理把產出的 .msix 一起刪掉了")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
