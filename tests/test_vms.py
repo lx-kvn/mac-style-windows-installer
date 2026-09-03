@@ -65,6 +65,7 @@ PLAIN = vms.Machine(
     user="Tester",
     password_env="PLAIN_PW",
     encryption_env=None,
+    profiles={"default": vms.Profile("default", "Clean", "Tester", "")},
 )
 
 ENCRYPTED = PLAIN._replace(
@@ -108,6 +109,57 @@ class MachineLookupTests(unittest.TestCase):
 
     def test_the_1809_machine_needs_no_encryption_variable(self):
         self.assertIsNone(vms.machine("win1809").encryption_env)
+
+
+class ProfileTests(unittest.TestCase):
+    """一台虛擬機有多張快照，各自代表不同的起始情境。
+
+    情境的差別不只在快照名稱，還在「用哪個帳號登入」——標準使用者的快照裡
+    登入的是 `User` 而不是 `Tester`。兩者綁在一起，分開記會出現「拿管理員
+    帳號去登入標準使用者快照」這種對不起來的組合，而失敗訊息會是認證失敗，
+    不會指向情境選錯。
+    """
+
+    def test_win11_declares_the_four_snapshots(self):
+        found = vms.machine("win11").profiles
+        for key in ("default", "two_disks", "standard_user",
+                    "standard_user_two_disks"):
+            self.assertIn(key, found)
+
+    def test_a_profile_carries_both_the_snapshot_and_the_account(self):
+        profile = vms.machine("win11").profiles["standard_user"]
+        self.assertEqual(profile.snapshot, "Clean_User")
+        self.assertEqual(profile.user, "User")
+
+    def test_the_default_profile_is_the_original_clean_snapshot(self):
+        machine = vms.machine("win11")
+        self.assertEqual(machine.profiles["default"].snapshot, "Clean")
+        self.assertEqual(machine.snapshot, "Clean")
+        self.assertEqual(machine.user, "Tester")
+
+    def test_win1809_has_only_the_default_profile(self):
+        self.assertEqual(list(vms.machine("win1809").profiles), ["default"])
+
+    def test_connect_selects_the_named_profile(self):
+        run = FakeRun()
+        vm = vms.connect("win11", profile="standard_user_two_disks",
+                         environ={"WIN11_VM_PASSWORD": "p",
+                                  "WIN11_VM_ENCRYPTION_PASSWORD": "k"},
+                         run=run, vmrun=r"C:\vmware\vmrun.exe")
+        vm.revert()
+        self.assertIn("Clean_User_C:/E:", run.calls[0])
+        vm.copy_in("a", "b")
+        self.assertIn("User", run.calls[1])
+        self.assertNotIn("Tester", run.calls[1])
+
+    def test_unknown_profile_lists_the_valid_ones(self):
+        with self.assertRaises(vms.VmError) as caught:
+            vms.connect("win11", profile="nope",
+                        environ={"WIN11_VM_PASSWORD": "p",
+                                 "WIN11_VM_ENCRYPTION_PASSWORD": "k"})
+        message = str(caught.exception)
+        self.assertIn("standard_user", message)
+        self.assertIn("nope", message)
 
 
 class PasswordTests(unittest.TestCase):

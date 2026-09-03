@@ -49,17 +49,30 @@ REDACTED = "***"
 
 
 Machine = collections.namedtuple(
-    "Machine", "key vmx snapshot user password_env encryption_env")
+    "Machine", "key vmx snapshot user password_env encryption_env profiles")
+
+# 一張快照代表一種起始情境。快照名稱與登入帳號綁在同一個具名元組裡，因為
+# 兩者必須成對——標準使用者的快照裡登入的是 `User` 而不是 `Tester`。分開記
+# 會出現「拿管理員帳號去登入標準使用者快照」這種對不起來的組合，而 vmrun
+# 回報的會是認證失敗，不會指向情境選錯。
+Profile = collections.namedtuple("Profile", "key snapshot user note")
+
+
+def _machine(profiles, **fields):
+    """由 profiles 推出預設的 snapshot／user，避免同一份資料寫兩次。"""
+    default = profiles["default"]
+    return Machine(snapshot=default.snapshot, user=default.user,
+                   profiles=profiles, **fields)
 
 
 MACHINES = {
     # 驗證 MSIX 的 MinVersion 能否部署、企業版側載預設值、缺少 WebView2
     # Runtime 時安裝精靈的行為。組建停在 17763.316（不連網路，見 SKILL）。
-    "win1809": Machine(
+    "win1809": _machine(
+        {"default": Profile("default", "Clean", "Tester",
+                            "單一 C 槽，Tester（管理員帳號）已登入")},
         key="win1809",
         vmx=r"D:\VMware\Win10-1809-LTSC\Windows10-1809-LTSC.vmx",
-        snapshot="Clean",
-        user="Tester",
         password_env="WIN1809_VM_PASSWORD",
         encryption_env=None,
     ),
@@ -69,11 +82,27 @@ MACHINES = {
     # encryption_env 不是可選的裝飾：Windows 11 要求 TPM 2.0，VMware 以
     # 虛擬 TPM 滿足它，而帶虛擬 TPM 的機器必須加密存放。沒帶 -vp 時連
     # 「列出快照」都會被回以 "A password is required for this operation"。
-    "win11": Machine(
+    #
+    # 四張快照對應四種起始情境。`User` 與 `Tester` 共用同一個密碼，因此
+    # 只有一個 password_env。
+    "win11": _machine(
+        {
+            "default": Profile(
+                "default", "Clean", "Tester",
+                "單一 C 槽，Tester（管理員帳號）已登入"),
+            "two_disks": Profile(
+                "two_disks", "Clean_C:/E:", "Tester",
+                "C 與 E 兩顆磁碟，用於驗證跨磁碟的安裝行為（稽核 F08）"),
+            "standard_user": Profile(
+                "standard_user", "Clean_User", "User",
+                "單一 C 槽，User（標準使用者）已登入。與 interactive=True 的"
+                "未提升權杖不同：這個帳號本身沒有管理員身分，無法經 UAC 提升"),
+            "standard_user_two_disks": Profile(
+                "standard_user_two_disks", "Clean_User_C:/E:", "User",
+                "兩顆磁碟 + 標準使用者，同時涵蓋前兩種情境"),
+        },
         key="win11",
         vmx=r"D:\VMware\Windows11-25h2\Windows11-25H2.vmx",
-        snapshot="Clean",
-        user="Tester",
         password_env="WIN11_VM_PASSWORD",
         encryption_env="WIN11_VM_ENCRYPTION_PASSWORD",
     ),
@@ -117,13 +146,18 @@ def password_from_env(name, environ=None):
     return value
 
 
-def connect(machine_or_key, environ=None, **kwargs):
+def connect(machine_or_key, environ=None, profile=None, **kwargs):
     """依機器定義組出一個 Vm，密碼從它宣告的環境變數讀取。
 
     未宣告 encryption_env 的機器不會去讀那個變數——未加密的機器不該因為
     少設一個與它無關的環境變數而無法使用。
+
+    profile 選定起始情境，同時決定用哪張快照與哪個帳號登入（見 Profile）。
+    省略時用 "default"。
     """
     target = _as_machine(machine_or_key)
+    chosen = _profile(target, profile or "default")
+    target = target._replace(snapshot=chosen.snapshot, user=chosen.user)
     environ = os.environ if environ is None else environ
     encryption = None
     if target.encryption_env:
@@ -132,6 +166,16 @@ def connect(machine_or_key, environ=None, **kwargs):
               password_from_env(target.password_env, environ),
               encryption_password=encryption,
               **kwargs)
+
+
+def _profile(machine, key):
+    """取出情境定義。找不到時把可選的一併說出來。"""
+    try:
+        return machine.profiles[key]
+    except KeyError:
+        raise VmError(
+            machine.key + " 沒有名為 " + repr(key) + " 的情境。可用的有："
+            + "、".join(sorted(machine.profiles)))
 
 
 def write_guest_script(path, text):
