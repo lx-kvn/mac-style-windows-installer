@@ -1,0 +1,37 @@
+# 打包機器（要拿這個工具產生安裝檔的那台機器）需要的第三方套件。
+#
+# 這份清單是唯一真實來源：.github/workflows/ 底下的工作流程一律以
+# `pip install -r requirements.txt` 安裝，不各自列一份套件名稱。各自列一份的
+# 代價不是多打幾個字，而是那幾份清單會各自演化——其中一處加了套件而其他幾處
+# 沒跟上時，症狀是某個工作流程莫名其妙失敗，或者更糟：通過了，但通過的原因
+# 與本機不同。tests/test_dependency_manifest.py 會比對，各自列會紅燈。
+#
+# 這個工具本身（配置精靈 GUI／CLI）開得起來只需要 pywebview。其餘幾項是
+# 「編譯安裝檔」這個動作背後的需求，缺少時的表現各不相同，見各項說明。
+
+# 安裝檔（以及工具自己的兩顆 exe）由 pyinstaller 子行程編出來。
+pyinstaller
+
+# 配置精靈與產出的安裝精靈都以 pywebview 呈現介面。
+pywebview
+
+# 建立捷徑（installer_core.py 的 win32com）。缺少時不擋編譯，只有捷徑功能
+# 失效，因此在環境檢查裡列為建議安裝而非必要。
+pywin32
+
+# 安裝密碼保護的加解密（install_encryption.py）。只有啟用該功能的設定才會
+# 用到，缺少時由打包階段的驗證擋下（訊息鍵 password.missing_dependency）。
+cryptography
+
+# MSIX 引擎的安裝檔靠這五個綁定套件呼叫 Windows 的套件部署介面
+# （msix_deploy.py 的 PackageManager）。缺少時由打包階段的驗證擋下（訊息鍵
+# msix.missing_dependency）。
+#
+# 版本固定的理由：PyInstaller 以靜態分析決定要把哪些模組收進 exe，版本組合
+# 換掉可能導致打包出來的安裝檔少帶模組，而那個後果要到終端使用者執行安裝時
+# 才顯現。
+winrt-runtime==3.2.1
+winrt-Windows.Management.Deployment==3.2.1
+winrt-Windows.Foundation==3.2.1
+winrt-Windows.Foundation.Collections==3.2.1
+winrt-Windows.ApplicationModel==3.2.1

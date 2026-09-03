@@ -24,7 +24,8 @@ Tkinter 是標準函式庫、啟動快、不需要額外依賴，場合上比較
   - 這支腳本要跟 gui_config.py、packaging_core.py、builder_cli.py、splash.py、
     splash_helper.py、builder.py、installer_core.py、uninstall.py、ui/
     放在同一層。
-  - 執行環境要先安裝 pyinstaller、pywebview（pip install pyinstaller pywebview）。
+  - 執行環境要先安裝 pyinstaller、pywebview（`pip install -r requirements.txt`，
+    套件清單與各項用途見該檔）。
 
 修正/新增紀錄：
   - 打包前清除 dist/build 資料夾原本用 ignore_errors=True，遇到檔案被鎖住

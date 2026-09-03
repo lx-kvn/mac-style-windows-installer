@@ -1658,3 +1658,88 @@ class SubprocessOutputDecodingTest(unittest.TestCase):
         self.assertTrue(result["webview_found"])
         self.assertTrue(result["pywin32_found"])
 
+
+
+class TestMsixBackendIsProbedInTheBuildEnvironment(unittest.TestCase):
+    """`winrt-*` 綁定套件的偵測對象是「編譯安裝檔的那個 python」，不是正在
+    執行這支工具的行程。
+
+    真實踩到的缺陷（2026-09-03，於 Windows 10 1809 虛擬機重現）：打包機器
+    未安裝 `winrt-*`，工具回報編譯成功，產出的 Setup.exe 一執行即中止於
+    「無法使用 Windows 的套件部署介面：No module named 'winrt'」——錯誤要等
+    到終端使用者手上才出現。
+
+    偵測對象之所以是外部直譯器而非本行程：安裝檔由 builder.py 另外呼叫的
+    pyinstaller 子行程編出來，`winrt-*` 能不能被收進去取決於那個子行程背後
+    的 python 有沒有裝。工具本身是 frozen exe 時，它自己的行程裡永遠沒有
+    `winrt-*`（packaging_core 不匯入 msix_deploy），以行程內的 import 當
+    判準會把每一次 MSIX 打包都誤判成缺套件。pywebview 的偵測已經是這個
+    做法，這裡沿用同一個子行程探針，不另外多起一個。
+    """
+
+    def _env(self, probe_output):
+        with mock.patch("packaging_core.shutil.which", return_value="python.exe"), \
+             mock.patch("packaging_core.subprocess.run",
+                        side_effect=_fakes.decode_probe_run(
+                            _fakes.decode_probe_script(ascii_text=probe_output))):
+            return packaging_core.check_build_environment()
+
+    def test_the_bindings_are_reported_when_the_probe_finds_them(self):
+        env = self._env("WEBVIEW_OK\nPYWIN32_OK\nMSIX_BACKEND_OK\n")
+        self.assertTrue(env["msix_backend_found"])
+
+    def test_the_bindings_are_reported_missing_when_the_probe_does_not_find_them(self):
+        env = self._env("WEBVIEW_OK\nPYWIN32_OK\n")
+        self.assertFalse(env["msix_backend_found"])
+
+    def test_missing_bindings_do_not_make_the_environment_unready(self):
+        """`ready` 是「能不能打包」的總結論，而傳統引擎完全用不到這幾個
+        套件。把它算進 `ready` 會讓沒有要用 MSIX 的人被一個他用不到的相依
+        擋在門外——pywin32 已經因為同一個理由列為建議安裝而不進 `ready`。"""
+        env = self._env("WEBVIEW_OK\nPYWIN32_OK\n")
+        self.assertTrue(env["ready"])
+
+
+class TestMissingEngineDependencies(unittest.TestCase):
+    """`missing_engine_dependencies()`：把「這個引擎需要的相依在不在」這個
+    判斷收在一處，由配置精靈與 CLI 各自在動手之前呼叫一次。
+
+    不放進 `validate_and_build_pack_data()`：那個函式是純函式，不做起子
+    行程這類外部副作用（見其說明）。環境的答案由呼叫端問到之後傳進來，
+    這個函式只負責把「引擎 × 環境」翻成一則訊息。
+    """
+
+    def test_msix_without_the_bindings_is_refused(self):
+        message = packaging_core.missing_engine_dependencies(
+            install_engine.MSIX, {"msix_backend_found": False})
+        self.assertIsNotNone(message)
+
+    def test_the_refusal_names_the_packages_to_install(self):
+        """訊息要能直接照做。使用者手上只有「安裝失敗」四個字時，這個缺陷
+        的線索是零。"""
+        message = packaging_core.missing_engine_dependencies(
+            install_engine.MSIX, {"msix_backend_found": False})
+        self.assertIn("winrt", message)
+        self.assertIn("requirements.txt", message)
+
+    def test_msix_with_the_bindings_passes(self):
+        self.assertIsNone(packaging_core.missing_engine_dependencies(
+            install_engine.MSIX, {"msix_backend_found": True}))
+
+    def test_the_traditional_engine_does_not_need_the_bindings(self):
+        self.assertIsNone(packaging_core.missing_engine_dependencies(
+            install_engine.TRADITIONAL, {"msix_backend_found": False}))
+
+    def test_an_environment_report_without_the_key_counts_as_missing(self):
+        """鍵不存在的成因只有兩種：環境檢查換過形狀而這裡沒跟上，或呼叫端
+        傳了一份不是 check_build_environment() 產出的字典。兩種都不足以
+        支持「套件在」這個結論，因此取安全的一邊。"""
+        self.assertIsNotNone(packaging_core.missing_engine_dependencies(
+            install_engine.MSIX, {}))
+
+    def test_the_message_follows_the_requested_language(self):
+        zh = packaging_core.missing_engine_dependencies(
+            install_engine.MSIX, {}, lang="zh-TW")
+        en = packaging_core.missing_engine_dependencies(
+            install_engine.MSIX, {}, lang="en")
+        self.assertNotEqual(zh, en)

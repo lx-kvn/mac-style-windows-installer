@@ -67,6 +67,7 @@ MESSAGES = {
         "main_exe.required": "請選擇應用程式的主要執行檔（.exe），這是建立捷徑、偵測執行中狀態、立即執行等功能所必需的。",
         "min_version.builtin_only": "dependencies_min_version 只支援內建相依元件（vcredist_x64/dotnet_desktop）；自訂相依元件「{key}」的最低版本請改用 custom_dependencies 裡對應項目的 registry_check.min_version。",
         "min_version.not_enabled": "dependencies_min_version 的「{key}」沒有在 dependencies 清單裡啟用，這個最低版本設定不會生效。",
+        "msix.missing_dependency": "MSIX 引擎的安裝檔需要 `winrt-*` 綁定套件才能呼叫 Windows 的套件部署介面，而編譯安裝檔的那個 Python 環境找不到它們。<br>缺少時安裝檔照樣編得出來，但它在任何機器上都會裝不起來。請先執行 <code>pip install -r requirements.txt</code> 再打包，或改用傳統引擎。",
         "password.env_missing": "環境變數「{name}」目前沒有值，請先設定好安裝密碼再打包。",
         "password.inline_in_config": "設定檔不支援直接寫入安裝密碼（`install_password`）。<br>設定檔是一份會被存進專案、傳給別人的普通文字檔，密碼寫在裡面等於整個保護失效。請改用 `install_password_env` 填入存放密碼的環境變數名稱；想直接輸入密碼請改用配置精靈（GUI）。",
         "password.missing_dependency": "安裝密碼保護需要 `cryptography` 套件，目前找不到它。<br>請先執行 <code>pip install cryptography</code> 再打包，或取消「啟用安裝密碼保護」。",
@@ -117,6 +118,7 @@ MESSAGES = {
         "main_exe.not_found": "The chosen main executable is not in the application folder; choose it again.",
         "main_exe.required": "Choose the application's main executable (.exe). Shortcuts, the running-process check and launch-after-install all need it.",
         "min_version.builtin_only": "dependencies_min_version only supports the built-in prerequisites (vcredist_x64/dotnet_desktop). For the custom prerequisite \"{key}\", set registry_check.min_version on its custom_dependencies entry instead.",
+        "msix.missing_dependency": "An installer built with the MSIX engine needs the `winrt-*` binding packages to reach the Windows package deployment interface, and the Python environment that compiles the installer cannot find them.<br>Without them the build still succeeds, but the installer it produces fails on every machine. Run <code>pip install -r requirements.txt</code> before packaging, or switch to the traditional engine.",
         "min_version.not_enabled": "The dependencies_min_version entry \"{key}\" is not enabled in the dependencies list, so that minimum version has no effect.",
         "password.env_missing": "The environment variable \"{name}\" currently has no value. Set the install password before packaging.",
         "password.inline_in_config": "The config file does not support writing the install password directly (`install_password`).<br>A config file is an ordinary text file that gets committed to a project and passed around; a password written into it means the protection is void. Use `install_password_env` to name the environment variable holding the password instead; to type a password directly, use the configuration wizard (GUI).",
@@ -278,6 +280,7 @@ def check_build_environment():
         "python_path": "",
         "webview_found": False,
         "pywin32_found": False,
+        "msix_backend_found": False,
         "ready": False,
     }
 
@@ -306,6 +309,14 @@ def check_build_environment():
             "    print('PYWIN32_OK')\n"
             "except Exception:\n"
             "    pass\n"
+            # 問的是 msix_deploy.py 實際會匯入的那一支模組，不是 `winrt`
+            # 這個命名空間本身：`winrt-runtime` 單獨裝得起來，但少了
+            # `winrt-Windows.Management.Deployment` 一樣拿不到 PackageManager。
+            "try:\n"
+            "    import winrt.windows.management.deployment\n"
+            "    print('MSIX_BACKEND_OK')\n"
+            "except Exception:\n"
+            "    pass\n"
         )
         try:
             # encoding/errors：解碼失敗時 stdout 會變成 None，兩個探測結果都被
@@ -319,12 +330,53 @@ def check_build_environment():
             output = proc.stdout or ""
             result["webview_found"] = "WEBVIEW_OK" in output
             result["pywin32_found"] = "PYWIN32_OK" in output
+            result["msix_backend_found"] = "MSIX_BACKEND_OK" in output
         except Exception:
             result["webview_found"] = False
             result["pywin32_found"] = False
+            result["msix_backend_found"] = False
 
+    # `msix_backend_found` 不進 `ready`：傳統引擎的安裝檔不呼叫部署介面，
+    # 把它算進去等於讓沒有要用 MSIX 的人被一個他用不到的相依擋在門外。
+    # 這一項改由 missing_engine_dependencies() 在知道引擎之後才判斷，與
+    # pywin32 只標示為建議安裝是同一個理由。
     result["ready"] = result["pyinstaller_found"] and result["python_found"] and result["webview_found"]
     return result
+
+
+def missing_engine_dependencies(engine, env, lang=messages.DEFAULT_LANGUAGE):
+    """這個引擎需要、而編譯環境沒有的第三方套件，回傳一則說明；齊全時回傳
+    None。`env` 是 check_build_environment() 的結果。
+
+    ## 這道檢查的由來
+
+    真實踩到的缺陷（2026-09-03，於 Windows 10 1809 虛擬機重現）：打包機器
+    未安裝 `winrt-*` 綁定套件時，打包流程的每一步都成功，工具回報編譯完成，
+    而產出的 Setup.exe 一執行即中止於「無法使用 Windows 的套件部署介面：
+    No module named 'winrt'」。錯誤只在終端使用者手上出現，而他手上沒有任何
+    足以據以修正的線索。
+
+    ## 不放進 validate_and_build_pack_data()
+
+    那個函式是純函式，不做起子行程這類外部副作用（見其說明），而這裡要問的
+    「套件在不在」只有起一個子行程問得到，理由見下一段。環境的答案由呼叫端
+    問到之後傳進來，本函式只負責把「引擎 × 環境」翻成一則訊息。
+
+    ## 問的是外部直譯器，不是本行程
+
+    安裝檔由 builder.py 另外呼叫的 pyinstaller 子行程編出來，`winrt-*` 能不能
+    被收進那顆 exe，取決於那個子行程背後的 Python 有沒有裝。工具本身是
+    frozen exe 時，它自己的行程裡永遠沒有 `winrt-*`（packaging_core 不匯入
+    msix_deploy），以行程內的 import 當判準會把每一次 MSIX 打包都誤判成缺
+    套件。因此沿用 check_build_environment() 既有的子行程探針。
+
+    `env` 缺少 `msix_backend_found` 這個鍵時視為「沒有」。成因只有兩種：環境
+    檢查換過形狀而這裡沒跟上，或呼叫端傳了一份不是 check_build_environment()
+    產出的字典——兩者都不足以支持「套件在」這個結論。
+    """
+    if engine == install_engine.MSIX and not (env or {}).get("msix_backend_found"):
+        return _refused("msix.missing_dependency", lang)
+    return None
 
 
 def list_app_dir_files(app_dir):

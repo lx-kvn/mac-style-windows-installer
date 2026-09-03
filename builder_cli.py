@@ -27,6 +27,7 @@ builder_cli.py
 import argparse
 import json
 import os
+import re
 import sys
 
 import builder
@@ -125,10 +126,28 @@ def resolve_language(flag):
         messages.LANGUAGES, messages.DEFAULT_LANGUAGE)
 
 
+# 訊息表用到的標記只有 `<br>` 與 `<code>`，這個樣板刻意寫得比那兩個寬：
+# 新增第四種標籤時不需要回來改這裡。訊息表裡沒有任何非標記用途的
+# 角括號（例如 `<版本號>` 這類佔位字），因此不會誤傷。
+_TAG = re.compile(r"<[^>]{1,40}>")
+
+
 def _strip_html(message):
-    """validate_and_build_pack_data() 回傳的錯誤訊息帶 <br> 是給 GUI
-    innerHTML 用的，終端機印出來要換成真正的換行。"""
-    return (message or "").replace("<br>", "\n")
+    """訊息表的標記是給配置精靈的 innerHTML 用的，終端機要先去掉。
+
+    `<br>` 換成真正的換行；其餘標籤整個拿掉，保留它包住的文字——那段文字
+    通常正是要照做的指令（例如 `<code>pip install -r requirements.txt</code>`）。
+
+    真實看到的輸出（2026-09-03，在缺少 `winrt-*` 的環境跑 `pack`）：
+
+        請先執行 <code>pip install -r requirements.txt</code> 再打包
+
+    原本這裡只認得 `<br>`，因為當初只有帶 `<br>` 的訊息。後來新增帶其他標籤
+    的訊息時，不會有任何地方報錯——症狀只出現在使用者的終端機上。改成通用的
+    去標籤，新增第三種標籤時不需要再回來改這裡
+    （`tests/test_builder_cli.py` 會比對所有訊息表）。
+    """
+    return _TAG.sub("", (message or "").replace("<br>", "\n"))
 
 
 def build_arg_parser():
@@ -437,12 +456,24 @@ def cmd_pack(args):
         print(f"環境檢查失敗：缺少 {'、'.join(missing)}，請先安裝必要環境後再試一次。", file=sys.stderr)
         return 1
 
+    lang = resolve_language(getattr(args, "lang", None))
     pack_data, error = packaging_core.validate_and_build_pack_data(
         data, app_dir, png_path, ico_path, doc_icon_path_selected,
-        lang=resolve_language(getattr(args, "lang", None)),
+        lang=lang,
     )
     if error:
         print(_strip_html(error), file=sys.stderr)
+        return 1
+
+    # 引擎需要的第三方套件在不在。這一項必須在驗證之後才問得出來：要先知道
+    # 這份設定選的是哪一個引擎，才知道需不需要問。缺少時整個打包流程仍然會
+    # 成功，只是產出的安裝檔在任何機器上都裝不起來（見
+    # packaging_core.missing_engine_dependencies）。位置在工作目錄檢查之前，
+    # 理由與那道檢查前移一致：先報真正該修的那一項。
+    engine_dependency_problem = packaging_core.missing_engine_dependencies(
+        pack_data["install_engine"], env, lang=lang)
+    if engine_dependency_problem:
+        print(_strip_html(engine_dependency_problem), file=sys.stderr)
         return 1
 
     workspace_dir = args.workspace_dir or packaging_core.get_workspace_dir()

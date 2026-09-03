@@ -7,8 +7,10 @@
 的推斷、環境檢查失敗/驗證失敗的 exit code 與輸出。
 """
 import argparse
+import importlib
 import io
 import os
+import re
 import sys
 import json
 import shutil
@@ -579,11 +581,14 @@ class TestPackOneShotMsix(unittest.TestCase):
             "timestamp_url": "http://timestamp.example/ts",
         }
 
-    def _run(self, argv, **patches):
+    def _run(self, argv, env_overrides=None, **patches):
         ready_env = {
             "pyinstaller_found": True, "python_found": True, "python_path": "python",
             "webview_found": True, "pywin32_found": True, "ready": True,
+            # MSIX 模式才會用到（見 packaging_core.missing_engine_dependencies）。
+            "msix_backend_found": True,
         }
+        ready_env.update(env_overrides or {})
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
                 mock.patch("builder_cli.packaging_core.check_build_environment",
@@ -655,6 +660,8 @@ class TestPackOneShotMsix(unittest.TestCase):
         ready_env = {
             "pyinstaller_found": True, "python_found": True, "python_path": "python",
             "webview_found": True, "pywin32_found": True, "ready": True,
+            # MSIX 模式才會用到（見 packaging_core.missing_engine_dependencies）。
+            "msix_backend_found": True,
         }
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
@@ -746,6 +753,109 @@ class TestPackMsixStaysUnsigned(unittest.TestCase):
                 "--workspace-dir", os.path.join(self.tmp, "ws")])
         self.assertEqual(code, 0, out.getvalue() + err.getvalue())
         self.assertIsNone(build_msix.call_args.kwargs["signing"])
+
+
+class TestMsixBindingsAreRequiredBeforePacking(unittest.TestCase):
+    """打包機器缺少 `winrt-*` 綁定套件時，`pack` 要在動手之前就中止。
+
+    真實踩到的缺陷（2026-09-03）：缺少該綁定不影響打包流程的任何一步，
+    指令因此以 0 結束，而產出的 Setup.exe 一執行即中止於
+    「No module named 'winrt'」。CI 涵蓋不到這一項，因為 CI 每次都明確
+    安裝那五個套件。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.app_dir = os.path.join(self.tmp, "app")
+        os.makedirs(self.app_dir)
+        with open(os.path.join(self.app_dir, "main.exe"), "wb") as f:
+            f.write(b"fake")
+        self.png = os.path.join(self.tmp, "icon.png")
+        write_test_png(self.png)
+        self.ico = os.path.join(self.tmp, "icon.ico")
+        with open(self.ico, "wb") as f:
+            f.write(b"fake ico")
+        self.config = os.path.join(self.tmp, "config.json")
+        with open(self.config, "w", encoding="utf-8") as f:
+            json.dump({
+                "app_name": "TestApp", "version": "1.0.0", "publisher": "Tester",
+                "exe_name": "Setup_TestApp", "main_exe": "main.exe",
+                "app_dir": self.app_dir, "png_icon": self.png, "ico_icon": self.ico,
+                "install_engine": "msix", "no_admin_install": True,
+                "msix": {"identity_name": "MyCompany.DemoApp",
+                         "certificate_subject": "CN=Demo"},
+            }, f)
+
+    def _run(self, msix_backend_found):
+        env = {
+            "pyinstaller_found": True, "python_found": True, "python_path": "python",
+            "webview_found": True, "pywin32_found": True, "ready": True,
+            "msix_backend_found": msix_backend_found,
+        }
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err),                 mock.patch("builder_cli.packaging_core.check_build_environment",
+                           return_value=env),                 mock.patch("builder_cli.packaging_core.ensure_workspace_files",
+                           return_value=None),                 mock.patch("builder_cli.builder.build_msix") as build_msix,                 mock.patch("builder_cli.builder.build_all") as build_all:
+            code = builder_cli.main([
+                "pack", "--config", self.config,
+                "--workspace-dir", os.path.join(self.tmp, "ws")])
+        return code, out.getvalue() + err.getvalue(), build_msix, build_all
+
+    def test_the_run_is_refused_and_nothing_is_packaged(self):
+        code, output, build_msix, build_all = self._run(msix_backend_found=False)
+        self.assertEqual(code, 1)
+        self.assertIn("winrt", output)
+        build_msix.assert_not_called()
+        build_all.assert_not_called()
+
+    def test_the_refusal_comes_before_the_workspace_check(self):
+        """工作目錄在這個測試裡根本不存在。先報缺套件而不是先報缺工作目錄，
+        使用者才會看到真正該修的那一項。"""
+        _, output, _, _ = self._run(msix_backend_found=False)
+        self.assertNotIn("找不到 ui", output)
+
+
+class TerminalOutputCarriesNoMarkup(unittest.TestCase):
+    """訊息表是給配置精靈的 innerHTML 用的，CLI 直接印會把標籤原樣印出來。
+
+    真實看到的輸出（2026-09-03，在缺少 `winrt-*` 的環境跑 `pack`）：
+
+        請先執行 <code>pip install -r requirements.txt</code> 再打包
+
+    `<br>` 早就被處理掉了，`<code>` 沒有——`_strip_html()` 當初只認得 `<br>`，
+    因為那時只有帶 `<br>` 的訊息，而後來新增帶其他標籤的訊息不會有任何地方
+    報錯。
+
+    斷言的對象是「所有訊息表經過 `_strip_html()` 之後不含任何標籤」，不是
+    列舉目前用到哪幾個標籤：後者在下次有人用到第三種標籤時照樣會通過。
+    """
+
+    # 與 tests/test_message_tables.py 同一份清單：有訊息表的模組。
+    MODULES = ("packaging_core", "install_engine", "msix_settings",
+               "cert_subject", "png_size")
+
+    def test_no_message_reaches_the_terminal_with_markup(self):
+        offenders = []
+        for name in self.MODULES:
+            table = getattr(importlib.import_module(name), "MESSAGES", None)
+            if table is None:
+                continue
+            for lang, entries in table.items():
+                for key, text in entries.items():
+                    rendered = builder_cli._strip_html(str(text))
+                    for tag in re.findall(r"<[^>]{1,40}>", rendered):
+                        offenders.append(f"{name}.{lang}.{key} 殘留 {tag}")
+        self.assertEqual(offenders, [], "終端機輸出殘留標籤：\n" + "\n".join(offenders))
+
+    def test_line_breaks_become_real_newlines(self):
+        """既有行為，一併鎖住：`<br>` 是換行，不是被刪掉。"""
+        self.assertEqual(builder_cli._strip_html("甲<br>乙"), "甲\n乙")
+
+    def test_the_text_inside_a_tag_is_kept(self):
+        """去掉的是標籤，不是標籤包住的內容——那段內容正是要照做的指令。"""
+        rendered = builder_cli._strip_html("請先執行 <code>pip install -r requirements.txt</code>")
+        self.assertIn("pip install -r requirements.txt", rendered)
 
 
 if __name__ == "__main__":

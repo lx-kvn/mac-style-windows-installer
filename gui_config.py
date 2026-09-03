@@ -56,6 +56,7 @@ from packaging_core import (
     get_workspace_dir,
     check_build_environment,
     ensure_workspace_files,
+    missing_engine_dependencies,
     validate_and_build_pack_data,
     list_app_dir_files as scan_app_dir_files,
 )
@@ -332,6 +333,17 @@ class ConfigAPI:
         )
         if error:
             return {"status": "error", "message": error}
+
+        # 引擎需要的第三方套件在不在。這一項必須在驗證之後才問得出來：
+        # 要先知道這份設定選的是哪一個引擎，才知道需不需要問。缺少時
+        # 整個打包流程仍然會成功，只是產出的安裝檔在任何機器上都裝不
+        # 起來（見 packaging_core.missing_engine_dependencies）。
+        engine_dependency_problem = missing_engine_dependencies(
+            pack_data["install_engine"], env,
+            lang=lang or messages.DEFAULT_LANGUAGE,
+        )
+        if engine_dependency_problem:
+            return {"status": "error", "message": engine_dependency_problem}
 
         workspace_dir = get_workspace_dir()
         prep_error = ensure_workspace_files(workspace_dir)

@@ -270,34 +270,48 @@ def build_msix(app_dir, pack_data, png_path, output_path, workspace_dir,
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
-    msix_package.stage(
-        app_dir=app_dir,
-        staging_dir=staging_dir,
-        png_icon=png_path,
-        identity_name=msix["identity_name"],
-        certificate_subject=msix["certificate_subject"],
-        version=msix["package_version"],
-        app_name=pack_data["app_name"],
-        publisher=pack_data["publisher"],
-        main_exe=pack_data["main_exe"],
-        doc_icon=doc_icon_path,
-        doc_icons=pack_data.get("doc_icons") or {},
-        file_associations=pack_data.get("file_associations") or [],
-        add_to_path=pack_data.get("add_to_path", False),
-        path_target_exe=pack_data.get("path_target_exe", ""),
-        min_windows_version=msix.get("min_windows_version"),
-        icons=msix.get("icons") or {},
-    )
-    packed = msix_package.pack(
-        staging_dir, output_path, find_tool=find_tool, run=run, log=log)
+    # 組裝目錄是中間產物，`.msix` 做好之後不再有任何用途。清理放在
+    # finally：中途失敗（makeappx 失敗、簽章失敗）留下的殘留與成功時一樣
+    # 沒有用途，而失敗那條路正是最容易被忘記的一條。
+    #
+    # 真實踩到的情形（2026-09-03）：以原始碼執行打包時工作目錄就是版本庫
+    # 本身，`msix_staging/` 因此每次打包都留在版本庫根目錄，成為一個未追蹤
+    # 的資料夾——內容是應用程式檔案與產生出來的清單，留著只會讓人誤以為
+    # 那是版本庫的一部分。
+    #
+    # 只刪這個目錄，不掃整個工作目錄：一體式流程的 `.msix` 就放在工作目錄
+    # 底下，掃得太寬會把剛做好的套件一起刪掉。
+    try:
+        msix_package.stage(
+            app_dir=app_dir,
+            staging_dir=staging_dir,
+            png_icon=png_path,
+            identity_name=msix["identity_name"],
+            certificate_subject=msix["certificate_subject"],
+            version=msix["package_version"],
+            app_name=pack_data["app_name"],
+            publisher=pack_data["publisher"],
+            main_exe=pack_data["main_exe"],
+            doc_icon=doc_icon_path,
+            doc_icons=pack_data.get("doc_icons") or {},
+            file_associations=pack_data.get("file_associations") or [],
+            add_to_path=pack_data.get("add_to_path", False),
+            path_target_exe=pack_data.get("path_target_exe", ""),
+            min_windows_version=msix.get("min_windows_version"),
+            icons=msix.get("icons") or {},
+        )
+        packed = msix_package.pack(
+            staging_dir, output_path, find_tool=find_tool, run=run, log=log)
 
-    if signing:
-        # 簽不成不回傳一份未簽章的套件：呼叫端會把它內嵌進安裝檔，而那份
-        # 安裝檔要到終端使用者手上才會失敗（未簽章的套件無法部署）。
-        if log:
-            log("正在簽署套件...")
-        _sign_file(packed, signing, find_tool=find_tool, run=run, log=log)
-    return packed
+        if signing:
+            # 簽不成不回傳一份未簽章的套件：呼叫端會把它內嵌進安裝檔，而那份
+            # 安裝檔要到終端使用者手上才會失敗（未簽章的套件無法部署）。
+            if log:
+                log("正在簽署套件...")
+            _sign_file(packed, signing, find_tool=find_tool, run=run, log=log)
+        return packed
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
 
 
 def build_all(
