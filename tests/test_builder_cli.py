@@ -579,11 +579,14 @@ class TestPackOneShotMsix(unittest.TestCase):
             "timestamp_url": "http://timestamp.example/ts",
         }
 
-    def _run(self, argv, **patches):
+    def _run(self, argv, env_overrides=None, **patches):
         ready_env = {
             "pyinstaller_found": True, "python_found": True, "python_path": "python",
             "webview_found": True, "pywin32_found": True, "ready": True,
+            # MSIX 模式才會用到（見 packaging_core.missing_engine_dependencies）。
+            "msix_backend_found": True,
         }
+        ready_env.update(env_overrides or {})
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
                 mock.patch("builder_cli.packaging_core.check_build_environment",
@@ -655,6 +658,8 @@ class TestPackOneShotMsix(unittest.TestCase):
         ready_env = {
             "pyinstaller_found": True, "python_found": True, "python_path": "python",
             "webview_found": True, "pywin32_found": True, "ready": True,
+            # MSIX 模式才會用到（見 packaging_core.missing_engine_dependencies）。
+            "msix_backend_found": True,
         }
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
@@ -746,6 +751,67 @@ class TestPackMsixStaysUnsigned(unittest.TestCase):
                 "--workspace-dir", os.path.join(self.tmp, "ws")])
         self.assertEqual(code, 0, out.getvalue() + err.getvalue())
         self.assertIsNone(build_msix.call_args.kwargs["signing"])
+
+
+class TestMsixBindingsAreRequiredBeforePacking(unittest.TestCase):
+    """打包機器缺少 `winrt-*` 綁定套件時，`pack` 要在動手之前就中止。
+
+    真實踩到的缺陷（2026-09-03）：缺少該綁定不影響打包流程的任何一步，
+    指令因此以 0 結束，而產出的 Setup.exe 一執行即中止於
+    「No module named 'winrt'」。CI 涵蓋不到這一項，因為 CI 每次都明確
+    安裝那五個套件。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.app_dir = os.path.join(self.tmp, "app")
+        os.makedirs(self.app_dir)
+        with open(os.path.join(self.app_dir, "main.exe"), "wb") as f:
+            f.write(b"fake")
+        self.png = os.path.join(self.tmp, "icon.png")
+        write_test_png(self.png)
+        self.ico = os.path.join(self.tmp, "icon.ico")
+        with open(self.ico, "wb") as f:
+            f.write(b"fake ico")
+        self.config = os.path.join(self.tmp, "config.json")
+        with open(self.config, "w", encoding="utf-8") as f:
+            json.dump({
+                "app_name": "TestApp", "version": "1.0.0", "publisher": "Tester",
+                "exe_name": "Setup_TestApp", "main_exe": "main.exe",
+                "app_dir": self.app_dir, "png_icon": self.png, "ico_icon": self.ico,
+                "install_engine": "msix", "no_admin_install": True,
+                "msix": {"identity_name": "MyCompany.DemoApp",
+                         "certificate_subject": "CN=Demo"},
+            }, f)
+
+    def _run(self, msix_backend_found):
+        env = {
+            "pyinstaller_found": True, "python_found": True, "python_path": "python",
+            "webview_found": True, "pywin32_found": True, "ready": True,
+            "msix_backend_found": msix_backend_found,
+        }
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err),                 mock.patch("builder_cli.packaging_core.check_build_environment",
+                           return_value=env),                 mock.patch("builder_cli.packaging_core.ensure_workspace_files",
+                           return_value=None),                 mock.patch("builder_cli.builder.build_msix") as build_msix,                 mock.patch("builder_cli.builder.build_all") as build_all:
+            code = builder_cli.main([
+                "pack", "--config", self.config,
+                "--workspace-dir", os.path.join(self.tmp, "ws")])
+        return code, out.getvalue() + err.getvalue(), build_msix, build_all
+
+    def test_the_run_is_refused_and_nothing_is_packaged(self):
+        code, output, build_msix, build_all = self._run(msix_backend_found=False)
+        self.assertEqual(code, 1)
+        self.assertIn("winrt", output)
+        build_msix.assert_not_called()
+        build_all.assert_not_called()
+
+    def test_the_refusal_comes_before_the_workspace_check(self):
+        """工作目錄在這個測試裡根本不存在。先報缺套件而不是先報缺工作目錄，
+        使用者才會看到真正該修的那一項。"""
+        _, output, _, _ = self._run(msix_backend_found=False)
+        self.assertNotIn("找不到 ui", output)
 
 
 if __name__ == "__main__":

@@ -36,7 +36,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller pywebview pywin32 cryptography
+          pip install -r requirements.txt
 
       - name: 準備測試用的 app_dir 與前置/後置腳本
         shell: pwsh
@@ -249,13 +249,12 @@ jobs:
         with:
           python-version: "3.13"
 
-      # winrt-* 的版本固定：安裝端要靠它們呼叫 Windows 的部署 API，而
-      # PyInstaller 是靜態分析，版本組合換掉可能導致打包出來的 exe 少帶模組。
+      # 套件與版本都寫在 requirements.txt，包含 winrt-* 那五個綁定套件
+      # 以及它們固定版本的理由（見該檔說明）。
       - name: 安裝相依
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller pywebview pywin32 cryptography
-          pip install winrt-runtime==3.2.1 winrt-Windows.Management.Deployment==3.2.1 winrt-Windows.Foundation==3.2.1 winrt-Windows.Foundation.Collections==3.2.1 winrt-Windows.ApplicationModel==3.2.1
+          pip install -r requirements.txt
 
       # 吃自己的狗糧：SDK 工具用本專案的 fetch-sdk-tools 取得，等於一併驗證
       # ADR-0008 的取得流程在乾淨機器上仍然可用。

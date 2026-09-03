@@ -437,12 +437,24 @@ def cmd_pack(args):
         print(f"環境檢查失敗：缺少 {'、'.join(missing)}，請先安裝必要環境後再試一次。", file=sys.stderr)
         return 1
 
+    lang = resolve_language(getattr(args, "lang", None))
     pack_data, error = packaging_core.validate_and_build_pack_data(
         data, app_dir, png_path, ico_path, doc_icon_path_selected,
-        lang=resolve_language(getattr(args, "lang", None)),
+        lang=lang,
     )
     if error:
         print(_strip_html(error), file=sys.stderr)
+        return 1
+
+    # 引擎需要的第三方套件在不在。這一項必須在驗證之後才問得出來：要先知道
+    # 這份設定選的是哪一個引擎，才知道需不需要問。缺少時整個打包流程仍然會
+    # 成功，只是產出的安裝檔在任何機器上都裝不起來（見
+    # packaging_core.missing_engine_dependencies）。位置在工作目錄檢查之前，
+    # 理由與那道檢查前移一致：先報真正該修的那一項。
+    engine_dependency_problem = packaging_core.missing_engine_dependencies(
+        pack_data["install_engine"], env, lang=lang)
+    if engine_dependency_problem:
+        print(_strip_html(engine_dependency_problem), file=sys.stderr)
         return 1
 
     workspace_dir = args.workspace_dir or packaging_core.get_workspace_dir()

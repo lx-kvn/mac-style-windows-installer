@@ -89,13 +89,19 @@ class MsixEngineTestBase(unittest.TestCase):
             "timestamp_url": "http://timestamp.example/ts",
         }
 
-    def _pack(self, data, build_msix_return=None, build_msix_side_effect=None):
+    def _pack(self, data, build_msix_return=None, build_msix_side_effect=None,
+              env_overrides=None):
         """跑完 start_pack() 與它啟動的背景執行緒，回傳
         (start_pack 的結果, build_msix 替身, build_all 替身, 回報給畫面的訊息)。"""
         ready = {
             "pyinstaller_found": True, "python_found": True, "python_path": "python",
             "webview_found": True, "pywin32_found": True, "ready": True,
+            # MSIX 引擎的安裝檔靠 `winrt-*` 綁定套件呼叫 Windows 的部署介面。
+            # 預設值代表「打包機器已經裝好」；缺少時的行為由
+            # TheMsixBindingsAreRequiredBeforeAnyPackaging 另外測。
+            "msix_backend_found": True,
         }
+        ready.update(env_overrides or {})
         reported = []
         self.api._window.evaluate_js.side_effect = lambda js: reported.append(js)
 
@@ -203,6 +209,32 @@ class FailuresStopBeforeTheInstaller(MsixEngineTestBase):
         build_all.assert_not_called()
         self.assertIn("error", reported)
         self.assertIn("makeappx", reported)
+
+
+class TheMsixBindingsAreRequiredBeforeAnyPackaging(MsixEngineTestBase):
+    """打包機器缺少 `winrt-*` 綁定套件時，按下編譯就要被擋下來。
+
+    真實踩到的缺陷（2026-09-03）：缺少該綁定不影響打包流程的任何一步，
+    工具因此回報編譯成功，而產出的 Setup.exe 一執行即中止於
+    「No module named 'winrt'」。整條回饋路徑上唯一會發現問題的人是終端
+    使用者，且他手上沒有任何可以據以修正的線索。
+    """
+
+    def test_the_build_is_refused_and_nothing_is_packaged(self):
+        result, build_msix, build_all, _ = self._pack(
+            self._data(signing=self._signing()),
+            env_overrides={"msix_backend_found": False})
+        self.assertEqual(result["status"], "error", result)
+        self.assertIn("winrt", result["message"])
+        build_msix.assert_not_called()
+        build_all.assert_not_called()
+
+    def test_the_traditional_engine_is_not_blocked_by_them(self):
+        """傳統引擎的安裝檔不呼叫部署介面，缺這幾個套件與它無關。"""
+        _, _, build_all, _ = self._pack(
+            self._data(install_engine="traditional", msix={}),
+            env_overrides={"msix_backend_found": False})
+        build_all.assert_called_once()
 
 
 if __name__ == "__main__":

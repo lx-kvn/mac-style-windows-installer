@@ -17,12 +17,14 @@ JSON 設定檔 + 命令列參數，不是表單）跟「進度怎麼呈現」（
 跟圖形介面版本一樣：
 
 ```
-pip install pyinstaller pywebview pywin32 cryptography
+pip install -r requirements.txt
 ```
 
 `pyinstaller`、`pywebview` 是硬性需求（`pack` 子指令執行前會自動檢查，
 沒裝會印出缺什麼、非零 exit code 結束，不會編到一半才失敗）；`pywin32`
-選用，只影響「建立開始功能表/桌面捷徑」這個功能。
+選用，只影響「建立開始功能表/桌面捷徑」這個功能。`cryptography` 只有
+設定了安裝密碼保護時才需要；`winrt-*` 那五個鎖定版本的套件只有
+`install_engine` 為 `msix` 時才需要，`pack` 同樣會在動手之前檢查。
 
 **注意**：`builder_cli.py` 這支檔案本身完全不需要安裝 `pywebview` 就能
 執行（跟 GUI 版的 `gui_config.py` 不同）——`pywebview` 是編譯出來的
