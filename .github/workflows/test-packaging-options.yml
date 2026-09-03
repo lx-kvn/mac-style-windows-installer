@@ -76,22 +76,22 @@ jobs:
             main_exe             = "app.exe"
             # 必要：CI runner 是無人值守環境，如果要求提權，執行時會等
             # UAC 確認，headless 環境下會直接卡死整個 job。
+            #
+            # 這個值連帶決定了這個 job 能涵蓋哪些欄位：windows_service 與
+            # create_restore_point_before_install 都需要系統管理員權限，
+            # 與它是打包階段就會被擋下的矛盾組合（見 packaging_core 的
+            # admin.service_conflict／admin.restore_point_conflict）。那
+            # 兩個欄位由下面的 test-admin-only-options job 承接。
             no_admin_install     = $true
             add_to_path          = $true
             file_associations    = ".mswitest"
             pre_install_script   = "pre_install.bat"
             post_install_script  = "post_install.bat"
-            windows_service      = @{
-              service_name      = "MswiCiTestSvc"
-              exe_relative_path = "app.exe"
-              start_type        = "demand"
-            }
             scheduled_task       = @{
               task_name         = "MswiCiTestTask"
               exe_relative_path = "app.exe"
               trigger           = "onlogon"
             }
-            create_restore_point_before_install = $true
           }
           $config | ConvertTo-Json -Depth 5 | Set-Content -Path test_config.json -Encoding UTF8
           Get-Content test_config.json
@@ -125,7 +125,6 @@ jobs:
           Check "app.exe 存在於安裝目錄" (Test-Path (Join-Path $installDir "app.exe"))
           Check "解除安裝登錄表項目存在（HKCU，no_admin_install=true）" `
             (Test-Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\MswiCiTest")
-          Check "Windows 服務已註冊" ([bool](Get-Service -Name "MswiCiTestSvc" -ErrorAction SilentlyContinue))
           Check "排程工作已註冊" ([bool](Get-ScheduledTask -TaskName "MswiCiTestTask" -ErrorAction SilentlyContinue))
           Check "PATH（HKCU\Environment）包含安裝目錄" `
             ((Get-ItemProperty "HKCU:\Environment" -Name Path -ErrorAction SilentlyContinue).Path -like "*$installDir*")
@@ -141,19 +140,6 @@ jobs:
             Write-Host "PASS: 檔案關聯機碼存在"
           } else {
             Write-Host "WARN: 檔案關聯機碼不存在（可能是這台 runner 的 UAC/權杖狀態導致 HKLM 寫入被拒，不計入失敗）"
-          }
-
-          # 已知限制：System Restore/Volume Shadow Copy 在 GitHub 的
-          # Windows Server 系 runner 上不保證能建立還原點，只警告不失敗。
-          try {
-            $restorePoints = Get-ComputerRestorePoint -ErrorAction Stop
-            if ($restorePoints) {
-              Write-Host "PASS: 偵測到系統還原點"
-            } else {
-              Write-Host "WARN: 沒有偵測到系統還原點（Server 系 runner 上很可能是預期內的限制，不計入失敗）"
-            }
-          } catch {
-            Write-Host "WARN: 無法查詢系統還原點（$($_.Exception.Message)，Server 系 runner 上很可能是預期內的限制，不計入失敗）"
           }
 
           if ($failures.Count -gt 0) {
@@ -191,7 +177,6 @@ jobs:
           Check "安裝目錄已移除" (-not (Test-Path $installDir))
           Check "解除安裝登錄表項目已移除" `
             (-not (Test-Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\MswiCiTest"))
-          Check "Windows 服務已移除" (-not [bool](Get-Service -Name "MswiCiTestSvc" -ErrorAction SilentlyContinue))
           Check "排程工作已移除" (-not [bool](Get-ScheduledTask -TaskName "MswiCiTestTask" -ErrorAction SilentlyContinue))
           Check "PATH（HKCU\Environment）已移除安裝目錄" `
             ((Get-ItemProperty "HKCU:\Environment" -Name Path -ErrorAction SilentlyContinue).Path -notlike "*$installDir*")
@@ -221,6 +206,173 @@ jobs:
         with:
           name: test-packaging-options-logs
           path: logs\
+          if-no-files-found: warn
+
+  # 需要系統管理員權限的兩個欄位（windows_service、
+  # create_restore_point_before_install）。它們與 no_admin_install 互斥，
+  # 因此不能併進上面那個 job 的設定裡——那個 job 必須維持
+  # no_admin_install=true（見該處說明）。分成兩個 job 而不是在同一個 job
+  # 裡裝兩次：runner 用完即丟，兩次安裝共用同一台機器時，第一次留下的
+  # 狀態會讓第二次的「已清乾淨」驗證失去意義。
+  #
+  # GitHub 的 Windows runner 以系統管理員身分執行且不會跳 UAC 提示，因此
+  # --uac-admin 編譯出來的安裝檔在這裡不需要人在旁邊按確認。timeout-minutes
+  # 是保險：這個前提若哪天不成立，症狀會是安裝那一步無限等待，讓它在幾分鐘
+  # 內失敗，而不是佔住 runner 直到 GitHub 的預設上限。
+  test-admin-only-options:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    env:
+      PYTHONUTF8: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 準備測試用的 app_dir
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path admin_app | Out-Null
+          Copy-Item "$env:WINDIR\System32\notepad.exe" admin_app\app.exe
+          Set-Content -Path admin_app\readme.txt -Value "elevated payload" -Encoding UTF8
+
+      - name: 產生需要系統管理員權限的設定檔
+        shell: pwsh
+        run: |
+          $config = @{
+            app_dir          = "admin_app"
+            png_icon         = "branding/icon.png"
+            ico_icon         = "branding/icon.ico"
+            app_name         = "MswiCiElevated"
+            version          = "1.0.0"
+            publisher        = "mswi-ci"
+            exe_name         = "Setup_MswiCiElevated"
+            main_exe         = "app.exe"
+            # 預設值即為全機器安裝（Program Files + HKLM），這裡明確寫出來
+            # 是因為這個 job 的全部意義就在於它是 false。
+            no_admin_install = $false
+            windows_service  = @{
+              service_name      = "MswiCiElevatedSvc"
+              exe_relative_path = "app.exe"
+              start_type        = "demand"
+            }
+            create_restore_point_before_install = $true
+          }
+          $config | ConvertTo-Json -Depth 5 | Set-Content -Path admin_config.json -Encoding UTF8
+          Get-Content admin_config.json
+
+      - name: 打包 Setup.exe
+        run: python builder_cli.py pack --config admin_config.json
+
+      - name: 靜默安裝
+        shell: pwsh
+        run: |
+          $proc = Start-Process -FilePath "dist\Setup_MswiCiElevated.exe" -ArgumentList "/S" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+            throw "靜默安裝回報失敗，exit code = $($proc.ExitCode)"
+          }
+
+      - name: 驗證安裝後的系統狀態
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:ProgramFiles "MswiCiElevated"
+          $failures = @()
+
+          function Check($name, $condition) {
+            if ($condition) {
+              Write-Host "PASS: $name"
+            } else {
+              Write-Host "FAIL: $name"
+              $script:failures += $name
+            }
+          }
+
+          Check "app.exe 存在於 Program Files 底下的安裝目錄" (Test-Path (Join-Path $installDir "app.exe"))
+          Check "解除安裝登錄表項目存在（HKLM，no_admin_install=false）" `
+            (Test-Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\MswiCiElevated")
+          Check "Windows 服務已註冊" ([bool](Get-Service -Name "MswiCiElevatedSvc" -ErrorAction SilentlyContinue))
+
+          # 已知限制：System Restore/Volume Shadow Copy 在 GitHub 的
+          # Windows Server 系 runner 上不保證存在，只警告不失敗。這一項
+          # 終究要在真正的 Windows 用戶端機器上手動確認。
+          try {
+            $restorePoints = Get-ComputerRestorePoint -ErrorAction Stop
+            if ($restorePoints) {
+              Write-Host "PASS: 偵測到系統還原點"
+            } else {
+              Write-Host "WARN: 沒有偵測到系統還原點（Server 系 runner 上很可能是預期內的限制，不計入失敗）"
+            }
+          } catch {
+            Write-Host "WARN: 無法查詢系統還原點（$($_.Exception.Message)，Server 系 runner 上很可能是預期內的限制，不計入失敗）"
+          }
+
+          if ($failures.Count -gt 0) {
+            Write-Host "共 $($failures.Count) 項驗證失敗：$($failures -join '、')"
+            exit 1
+          }
+
+      - name: 靜默解除安裝
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:ProgramFiles "MswiCiElevated"
+          $proc = Start-Process -FilePath (Join-Path $installDir "uninstall.exe") -ArgumentList "--silent" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+            throw "靜默解除安裝回報失敗，exit code = $($proc.ExitCode)"
+          }
+          # 解除安裝會排程一個背景 .bat 刪除 uninstall.exe 自己（見
+          # self_delete.py），給它幾秒鐘完成，下面的驗證才會準確。
+          Start-Sleep -Seconds 5
+
+      - name: 驗證解除安裝後已清乾淨
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:ProgramFiles "MswiCiElevated"
+          $failures = @()
+
+          function Check($name, $condition) {
+            if ($condition) {
+              Write-Host "PASS: $name"
+            } else {
+              Write-Host "FAIL: $name"
+              $script:failures += $name
+            }
+          }
+
+          Check "安裝目錄已移除" (-not (Test-Path $installDir))
+          Check "解除安裝登錄表項目已移除" `
+            (-not (Test-Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\MswiCiElevated"))
+          Check "Windows 服務已移除" (-not [bool](Get-Service -Name "MswiCiElevatedSvc" -ErrorAction SilentlyContinue))
+
+          if ($failures.Count -gt 0) {
+            Write-Host "共 $($failures.Count) 項驗證失敗：$($failures -join '、')"
+            exit 1
+          }
+
+      - name: 收集安裝/解除安裝紀錄到工作目錄
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path admin_logs | Out-Null
+          Copy-Item (Join-Path $env:TEMP "MswiCiElevated_silent_install_log.txt") admin_logs\ -ErrorAction SilentlyContinue
+          Copy-Item (Join-Path $env:TEMP "MswiCiElevated_uninstall_log.txt") admin_logs\ -ErrorAction SilentlyContinue
+
+      - name: 上傳安裝/解除安裝紀錄（不管成功失敗都上傳，方便事後排查）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-admin-only-options-logs
+          path: admin_logs\
           if-no-files-found: warn
 
   # MSIX 引擎的同一件事：實際打包一顆 MSIX 模式的 Setup.exe、靜默安裝到這台
