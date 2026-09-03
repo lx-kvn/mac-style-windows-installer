@@ -143,10 +143,23 @@ CI 涵蓋不到這個缺陷，因為 CI 每次都明確安裝那五個套件—�
 - `python -m unittest discover -s tests -p "test_*.py"`：1373 項全數通過
   （改動前 1363 項）。
 - PyInstaller 收集行為的實測見「方案評估」第三項。
-- **GitHub Actions**（run 33729860684，`test-msix-engine` job）：相依改由
-  `requirements.txt` 安裝之後，打包、靜默安裝、套件被系統接收、移除清乾淨
-  全數通過。同一次 run 的 `test-packaging-options` job 失敗，成因與本輪無關，
-  見下一節第一項。
+- **GitHub Actions（第一次，run 33729860684）**：`test-msix-engine` job 通過
+  ——相依改由 `requirements.txt` 安裝之後，打包、靜默安裝、套件被系統接收、
+  移除清乾淨全數正常。同一次 run 的 `test-packaging-options` job 失敗，成因
+  與本輪無關，見下一節第一項。
+- **GitHub Actions（第二次，run 33733654851）**：下一節兩項處置完成後重跑，
+  三個 job 全數通過（1m46s／1m27s／1m51s）：
+
+  | Job | 結果 |
+  |---|---|
+  | `test-packaging-options`（免權限） | 安裝目錄、HKCU 解除安裝登錄、排程工作、使用者層級 PATH、前置與後置腳本皆 PASS，解除安裝後四項皆清乾淨；檔案關聯為 WARN（既有的已知限制：`file_assoc.py` 一律寫 HKLM，而該安裝檔不要求提權） |
+  | `test-admin-only-options`（提權，本輪新增） | Program Files 安裝目錄、HKLM 解除安裝登錄、Windows 服務皆 PASS，解除安裝後三項皆清乾淨；系統還原點為 WARN（`This functionality is not supported on this operating system.`——Server 系作業系統沒有這項功能） |
+  | `test-msix-engine` | 打包、靜默安裝、套件被系統接收、移除清乾淨全數通過 |
+
+  新增的 job 於 1m51s 內完成且服務確實建立，因此「GitHub 的 Windows runner
+  以系統管理員身分執行、不需要人回應提權要求」這個前提在 runner 上亦成立。
+  連同虛擬機測得的「未提升時是立刻回絕而非等待」，原註解所述的「卡死」症狀
+  至此有兩份互相獨立的反證。
 - **Windows 10 1809 實機**（`python -m tools.verify_msix_1809`）：在已安裝
   `winrt-*` 的機器上重新打包一顆 MSIX 引擎的 `Setup.exe`，送進 17763.316
   的虛擬機：
