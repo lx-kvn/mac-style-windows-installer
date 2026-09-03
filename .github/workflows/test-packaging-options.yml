@@ -74,8 +74,12 @@ jobs:
             publisher            = "mswi-ci"
             exe_name             = "Setup_MswiCiTest"
             main_exe             = "app.exe"
-            # 必要：CI runner 是無人值守環境，如果要求提權，執行時會等
-            # UAC 確認，headless 環境下會直接卡死整個 job。
+            # 必要：CI runner 是無人值守環境，沒有人可以回應提權要求。
+            # 實測（2026-09-03，Windows 11 虛擬機的使用者桌面，權杖未提升、
+            # UAC 全開）：啟動要求提權的安裝檔會立刻以「操作被使用者取消」
+            # （ERROR_CANCELLED）失敗，不會出現提示，也不會卡住——沒有可以
+            # 顯示同意提示的輸入桌面時，Windows 直接回絕。因此風險是「必定
+            # 失敗」而不是原本這裡所寫的「卡死整個 job」。
             #
             # 這個值連帶決定了這個 job 能涵蓋哪些欄位：windows_service 與
             # create_restore_point_before_install 都需要系統管理員權限，
@@ -215,10 +219,15 @@ jobs:
   # 裡裝兩次：runner 用完即丟，兩次安裝共用同一台機器時，第一次留下的
   # 狀態會讓第二次的「已清乾淨」驗證失去意義。
   #
-  # GitHub 的 Windows runner 以系統管理員身分執行且不會跳 UAC 提示，因此
-  # --uac-admin 編譯出來的安裝檔在這裡不需要人在旁邊按確認。timeout-minutes
-  # 是保險：這個前提若哪天不成立，症狀會是安裝那一步無限等待，讓它在幾分鐘
-  # 內失敗，而不是佔住 runner 直到 GitHub 的預設上限。
+  # GitHub 的 Windows runner 以系統管理員身分執行，--uac-admin 編譯出來的
+  # 安裝檔在這裡不需要人在旁邊按確認。這個前提已在等價的權杖狀態下實測過
+  # （2026-09-03，Windows 11 虛擬機的工作階段 0，IsInRole(Administrator)
+  # 為 True）：靜默安裝以結束碼 0 於七秒內完成，Program Files 的安裝目錄、
+  # HKLM 的解除安裝登錄、sc.exe 建立的服務三者皆成立，靜默解除安裝亦清乾淨。
+  #
+  # timeout-minutes 保留作為保險。同一次實測顯示前提不成立時的症狀是立刻
+  # 失敗（ERROR_CANCELLED）而非無限等待，因此這個上限預期不會被用到；留著
+  # 是因為「不會被用到」與「不需要」是兩回事，而佔住 runner 的代價很高。
   test-admin-only-options:
     runs-on: windows-latest
     timeout-minutes: 20

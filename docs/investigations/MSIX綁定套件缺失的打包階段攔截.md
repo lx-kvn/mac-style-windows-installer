@@ -172,11 +172,35 @@ CI 涵蓋不到這個缺陷，因為 CI 每次都明確安裝那五個套件—�
 狀態一直沒有被觀察到。與本輪的改動無關（本輪對該檔案的改動只有三行
 `pip install`）。
 
-處置：`no_admin_install` 必須維持為真（CI runner 是無人值守環境，要求提權
-會等 UAC 而卡死整個 job），因此把兩個需要系統管理員權限的欄位移出該 job，
-另立 `test-admin-only-options` job 以 `no_admin_install=false` 承接它們，
-維持端到端覆蓋。不在同一個 job 裡裝兩次：runner 用完即丟，兩次安裝共用同
-一台機器時，第一次留下的狀態會讓第二次的「已清乾淨」驗證失去意義。
+處置：`no_admin_install` 必須維持為真（CI runner 是無人值守環境，沒有人可以
+回應提權要求），因此把兩個需要系統管理員權限的欄位移出該 job，另立
+`test-admin-only-options` job 以 `no_admin_install=false` 承接它們，維持端到端
+覆蓋。不在同一個 job 裡裝兩次：runner 用完即丟，兩次安裝共用同一台機器時，
+第一次留下的狀態會讓第二次的「已清乾淨」驗證失去意義。
+
+#### 連帶更正兩處與實測不符的敘述
+
+該 job 原有的註解寫的是「如果要求提權，執行時會等 UAC 確認，headless 環境下
+會直接卡死整個 job」。以 Windows 11 虛擬機（25H2、繁體中文）實測，這個症狀
+描述不成立：
+
+| 情境 | 權杖 | 結果 |
+|---|---|---|
+| 使用者桌面（工作階段 1） | `IsInRole(Administrator)=False`，UAC 全開（`EnableLUA=1`、`ConsentPromptBehaviorAdmin=5`、`PromptOnSecureDesktop=1`） | 啟動**立刻**失敗於「操作被使用者取消」（ERROR_CANCELLED）。未出現同意提示、未出現任何視窗、未安裝任何東西。`Start-Process` 與直接呼叫兩種方式皆同 |
+| vmrun 預設（工作階段 0） | `IsInRole(Administrator)=True` | 靜默安裝結束碼 0、耗時七秒；Program Files 安裝目錄、`app.exe`、`uninstall.exe`、HKLM 解除安裝登錄、`MswiElevatedTestSvc` 服務（StartType=Manual）皆成立，HKCU 無殘留。靜默解除安裝後三者皆清乾淨 |
+
+成因是沒有可以顯示同意提示的輸入桌面時，Windows 直接回絕提權要求，而不是
+等待。因此無人值守環境的風險是「必定失敗」，不是「卡死」。
+
+第二列的權杖狀態與 GitHub 的 runner 相同，因此它同時是新增的
+`test-admin-only-options` job 的預跑：那幾條只有拿到系統管理員權限才走得到的
+分支確實成立。建立系統還原點在這台虛擬機上失敗（安裝紀錄寫入「建立系統還原點
+失敗（不影響安裝結果）」，`Get-ComputerRestorePoint` 回報 0 筆），與該 job 把
+這一項列為警告而非失敗的處置一致。
+
+**此實測不涵蓋真人雙擊的行為。** vmrun 啟動的行程沒有輸入桌面，才會得到立刻
+回絕；真人在桌面上雙擊會看到同意提示。「使用者按下同意或取消之後會發生什麼」
+仍然只能在實機上以人手確認，這與規格文件 §8.33 既有的已知限制是同一件事。
 
 ### 二、`build_msix()` 未清理組裝目錄
 
