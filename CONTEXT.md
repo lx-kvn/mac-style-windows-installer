@@ -5,6 +5,35 @@
 （已定案的個別決策）；還沒拍板、仍在研究階段的功能規劃見 `docs/proposals/`
 （例如 `MSIX輸出規劃.md`）。文件放置的完整慣例見 `CLAUDE.md`「文件放哪裡」一節。
 
+## 目錄
+
+- [檔案關聯（File Association）](#檔案關聯file-association)
+- [使用者關聯覆寫（User Association Override）](#使用者關聯覆寫user-association-override)
+- [registry seam](#registry-seam)
+- [拖曳安裝（Drag-to-Install）與視窗拖曳（Window Drag）](#拖曳安裝drag-to-install與視窗拖曳window-drag)
+  - [ui/ 底下的共用前端檔案](#ui-底下的共用前端檔案)
+- [深模組拆分（installer_core.py 瘦身）](#深模組拆分installer_corepy-瘦身)
+- [多語系的兩層（安裝過程／安裝完成後）](#多語系的兩層安裝過程安裝完成後)
+- [命令列別名（Execution Alias）](#命令列別名execution-alias)
+- [安裝路徑與使用者範圍](#安裝路徑與使用者範圍)
+- [InstallScope（no_admin_install 的 hive/目錄判斷）](#installscopeno_admin_install-的-hive目錄判斷)
+- [跨 no_admin_install 模式的升級偵測與跨 UAC 呼叫](#跨-no_admin_install-模式的升級偵測與跨-uac-呼叫)
+- [system_entries（登錄表項目/捷徑/PATH 的移除原語）](#system_entries登錄表項目捷徑path-的移除原語)
+  - [移除原語的兩條共通規則](#移除原語的兩條共通規則)
+- [編譯工作目錄（packaging_core.get_workspace_dir() / packaging_settings.py）](#編譯工作目錄packaging_coreget_workspace_dir--packaging_settingspy)
+- [共用深模組的打包清單（packaging_core.ENTRY_SCRIPTS / SHARED_DEEP_MODULES）](#共用深模組的打包清單packaging_coreentry_scripts--shared_deep_modules)
+- [self_delete（uninstall.exe 自我刪除）](#self_deleteuninstallexe-自我刪除)
+- [explorer_lock_release（檔案鎖定釋放：分層策略）](#explorer_lock_release檔案鎖定釋放分層策略)
+- [version_info（打包出來的 exe 帶上 Win32 VERSIONINFO 資源）](#version_info打包出來的-exe-帶上-win32-versioninfo-資源)
+- [版本號格式（三個模組共用同一個定義）](#版本號格式三個模組共用同一個定義)
+- [免管理員權限安裝與需要提權的選項互斥](#免管理員權限安裝與需要提權的選項互斥)
+- [安裝密碼保護（Install Password Protection）](#安裝密碼保護install-password-protection)
+  - [指定密碼的兩種填法](#指定密碼的兩種填法)
+- [深模組拆分（第二輪：架構稽核 /improve-codebase-architecture）](#深模組拆分第二輪架構稽核-improve-codebase-architecture)
+- [SDK 工具（SDK Tools）](#sdk-工具sdk-tools)
+- [傳統引擎與 MSIX 引擎](#傳統引擎與-msix-引擎)
+- [套件身分名稱（Package Identity Name）](#套件身分名稱package-identity-name)
+
 ## 檔案關聯（File Association）
 
 使用者設定的「某個副檔名要用主程式打開」這個功能，橫跨安裝（寫入）跟解除安裝

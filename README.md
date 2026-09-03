@@ -43,7 +43,8 @@ Both halves — the Builder Tool and every installer it produces — are standal
 
 Everything you configure lives in one form:
 - App display name (any language) is kept separate from the install-folder name (stick to ASCII here) — one is what users see, the other is a filesystem path.
-- Pick a main executable, PNG/ICO icons, optional EULA text, dependency hints (VC++ Redistributable / .NET Desktop Runtime — detected, not silently installed), file associations, and PATH registration.
+- Pick a main executable, PNG/ICO icons, optional EULA text, prerequisites (VC++ Redistributable / .NET Desktop Runtime, or your own — detected on the user's machine and, when missing, downloaded and installed silently), file associations, and PATH registration.
+- Choose an **install engine**: the traditional one (the installer copies the files and writes the registry itself, and ships an uninstaller), or **MSIX** (hand the package to Windows, which guarantees a clean uninstall). The form marks in place which settings the chosen engine cannot use.
 - Checks its own environment on launch and tells you plainly if `pyinstaller`, `python`, or `pywebview` are missing, install command included.
 - Works either way: run it straight as a `.py` script, or as a compiled `.exe` (see [Requirements](#requirements)).
 - Real, staged build progress — not a progress bar that lies to you with a fake linear crawl.
@@ -97,16 +98,16 @@ Full documentation: see [`使用說明書.md`](docs/使用說明書.md) (Traditi
 
 ### Roadmap
 
-- [ ] Code signing for `InstallerBuilder.exe`, via [SignPath Foundation](https://signpath.org/)'s free open-source program (requires this repo plus a GitHub Actions build pipeline — installers *produced* by the tool would still be unsigned, since they're compiled locally rather than through this repo's CI)
-- [ ] Multi-language UI — **not started, feasibility still under consideration.** Low priority unless there's real demand from non-Chinese-speaking users
+- [ ] Code signing for `InstallerBuilder.exe`. [SignPath Foundation](https://signpath.org/)'s free open-source program **declined this project's application**, so a paid certificate, the Microsoft Store, or a cloud signing service is the remaining path — installers *produced* by the tool would still be unsigned either way, since they're compiled on the user's own machine rather than through this repo's CI. This is the one thing blocking a real release.
+- [ ] Finish the multi-language UI. It is implemented and on by default (`zh-TW`/`en`, auto-detected from the system) across all three entry points, but the coverage is incomplete — see Known Limitations.
 - [ ] An optional stronger hash for integrity verification (currently CRC32; a cryptographic hash could be offered for higher-assurance use cases)
 - [ ] A path to signing the *output* installers too (would mean moving the build step into CI — a bigger architectural change)
 
 ### Known Limitations
 
 - Neither the Builder Tool nor the installers it produces are code-signed yet (see Roadmap).
-- Dependency checks (VC++ Redistributable, .NET Desktop Runtime) are detection-only; the tool won't silently install the dependency itself.
-- No multi-language UI yet — everything is in Traditional Chinese.
+- The multi-language UI (`zh-TW`/`en`) is in place across the installer, the uninstaller and the Builder Tool, but its coverage is incomplete: seven strings in the installer's main screen (the "already running", "file in use" and "newer version found" dialogs) are not translated yet and fall back to Chinese on an English system, and back-end progress and error text (packaging progress, field validation) is still Traditional Chinese only. An English UI can therefore show a mixed-language error dialog — see `docs/adr/0011`.
+- The MSIX engine's first version installs for the current user only; use the traditional engine when the software has to be available to every user on the machine (`docs/adr/0009`). It also has no custom uninstall UI — Windows takes that over (`docs/adr/0006`).
 - Very old, un-updated Windows 10 machines may need the WebView2 Runtime installed separately. The installer does not detect whether it is present, so on such a machine it silently hangs on its loading placeholder instead of explaining what is missing.
 
 ### License
@@ -146,7 +147,8 @@ MIT — see [`LICENSE`](LICENSE).
 
 所有設定都在同一張表單裡完成：
 - 應用程式顯示名稱（可以是任何語言）跟安裝資料夾名稱（建議用英數字）分開設定——一個是給使用者看的，一個是實際的檔案路徑。
-- 選主要執行檔、PNG/ICO 圖示、選填的 EULA 文字、相依元件提示（VC++ Redistributable / .NET Desktop Runtime，只偵測不靜默安裝）、檔案關聯，以及是否加入 PATH。
+- 選主要執行檔、PNG/ICO 圖示、選填的 EULA 文字、相依元件（VC++ Redistributable / .NET Desktop Runtime，也可以自訂；在使用者的電腦上偵測，缺少時自動下載並靜默安裝）、檔案關聯，以及是否加入 PATH。
+- 選**安裝引擎**：傳統引擎（安裝檔自己複製檔案、寫登錄表，並附一支解除安裝程式），或 **MSIX**（交給 Windows 的套件引擎，由系統保證解除安裝乾淨）。選定之後，表單會就地標出哪些設定在該引擎下不能用。
 - 開啟時會自動檢查執行環境，`pyinstaller`、`python`、`pywebview` 缺了哪一個都會直接告訴你，還附上安裝指令。
 - 兩種跑法都支援：直接執行 `.py`，或編譯成 `.exe` 後雙擊使用（見下方〈環境需求〉）。
 - 真實、分階段的編譯進度——不是一條會騙人的假線性進度條。
@@ -200,7 +202,7 @@ python build_config_tool.py
 
 ### 未來方向
 
-- [ ] 幫 `InstallerBuilder.exe` 透過 [SignPath Foundation](https://signpath.org/) 的免費開源方案做數位簽章（需要這個 repo 本身加上 GitHub Actions 建置流程；注意打包工具**產出**的安裝檔還是簽不到，因為那些是在使用者本機編譯出來的，不經過這個 repo 的 CI）
+- [ ] 幫 `InstallerBuilder.exe` 做數位簽章。[SignPath Foundation](https://signpath.org/) 的免費開源方案**已拒絕本專案的申請**，因此剩下的路是自行採購憑證、上架 Microsoft Store、或找雲端代簽服務。不管走哪一條，打包工具**產出**的安裝檔還是簽不到——那些是在使用者本機編譯出來的，不經過這個 repo 的 CI。**這是唯一擋住實際發布的一項。**
 - [ ] 補齊 `ui/index.html` 漏翻譯的英文字串、把後端動態訊息（進度/錯誤文字）也納入多語言範圍（見〈已知限制〉）
 - [ ] 完整性驗證的雜湊演算法升級選項（目前是 CRC32，未來可以考慮為更高安全需求的情境提供更強的密碼學雜湊）
 - [ ] 讓**輸出的安裝檔**也能被簽章（代表要把編譯流程搬進 CI，是比較大的架構調整）
@@ -208,9 +210,9 @@ python build_config_tool.py
 ### 已知限制
 
 - 打包工具本身、以及它產出的安裝檔，目前都還沒有數位簽章（見〈未來方向〉）。
-- 相依元件檢查（VC++ Redistributable、.NET Desktop Runtime）只做偵測，不會靜默安裝該元件本身。
+- MSIX 引擎第一版只裝給執行安裝的那一位使用者；需要整台電腦所有使用者都能用時請改用傳統引擎（見 `docs/adr/0009`）。MSIX 模式也沒有自訂的解除安裝介面，由系統接管（見 `docs/adr/0006`）。
 - 多語言介面已支援 `zh-TW`/`en`（依系統語言自動偵測，三個進入點——安裝、解除安裝、打包工具本身——都有），但範圍不完整：`ui/index.html`（安裝精靈主畫面）有 7 個字串還沒翻成英文（「程式正在執行」/「檔案使用中」/「偵測到較新版本」這三組畫面），英文系統上會 fallback 顯示中文；後端動態產生的進度/錯誤文字（例如「正在複製檔案...」）完全沒有納入這套機制，永遠是繁體中文。
-- 非常舊、沒更新過的 Windows 10 機器，可能需要另外安裝 WebView2 Runtime。
+- 非常舊、沒更新過的 Windows 10 機器，可能需要另外安裝 WebView2 Runtime。缺少時安裝視窗會開啟但 CSS 與 JavaScript 都不生效——版面塌成直向堆疊並溢出視窗，應用程式名稱停在佔位文字「載入中...」，且全程不顯示任何錯誤訊息。安裝程式目前不偵測這個元件是否存在（2026-09-03 於 Windows 10 Enterprise LTSC 2019 實測）。
 
 ### 授權
 

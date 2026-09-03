@@ -12,6 +12,25 @@ JSON 設定檔 + 命令列參數，不是表單）跟「進度怎麼呈現」（
 
 ---
 
+## 目錄
+
+- [環境需求](#環境需求)
+- [五個子指令](#五個子指令)
+  - [init：產生範本設定檔](#init產生範本設定檔)
+  - [list-files：列出 app_dir 底下的檔案](#list-files列出-app_dir-底下的檔案)
+  - [pack：驗證並編譯](#pack驗證並編譯)
+  - [pack-msix：產出未簽章的 .msix](#pack-msix產出未簽章的-msix)
+  - [MSIX 模式下的 pack：一體式與兩截式](#msix-模式下的-pack一體式與兩截式)
+  - [fetch-sdk-tools：取得 Windows SDK 工具](#fetch-sdk-tools取得-windows-sdk-工具)
+- [欄位對照表](#欄位對照表)
+  - [MSIX 模式的版本號](#msix-模式的版本號)
+  - [訊息語言](#訊息語言)
+  - [MSIX 引擎的設定相容性檢查](#msix-引擎的設定相容性檢查)
+  - [設定檔不支援直接寫入安裝密碼](#設定檔不支援直接寫入安裝密碼)
+- [範例](#範例)
+- [build_config_tool.py --cli：把打包工具自己編譯成 exe](#build_config_toolpy---cli把打包工具自己編譯成-exe)
+- [裝好之後，在 CMD 裡怎麼呼叫](#裝好之後在-cmd-裡怎麼呼叫)
+
 ## 環境需求
 
 跟圖形介面版本一樣：
