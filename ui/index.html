@@ -466,6 +466,7 @@
                 password_gate_hint: "請輸入安裝密碼以繼續",
                 password_input_placeholder: "密碼",
                 password_wrong_error: "密碼錯誤，請重新輸入",
+                password_unusable_error: "這個安裝檔標記了密碼保護，但裡面沒有加密的應用程式檔案，無法安裝。請向提供這個安裝檔的人索取重新打包的版本。",
                 btn_password_submit: "確定",
                 eula_title: "使用者授權合約",
                 btn_decline: "不同意",
@@ -512,6 +513,7 @@
                 password_gate_hint: "Please enter the installation password to continue",
                 password_input_placeholder: "Password",
                 password_wrong_error: "Incorrect password, please try again",
+                password_unusable_error: "This installer is marked as password protected but contains no encrypted application files, so it cannot install. Ask whoever supplied it for a rebuilt version.",
                 btn_password_submit: "OK",
                 eula_title: "End User License Agreement",
                 btn_decline: "Decline",
@@ -793,13 +795,27 @@
         async function submitPassword() {
             const input = document.getElementById('passwordInput');
             const errorEl = document.getElementById('passwordError');
-            const ok = await pywebview.api.verify_install_password(input.value);
+            // 後端對「這顆安裝檔標記了密碼保護，但裡面沒有加密內容」拋例外，
+            // 不是回傳 false——那種情況不管輸入什麼都不會成功，顯示「密碼錯誤」
+            // 會讓使用者一直重試一件不可能成功的事。不接住的話 await 直接拒絕，
+            // 按鈕按下去毫無反應，那比顯示錯誤訊息更糟。
+            let ok;
+            try {
+                ok = await pywebview.api.verify_install_password(input.value);
+            } catch (e) {
+                errorEl.innerText = t('password_unusable_error');
+                errorEl.classList.add('active');
+                input.classList.add('invalid');
+                return;
+            }
             if (ok) {
                 document.getElementById('passwordView').classList.remove('active');
                 errorEl.classList.remove('active');
                 input.classList.remove('invalid');
                 checkEulaAndProceed();
             } else {
+                // 訊息文字要寫回來：上面的 catch 可能已經把它換成另一則。
+                errorEl.innerText = t('password_wrong_error');
                 errorEl.classList.add('active');
                 input.classList.add('invalid');
                 input.focus();

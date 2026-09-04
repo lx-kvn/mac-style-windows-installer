@@ -258,5 +258,76 @@ class ListsEveryViolationTest(unittest.TestCase):
         self.assertEqual(report.error_message(), "")
 
 
+class InstallPasswordTest(unittest.TestCase):
+    """安裝密碼保護在 MSIX 引擎下必須被擋下（稽核 D1）。
+
+    真實抓到的缺陷：`builder.build_all()` 的內嵌內容是 `if is_msix /
+    elif password_protected / else` 三選一，選了 MSIX 就永遠走不到加密那一
+    條，但 `password_protected` 這個布林值仍然無條件寫進 `installer_config
+    .json`。產出的安裝檔會顯示密碼關卡，然後去開一個從未被內嵌的
+    `app_contents.enc`——每一台機器都失敗，而打包階段毫無徵兆。
+
+    分類為第二類（尚未支援）而非第三類：MSIX 模式做得到這件事（把已簽章的
+    套件加密內嵌、驗證通過後解密再交給系統部署），只是第一版不做。講成格式
+    限制會讓後續維護者認定此路不通。
+
+    三種來源都要認得：GUI 的勾選框（`need_install_password`）、GUI 的直接
+    輸入（`install_password`）、設定檔的環境變數名稱（`install_password_env`）。
+    只認其中一種等於讓另外兩條路照樣編出壞掉的安裝檔。
+    """
+
+    def test_the_checkbox_alone_is_blocked(self):
+        report = install_engine.check_settings(
+            install_engine.MSIX, settings(need_install_password=True))
+        self.assertTrue(report.has_blocking)
+
+    def test_the_environment_variable_name_is_blocked(self):
+        report = install_engine.check_settings(
+            install_engine.MSIX, settings(install_password_env="MSWI_PW"))
+        self.assertTrue(report.has_blocking)
+
+    def test_the_inline_password_is_blocked(self):
+        report = install_engine.check_settings(
+            install_engine.MSIX, settings(install_password="hunter2"))
+        self.assertTrue(report.has_blocking)
+
+    def test_all_three_sources_together_produce_one_finding_not_three(self):
+        """三個欄位描述的是同一個功能，逐項列出會讓使用者以為要修三件事。"""
+        report = install_engine.check_settings(install_engine.MSIX, settings(
+            need_install_password=True,
+            install_password="hunter2",
+            install_password_env="MSWI_PW",
+        ))
+        password_findings = [f for f in report.blocking
+                             if f.field == "install_password"]
+        self.assertEqual(len(password_findings), 1)
+
+    def test_it_is_the_deferred_wording_not_the_format_limit_one(self):
+        report = install_engine.check_settings(
+            install_engine.MSIX, settings(need_install_password=True))
+        text = report.error_message()
+        self.assertIn("尚未支援", text)
+        self.assertNotIn("格式本身的限制", text)
+
+    def test_the_message_points_at_the_traditional_engine(self):
+        """使用者需要知道等待期間有路可走。"""
+        report = install_engine.check_settings(
+            install_engine.MSIX, settings(need_install_password=True))
+        self.assertIn("傳統引擎", report.error_message())
+
+    def test_a_config_without_any_password_field_passes(self):
+        report = install_engine.check_settings(install_engine.MSIX, settings())
+        self.assertEqual(report.blocking, [])
+
+    def test_the_field_appears_in_the_static_classification(self):
+        """GUI 需要在使用者填之前就標出這個欄位（見 field_categories()）。"""
+        self.assertIn("install_password", install_engine.field_categories())
+
+    def test_the_traditional_engine_is_unaffected(self):
+        report = install_engine.check_settings(
+            install_engine.TRADITIONAL, settings(need_install_password=True))
+        self.assertEqual(report.blocking, [])
+
+
 if __name__ == "__main__":
     unittest.main()

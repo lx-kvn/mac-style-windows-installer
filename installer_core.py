@@ -83,6 +83,20 @@ def _file_checksum(path, chunk_size=1024 * 1024):
     return crc
 
 
+class MissingEncryptedPayloadError(RuntimeError):
+    """設定檔說這顆安裝檔有密碼保護，但裡面沒有 `app_contents.enc`。
+
+    這是安裝檔本身內部不一致，不是使用者輸入的問題——不管輸入什麼密碼都
+    不會成功。因此不能沿用 `verify_install_password()` 的布林回傳值：回傳
+    False 等同告訴使用者「密碼錯了」，他會一直重試一件不可能成功的事。
+
+    成因（稽核 D1）：MSIX 引擎加上密碼保護時，`builder.build_all()` 不會
+    產生加密內容，但設定檔裡的 `password_protected` 仍為真。打包端現已擋下
+    這個組合（`install_engine` 的 `install_password` 分類），這個例外處理的
+    是修正之前已經編出去、仍在外面的安裝檔。
+    """
+
+
 def get_resource_path(relative_path):
     """獲取資源絕對路徑，完美相容 PyInstaller 單一檔案打包環境"""
     if hasattr(sys, '_MEIPASS'):
@@ -339,6 +353,14 @@ class InstallerAPI:
         if not self.password_protected:
             return True
         encrypted_file = get_resource_path("app_contents.enc")
+        if not os.path.isfile(encrypted_file):
+            # 設定檔說有密碼保護，安裝檔裡卻沒有加密內容——這顆安裝檔內部
+            # 不一致，不管輸入什麼密碼都不會成功（見
+            # MissingEncryptedPayloadError 的說明）。
+            raise MissingEncryptedPayloadError(
+                "這個安裝檔標記了密碼保護，但裡面沒有加密的應用程式檔案，"
+                "無法安裝。請向提供這個安裝檔的人索取重新打包的版本。"
+            )
         dest_dir = tempfile.mkdtemp(prefix="mswi_payload_")
         try:
             install_encryption.decrypt_to_directory(encrypted_file, dest_dir, password)
@@ -1555,9 +1577,17 @@ def run_silent_install(install_dir=None, create_desktop_shortcut=True, log_path=
     # 任何視窗、不能卡住等輸入，密碼缺少或錯誤直接中止並回傳非 0 exit
     # code，原因寫進這份靜默安裝 log——跟一般靜默安裝錯誤走同一套回報
     # 管道，不是另外開一個特殊分支。
-    if api.password_protected and not api.verify_install_password(password or ""):
-        log("[錯誤] 這個安裝檔有密碼保護，命令列缺少 /PASSWORD= 或密碼錯誤。")
-        return write_log_and_return(api.app_name, 1)
+    if api.password_protected:
+        try:
+            password_ok = api.verify_install_password(password or "")
+        except MissingEncryptedPayloadError as e:
+            # 安裝檔內部不一致，不是密碼的問題。以未處理例外收場只會讓無人
+            # 值守的呼叫端拿到一段追蹤訊息，走既有的回報管道說出真正的原因。
+            log(f"[錯誤] {e}")
+            return write_log_and_return(api.app_name, 1)
+        if not password_ok:
+            log("[錯誤] 這個安裝檔有密碼保護，命令列缺少 /PASSWORD= 或密碼錯誤。")
+            return write_log_and_return(api.app_name, 1)
 
     existing = api.check_existing_install()
     if existing.get("exists"):

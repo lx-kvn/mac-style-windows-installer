@@ -1083,6 +1083,42 @@ class TestPasswordProtection(unittest.TestCase):
         self.assertFalse(os.path.exists(leftover_dir))
         self.assertIsNone(api._decrypted_payload_dir)
 
+    def test_missing_encrypted_payload_is_not_reported_as_a_wrong_password(self):
+        """稽核 D1 的安裝端一半。
+
+        設定檔說「這顆有密碼保護」，但安裝檔裡根本沒有 `app_contents.enc`
+        ——這是 MSIX 引擎加上密碼保護編出來的產物（打包端現已擋下，但既有
+        的安裝檔仍在外面）。原本的行為是 `open()` 拋 FileNotFoundError，
+        沒有任何地方接住：GUI 的密碼關卡靜止不動，靜默安裝以未處理例外
+        收場，兩者都指不出成因。
+
+        回傳 False 也不行——那等同告訴使用者「密碼錯了」，而他不管輸入
+        什麼都不會對，會一直重試。因此改為拋一個具名的例外，讓兩個呼叫端
+        各自說出真正的原因。
+        """
+        api = make_installer_api(password_protected=True)
+        empty_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, empty_dir, True)
+        with mock.patch("installer_core.get_resource_path",
+                        side_effect=lambda p: os.path.join(empty_dir, p)):
+            with self.assertRaises(ic.MissingEncryptedPayloadError):
+                api.verify_install_password("anything")
+
+    def test_missing_encrypted_payload_leaves_no_temp_dir_behind(self):
+        """解密用的暫存資料夾在拋例外之前就已經建立，要一併清掉。"""
+        api = make_installer_api(password_protected=True)
+        empty_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, empty_dir, True)
+        before = set(os.listdir(tempfile.gettempdir()))
+        with mock.patch("installer_core.get_resource_path",
+                        side_effect=lambda p: os.path.join(empty_dir, p)):
+            with self.assertRaises(ic.MissingEncryptedPayloadError):
+                api.verify_install_password("anything")
+        leaked = [name for name in set(os.listdir(tempfile.gettempdir())) - before
+                  if name.startswith("mswi_payload_")]
+        self.assertEqual(leaked, [])
+        self.assertIsNone(api._decrypted_payload_dir)
+
     def test_app_contents_dir_raises_before_password_verified(self):
         """真實會踩到的情境：如果哪個呼叫路徑漏掉先呼叫
         verify_install_password()，這裡要直接拋例外，不能悄悄回傳一個
@@ -2547,6 +2583,25 @@ class TestSilentInstallPasswordProtection(unittest.TestCase):
             exit_code = ic.run_silent_install()
         instance.verify_install_password.assert_not_called()
         self.assertEqual(exit_code, 0)
+
+    def test_a_missing_encrypted_payload_aborts_with_its_own_reason(self):
+        """稽核 D1：安裝檔內部不一致（說有密碼保護，卻沒有加密內容）時，
+        以未處理例外收場會讓無人值守的呼叫端只拿到一段追蹤訊息。走既有的
+        回報管道：寫進紀錄檔、回傳非 0，並說出真正的原因而不是「密碼錯誤」。
+        """
+        log_path = os.path.join(tempfile.mkdtemp(), "silent.log")
+        self.addCleanup(shutil.rmtree, os.path.dirname(log_path), True)
+        with mock.patch("installer_core.InstallerAPI") as MockAPI, \
+             mock.patch("installer_core._acquire_single_instance_lock", return_value=(True, None)):
+            instance = self._make_mock_api(MockAPI, password_protected=True)
+            instance.verify_install_password.side_effect = \
+                ic.MissingEncryptedPayloadError("內容缺失")
+            exit_code = ic.run_silent_install(password="whatever", log_path=log_path)
+        instance.trigger_installation.assert_not_called()
+        self.assertNotEqual(exit_code, 0)
+        with open(log_path, "r", encoding="utf-8") as f:
+            written = f.read()
+        self.assertNotIn("密碼錯誤", written)
 
 
 class TestSilentInstallLogPath(unittest.TestCase):

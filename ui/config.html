@@ -307,7 +307,7 @@
                 <span class="note" data-i18n="note_eula_default_lang">當終端使用者的系統語言沒有對應到任何已提供的 EULA 版本時，顯示這個語言的版本。</span>
             </div>
         </div>
-        <div class="form-group">
+        <div class="form-group" id="group_install_password">
             <div class="checkbox-row"><input type="checkbox" id="need_install_password" onchange="toggleInstallPasswordFields(this.checked)"><label for="need_install_password" data-i18n="label_install_password">啟用安裝密碼保護（選填）</label></div>
             <div id="install_password_section" style="display: none; margin-top: 8px;">
                 <div class="checkbox-row"><input type="radio" name="install_password_mode" id="install_password_mode_inline" value="inline" checked onchange="onInstallPasswordModeChange()"><label for="install_password_mode_inline" data-i18n="label_pw_mode_inline">直接輸入密碼</label></div>
@@ -1603,6 +1603,7 @@
             post_install_script: 'group_post_install_script',
             folder_name: 'group_folder_name',
             local_appdata_files: 'group_local_appdata_files',
+            install_password: 'group_install_password',
             // 這兩個由「安裝位置」整組退場處理，不個別標記——那一組在 MSIX 下
             // 三個選項全部無效，逐項標記會變成三則指向同一件事的警告。
             custom_install_dir: 'group_install_location',

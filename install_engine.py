@@ -161,6 +161,9 @@ _FIELD_CATEGORIES = {
     # Program Files 即 no_admin_install 為假，而第一版只提供當前使用者範圍
     # （見 docs/adr/0009）。判斷邏輯在 _user_scope_finding()。
     "no_admin_install": UNSUPPORTED,
+    # 安裝密碼保護。這一項的「有沒有填」要看三個欄位（見 _PASSWORD_FIELDS），
+    # 因此不走下方的一般迴圈，判斷在 check_settings() 內另外做。
+    "install_password": UNSUPPORTED,
     # 第三類：格式本身不允許，無替代方案。
     "custom_install_dir": IMPOSSIBLE,
     "pre_install_script": IMPOSSIBLE,
@@ -173,6 +176,15 @@ _FIELD_CATEGORIES = {
 }
 
 _MOOT_PATH_FIELDS = ("folder_name", "local_appdata_files")
+
+# 安裝密碼保護的三個來源。GUI 的勾選框、GUI 的直接輸入、設定檔的環境變數
+# 名稱——三者描述的是同一個功能，任何一個有值都代表使用者要這個功能。
+#
+# 只認其中一種的後果是另外兩條路照樣編出壞掉的安裝檔（稽核 D1）：
+# `builder.build_all()` 在 MSIX 模式下不會產生 `app_contents.enc`，但設定檔
+# 裡的 `password_protected` 仍為真，安裝端因此去開一個不存在的檔案。
+_PASSWORD_FIELDS = ("need_install_password", "install_password",
+                    "install_password_env")
 
 # 訊息表放在 Python 端而不是 config.html 的 i18n 表裡：CLI 沒有前端可以問，
 # 訊息若只存在於前端，CLI 就沒有來源（第十四輪決議第七項）。
@@ -197,6 +209,7 @@ MESSAGES = {
         "field.windows_service": "windows_service：安裝為 Windows 服務。MSIX 有對應機制但限制較多，需另行設計。",
         "field.scheduled_task": "scheduled_task：排程工作。MSIX 的對應機制只涵蓋登入時觸發，其他觸發時機無對應。",
         "field.no_admin_install": "安裝給這台電腦上的所有使用者：MSIX 引擎目前只安裝給執行安裝的那一位使用者，其他使用者登入後不會有這個應用程式。若現在就需要所有使用者共用，請改用傳統引擎（install_engine 設為 traditional）。",
+        "field.install_password": "安裝密碼保護：MSIX 引擎目前尚未支援。這個功能的做法是把應用程式檔案整包加密內嵌，而 MSIX 模式內嵌的是一份已簽章的套件、由系統負責落地，兩者需要另行接合。目前若同時設定兩者，編出來的安裝檔會在密碼關卡失敗且無法安裝。現在就需要密碼保護請改用傳統引擎（install_engine 設為 traditional）。",
         "field.custom_install_dir": "custom_install_dir：指定安裝路徑。MSIX 套件的位置由系統決定，無法指定。",
         "field.pre_install_script": "pre_install_script：安裝前執行腳本。MSIX 的容器模型不允許在部署過程中執行任意外部程式。",
         "field.post_install_script": "post_install_script：安裝後執行腳本，與 pre_install_script 同。",
@@ -220,6 +233,7 @@ MESSAGES = {
         "field.windows_service": "windows_service: installing as a Windows service. MSIX has an equivalent mechanism but with tighter limits, so this needs a different design.",
         "field.scheduled_task": "scheduled_task: scheduled tasks. The MSIX equivalent only covers logon triggers; other trigger types have no counterpart.",
         "field.no_admin_install": "Installing for every user on this machine: the MSIX engine currently installs only for the user running the installer, so other users will not have the application after signing in. If you need it shared across users today, use the traditional engine (set install_engine to traditional).",
+        "field.install_password": "Install password protection: not supported by MSIX mode yet. The feature works by encrypting the application files and embedding them; MSIX mode instead embeds a signed package that the system unpacks, and the two need to be joined up. Setting both today produces an installer that fails at the password gate and cannot install at all. If you need password protection now, use the traditional engine (set install_engine to traditional).",
         "field.custom_install_dir": "custom_install_dir: choosing the install path. The location of an MSIX package is decided by the system and cannot be specified.",
         "field.pre_install_script": "pre_install_script: running a script before installation. The MSIX container model does not allow arbitrary external programs to run during deployment.",
         "field.post_install_script": "post_install_script: running a script after installation, same as pre_install_script.",
@@ -284,8 +298,14 @@ def check_settings(engine, settings):
     if not settings.get("no_admin_install"):
         blocking.append(Finding("no_admin_install", UNSUPPORTED,
                                 "field.no_admin_install"))
+    # 安裝密碼保護：三個欄位描述同一個功能，任一有值即成立，且只產生一則
+    # 違規項——逐項列出會讓使用者以為要修三件事。
+    if any(_has_value(settings.get(field)) for field in _PASSWORD_FIELDS):
+        blocking.append(Finding("install_password", UNSUPPORTED,
+                                "field.install_password"))
+
     for field, category in _FIELD_CATEGORIES.items():
-        if field in ("no_admin_install",) or category == MOOT:
+        if field in ("no_admin_install", "install_password") or category == MOOT:
             continue
         if _has_value(settings.get(field)):
             blocking.append(Finding(field, category, f"field.{field}"))
