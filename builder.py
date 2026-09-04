@@ -48,9 +48,9 @@ import urllib.request
 from datetime import datetime
 
 import dependency_defs
+import embedded_payload
 import file_extension
 import version_info
-import install_encryption
 import sdk_tools
 
 CONFIG_FILE_NAME = "installer_config.json"
@@ -381,6 +381,11 @@ def build_all(
     # 兩者不會同時給、且環境變數當下確實有值。
     install_password_value = install_password or os.environ.get(install_password_env, "")
     password_protected = bool(install_password or install_password_env)
+    # 「安裝檔裡要放哪一份應用程式內容」與「設定檔怎麼描述它」由同一個值推導
+    # ——那兩件事原本各自算一次，因此可以不一致，而且真的不一致了（稽核 D1）。
+    # 決定在這裡就做，因為設定檔在下面幾行就要寫出來；實際產生內容（可能要
+    # 加密，會留下暫存檔）留到編譯指令組好的時候。
+    payload_kind = embedded_payload.kind_for(install_engine, password_protected)
     windows_service = windows_service or {}
     scheduled_task = scheduled_task or {}
     dependencies_min_version = dependencies_min_version or {}
@@ -470,7 +475,10 @@ def build_all(
         "post_install_script": post_install_embedded,
         # 只留「這份安裝檔有沒有密碼保護」這個布林值。密碼本身絕對不能寫進
         # 這份設定檔——它會被打包進安裝檔、跟著送到每一位終端使用者手上。
-        "password_protected": password_protected,
+        #
+        # 由 payload_kind 推導，不由 password_protected 直接寫入：這個欄位
+        # 必須與實際內嵌的東西一致，而它們原本是兩個各自算出來的值（稽核 D1）。
+        "password_protected": embedded_payload.is_password_protected(payload_kind),
         # 安裝端要靠這兩個欄位知道自己是哪一種引擎、內嵌的套件叫什麼
         # （見 installer_core._trigger_installation_impl_inner 的分流）。
         "install_engine": install_engine,
@@ -606,22 +614,16 @@ def build_all(
     temp_doc_icons = []
     temp_scripts = []
     temp_dependency_files = []
-    # 安裝密碼保護（見 CONTEXT.md「安裝密碼保護」一節）：有設定密碼時，
-    # app_dir 整包加密成一份檔案再內嵌，不能像沒設定密碼保護時那樣直接把
-    # 明文 app_dir 塞進 --add-data，不然密碼保護形同虛設。這份暫存加密檔
-    # 跟其他暫存產物一樣，在下面的 finally 區塊統一清掉。
+    # 內嵌哪一份應用程式內容由 embedded_payload 決定（三種形式與各自的理由
+    # 見該模組）。密碼保護的加密檔跟其他暫存產物一樣，在下面的 finally
+    # 區塊統一清掉——materialise() 回報它，這裡只負責記下來。
     temp_encrypted_payload = None
     try:
-        if is_msix:
-            # 應用程式檔案由系統從套件裡落地，安裝檔不需要另外帶一份
-            # app_contents——帶了等於同一批檔案在 exe 裡放兩次。
-            cmd.append(f"--add-data={embedded_msix};.")
-        elif password_protected:
-            temp_encrypted_payload = os.path.join(workspace_dir, "app_contents.enc")
-            install_encryption.encrypt_directory(app_dir, temp_encrypted_payload, install_password_value)
-            cmd.append(f"--add-data={temp_encrypted_payload};.")
-        else:
-            cmd.append(f"--add-data={app_dir};app_contents")
+        prepared = embedded_payload.materialise(
+            payload_kind, app_dir=app_dir, workspace_dir=workspace_dir,
+            password=install_password_value, embedded_msix=embedded_msix)
+        cmd.append(f"--add-data={prepared.add_data}")
+        temp_encrypted_payload = prepared.temp_file
 
         if doc_icon_path:
             # --add-data 不會重新命名檔案，會保留使用者選的原始檔名，

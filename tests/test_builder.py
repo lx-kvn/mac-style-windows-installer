@@ -571,7 +571,9 @@ class TestInstallPasswordSources(BuildAllTestBase):
             with open(dest_path, "wb") as f:
                 f.write(b"ENCRYPTED")
 
-        with mock.patch("builder.install_encryption.encrypt_directory", side_effect=fake_encrypt):
+        # 加密由 embedded_payload.materialise() 延遲匯入 install_encryption
+        # 之後呼叫，因此換掉的是那個模組本身的屬性，不是 builder 的。
+        with mock.patch("install_encryption.encrypt_directory", side_effect=fake_encrypt):
             self._call_build_all(run_side_effect=fake_run, **overrides)
         return captured
 

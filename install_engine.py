@@ -175,6 +175,65 @@ _FIELD_CATEGORIES = {
     "local_appdata_files": MOOT,
 }
 
+# 在兩種引擎下行為相同的設定。列出來不是為了給程式讀——沒有任何產品程式碼
+# 會用到這個集合——而是為了讓「每一個打包能力都被分類過」這件事有東西可以
+# 檢查（`tests/test_engine_field_coverage.py`）。
+#
+# 稽核 D1 的成因不是漏掉一個欄位，是沒有任何東西會在漏掉時叫出聲：
+# `_FIELD_CATEGORIES` 只登記了不相容的那些，而「沒被登記」與「相容」在資料
+# 上長得一模一樣。加上這個集合之後，兩者才分得開。
+#
+# 新增一個打包欄位時，要嘛加進 `_FIELD_CATEGORIES`（在 MSIX 下不能用或無
+# 作用），要嘛加進這裡（確認過兩種引擎相同），沒有第三條路。
+ENGINE_AGNOSTIC_FIELDS = frozenset({
+    # 應用程式的身分與內容。MSIX 的清單各有對應的欄位，由 msix_manifest 產生。
+    "app_dir", "app_name", "version", "publisher", "main_exe",
+    # 檔案關聯、命令列別名、圖示。MSIX 以套件清單宣告，傳統引擎寫登錄表，
+    # 使用者填的東西與得到的結果相同（見 ADR-0010、msix_manifest 的說明）。
+    "file_associations", "doc_icon_path", "doc_icons",
+    "add_to_path", "path_target_exe",
+    # 安裝流程的畫面。兩種引擎共用同一份安裝端介面。
+    "eula_texts", "eula_default_lang",
+    # 產出的檔名與簽章。MSIX 模式下 signing 同時用於簽 .msix 與 bootstrapper。
+    "exe_name", "signing",
+    # 安裝前的系統還原點。由 bootstrapper 建立，與落地方式無關。
+    "create_restore_point_before_install",
+    # 偵測並結束鎖定安裝檔案的程式。MSIX 模式下仍有作用範圍——第二輪決議
+    # 第九項的「先移除傳統模式的既有安裝」會呼叫舊版的 uninstall.exe 並帶
+    # --restart-explorer（見 docs/proposals/MSIX輸出規劃.md）。
+    "restart_explorer_on_update",
+})
+
+# 不是「打包出來的東西長什麼樣」的設定，而是建置動作本身的參數。這些不隨
+# 引擎改變意義，也不是使用者在設定檔裡描述產品的欄位。
+#
+# 這個集合是上面那道檢查的逃生口，因此它太寬就等於檢查失效——
+# `tests/test_engine_field_coverage.py` 另有一條釘住幾個一定不能被歸到這裡
+# 來的欄位。
+ENGINE_PLUMBING_FIELDS = frozenset({
+    # 檔案系統與資源的位置。
+    "png_path", "ico_path", "workspace_dir",
+    # 建置過程的回報與工具位置。
+    "progress_callback", "sdk_tools_settings",
+    # 引擎的選擇本身，以及選了 MSIX 之後才有意義的兩個輸入。它們不是「一項
+    # 打包能力」，而是這個機制自己的參數。
+    "install_engine", "signed_msix", "msix_identity_name",
+    # check_settings() 的第四類結果，由 packaging_core 組好後傳進來印進建置
+    # 紀錄。它是這個機制的輸出，不是使用者填的東西。
+    "engine_notices",
+})
+
+# 只存在於打包設定／表單、不會成為 `builder.build_all()` 參數的欄位。
+#
+# 目前只有一個：`need_install_password` 是 GUI 那顆「啟用安裝密碼保護」勾選框
+# 的狀態，密碼本身走另外兩個欄位（`install_password`／`install_password_env`），
+# 因此它到不了 build_all。
+#
+# 獨立列出而不是讓檢查放寬：`tests/test_engine_field_coverage.py` 另有一條
+# 「分類項目不得指向一個已經不存在的參數」，那是用來抓改名的。少了這個集合，
+# 那條檢查就得整個關掉。
+CONFIG_ONLY_FIELDS = frozenset({"need_install_password"})
+
 _MOOT_PATH_FIELDS = ("folder_name", "local_appdata_files")
 
 # 安裝密碼保護的三個來源。GUI 的勾選框、GUI 的直接輸入、設定檔的環境變數
@@ -252,6 +311,29 @@ def _t(key, lang=messages.DEFAULT_LANGUAGE, /, **params):
     訊息表留在各模組而不是集中一張。
     """
     return messages.translate(MESSAGES, key, lang, **params)
+
+
+def incompatible_fields():
+    """在 MSIX 引擎下不能用或無作用的欄位名，全集。
+
+    與 `field_categories()` 的差別在安裝密碼保護：那一項在分類表裡以
+    `install_password` 這個概念名登記一次（GUI 只需要標記一個區塊），但它
+    實際會由三個欄位觸發（見 `_PASSWORD_FIELDS`）。回答「這個欄位分類過了
+    沒有」時要看的是三個，不是一個。
+    """
+    return set(_FIELD_CATEGORIES) | set(_PASSWORD_FIELDS)
+
+
+def classified_fields():
+    """已經分類過「在 MSIX 引擎下會怎樣」的欄位名，全集。
+
+    存在的理由是讓「每一個打包能力都被分類過」這件事有東西可以檢查
+    （`tests/test_engine_field_coverage.py`）。稽核 D1 的成因不是漏掉一個
+    欄位，是「沒被登記」與「相容」在資料上長得一模一樣，沒有任何東西會在
+    漏掉時叫出聲。
+    """
+    return (incompatible_fields()
+            | set(ENGINE_AGNOSTIC_FIELDS) | set(ENGINE_PLUMBING_FIELDS))
 
 
 def field_categories():

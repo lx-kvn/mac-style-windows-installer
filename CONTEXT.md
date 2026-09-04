@@ -11,6 +11,8 @@
 - [使用者關聯覆寫（User Association Override）](#使用者關聯覆寫user-association-override)
 - [registry seam](#registry-seam)
 - [副檔名（file_extension.py）](#副檔名file_extensionpy)
+- [內嵌內容（embedded_payload.py）](#內嵌內容embedded_payloadpy)
+- [引擎相容性的三份清單（install_engine.py）](#引擎相容性的三份清單install_enginepy)
 - [拖曳安裝（Drag-to-Install）與視窗拖曳（Window Drag）](#拖曳安裝drag-to-install與視窗拖曳window-drag)
   - [ui/ 底下的共用前端檔案](#ui-底下的共用前端檔案)
 - [深模組拆分（installer_core.py 瘦身）](#深模組拆分installer_corepy-瘦身)
@@ -94,6 +96,38 @@ Windows 針對「使用者選過這個副檔名要用什麼開」記住的三層
 決定檔案寫到哪裡）。
 
 這個模組的由來見 `docs/investigations/MSIX稽核與缺陷修正.md` 的 D2。
+
+## 內嵌內容（embedded_payload.py）
+
+「安裝檔裡放的那一份應用程式內容」。有三種形式，由引擎與有沒有密碼保護決定：
+
+| kind | 內嵌什麼 | 安裝端怎麼取用 |
+| --- | --- | --- |
+| `PLAIN` | `app_dir` 整個目錄 | `app_contents/` |
+| `ENCRYPTED` | 加密後的單一檔案 | `app_contents.enc`，密碼驗證通過後解密 |
+| `MSIX` | 已簽章的 `.msix` | 不取用——檔案由系統從套件裡落地 |
+
+右欄那兩個名字是打包端與安裝端之間的契約，寫死在 `installer_core.py`
+（`_app_contents_dir()`、`verify_install_password()`）。
+
+**這個概念之所以有自己的模組**，是因為「內嵌什麼」與「設定檔裡的
+`password_protected` 寫什麼」原本是兩個各自算出來的值，因此可以不一致——
+而且真的不一致過（見 `docs/investigations/MSIX稽核與缺陷修正.md` 的 D1）。
+現在兩者都由同一個 `kind` 推導，分岔在結構上不可能發生。
+
+## 引擎相容性的三份清單（install_engine.py）
+
+`install_engine` 回答的是「這個設定在這個引擎下能不能用」。它把每一個打包
+能力分成三類，三份清單合起來必須恰好等於 `builder.build_all()` 的參數列
+（`tests/test_engine_field_coverage.py` 檢查這件事）：
+
+- **不相容**（`incompatible_fields()`）——在 MSIX 下不能用或無作用。
+- **`ENGINE_AGNOSTIC_FIELDS`**——兩種引擎下行為相同。
+- **`ENGINE_PLUMBING_FIELDS`**——不是產品設定，是建置動作本身的參數
+  （工作目錄、進度回報之類）。
+
+**為什麼要有第二、三份清單**：只登記不相容的那些時，「沒被登記」與「相容」
+在資料上長得一模一樣，漏掉一個欄位沒有任何東西會叫。D1 就是這樣發生的。
 
 ## 拖曳安裝（Drag-to-Install）與視窗拖曳（Window Drag）
 
