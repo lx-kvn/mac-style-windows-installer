@@ -324,7 +324,8 @@ def build_all(
     windows_service=None, scheduled_task=None, dependencies_min_version=None,
     create_restore_point_before_install=False, install_password_env="", install_password="",
     workspace_dir=".", sdk_tools_settings=None, install_engine="traditional",
-    signed_msix="", engine_notices=None, progress_callback=None,
+    signed_msix="", msix_identity_name="", engine_notices=None,
+    progress_callback=None,
 ):
     """流水線：產生配置 -> 編譯反安裝檔 -> 編譯主安裝檔
 
@@ -474,6 +475,9 @@ def build_all(
         # （見 installer_core._trigger_installation_impl_inner 的分流）。
         "install_engine": install_engine,
         "msix_package": os.path.basename(signed_msix) if signed_msix else "",
+        # 套件身分名稱。安裝端用它查「同一個應用程式的套件是不是已經裝過」
+        # （稽核 D3）。它不由 app_name 推導（ADR-0007），只能從這裡帶過去。
+        "msix_identity_name": msix_identity_name if install_engine == "msix" else "",
     }
     config_path = os.path.join(workspace_dir, CONFIG_FILE_NAME)
     with open(config_path, "w", encoding="utf-8") as f:

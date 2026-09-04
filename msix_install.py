@@ -38,8 +38,41 @@ SUCCESS_MESSAGE = (
 )
 
 
+def _installed_package_note(full_name):
+    """部署失敗且同名套件已安裝時，附在系統訊息後面的那一段。
+
+    附加而不取代：系統給的 `error_text` 是完整且已在地化的說明，自己另編
+    一則只會失去資訊（第三輪 spike 結果第七項）。
+    """
+    return (
+        f"\n這台電腦上已經安裝了同一個應用程式的套件（{full_name}）。"
+        "版本較新的套件系統會自動就地更新，因此這個失敗通常代表這次要裝的是"
+        "同一個版本或更舊的版本。請先到「設定 → 應用程式」把它解除安裝，"
+        "再執行一次這個安裝程式。"
+    )
+
+
+def _find_installed(find_installed_package, log):
+    """查同名套件，查不到或查詢本身出錯都回傳 None。
+
+    查詢失敗不該讓一次本來會成功的安裝失敗：這個結果只用來把訊息講清楚，
+    不是流程的必要條件。
+    """
+    if not find_installed_package:
+        return None
+    try:
+        full_name = find_installed_package() or None
+    except Exception:
+        return None
+    if full_name and log:
+        log(f"偵測到同一個應用程式的套件已安裝（{full_name}），"
+            "版本較新時系統會直接就地更新。")
+    return full_name
+
+
 def run(package_path, check_existing=None, remove_existing=None, deploy=None,
-        progress=None, log=None, package_must_exist=False):
+        progress=None, log=None, package_must_exist=False,
+        find_installed_package=None):
     """執行 MSIX 模式的安裝，回傳與傳統流程相同形狀的結果字典。
 
     `package_must_exist`：呼叫端已經確認過檔案存在時可以省略這道檢查。預設
@@ -75,12 +108,20 @@ def run(package_path, check_existing=None, remove_existing=None, deploy=None,
                 }
             report("舊版本已移除")
 
+    # 同名的 MSIX 套件是否已安裝——查一次，供失敗訊息使用（稽核 D3）。
+    # 查在部署之前，是為了那一行事前告知：使用者看到安裝程式在動一個已經存在
+    # 的東西時，應該已經知道那是預期中的步驟。
+    installed_package = _find_installed(find_installed_package, log)
+
     report("正在交由 Windows 的套件引擎安裝...")
     outcome = deploy(package_path, progress=progress)
     if not outcome.ok:
         # error_text 是系統給的完整且已在地化的說明文字，直接轉呈——自己另編
         # 一則訊息只會失去資訊（第三輪 spike 結果第七項）。
-        return {"status": "error", "message": f"安裝失敗：{outcome.error_text}"}
+        message = f"安裝失敗：{outcome.error_text}"
+        if installed_package:
+            message += _installed_package_note(installed_package)
+        return {"status": "error", "message": message}
 
     report("安裝完成")
     return {"status": "success", "message": SUCCESS_MESSAGE}

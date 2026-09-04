@@ -1129,6 +1129,37 @@ class TestPasswordProtection(unittest.TestCase):
             api._app_contents_dir()
 
 
+class TestMsixInstallWiring(unittest.TestCase):
+    """稽核 D3：安裝端要把「同名的 MSIX 套件是否已安裝」這個查詢接上去。
+
+    `msix_deploy.find_installed()` 早就寫好也測過，但產品端從來沒有呼叫它
+    ——這個測試釘住那條線真的存在。
+    """
+
+    def test_the_identity_name_from_the_config_reaches_the_lookup(self):
+        api = _fakes.make_installer_api(
+            install_engine="msix", msix_package="app.msix",
+            msix_identity_name="MyCompany.MyApp")
+        asked = []
+        with mock.patch("msix_install.run") as run, \
+             mock.patch("msix_deploy.find_installed",
+                        side_effect=lambda name: asked.append(name)):
+            run.side_effect = lambda *a, **kw: (
+                kw["find_installed_package"](), {"status": "success"})[1]
+            api._install_msix(log=lambda _m: None)
+        self.assertEqual(asked, ["MyCompany.MyApp"])
+
+    def test_without_an_identity_name_the_lookup_is_not_attempted(self):
+        """identity 是必填欄位，但舊版工具編出來的安裝檔沒有這個欄位——
+        此時不該拿一個空字串去比對，那會match到任何套件或什麼都比不到。"""
+        api = _fakes.make_installer_api(
+            install_engine="msix", msix_package="app.msix",
+            msix_identity_name="")
+        with mock.patch("msix_install.run") as run:
+            api._install_msix(log=lambda _m: None)
+        self.assertIsNone(run.call_args.kwargs.get("find_installed_package"))
+
+
 class TestGetUiLanguage(unittest.TestCase):
     def test_returns_whatever_load_config_computed(self):
         api = make_installer_api(ui_language="en")

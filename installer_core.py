@@ -173,6 +173,10 @@ class InstallerAPI:
         self.install_engine = "traditional"
         # MSIX 引擎才有：內嵌的已簽章套件在資源裡的檔名。
         self.msix_package = ""
+        # MSIX 引擎才有：套件身分名稱。安裝端用它查「同一個應用程式的
+        # 套件是不是已經裝過」（稽核 D3）。它不由 app_name 推導
+        # （ADR-0007），因此只能由打包端寫進設定檔。
+        self.msix_identity_name = ""
         self.no_admin_install = False
         self.custom_install_dir = ""
         self.pre_install_script = ""
@@ -278,6 +282,7 @@ class InstallerAPI:
                     self.restart_explorer_on_update = bool(config.get("restart_explorer_on_update", False))
                     self.install_engine = config.get("install_engine", "traditional") or "traditional"
                     self.msix_package = config.get("msix_package", "")
+                    self.msix_identity_name = config.get("msix_identity_name", "")
                     self.no_admin_install = bool(config.get("no_admin_install", False))
                     self.custom_install_dir = config.get("custom_install_dir", "")
                     self.pre_install_script = config.get("pre_install_script", "")
@@ -933,6 +938,15 @@ class InstallerAPI:
             # 不需要退化為不確定進度動畫（第二輪決議第六項的備案未被觸發）。
             self._report_progress(percentage, "正在安裝...")
 
+        # 同名的 MSIX 套件是否已安裝（稽核 D3）。identity 只有打包端知道，
+        # 它不由 app_name 推導（ADR-0007），因此由設定檔帶過來。舊版工具編
+        # 出來的安裝檔沒有這個欄位，此時不接這條線——拿空字串去比對只會得到
+        # 一個沒有意義的答案。
+        find_installed_package = None
+        if self.msix_identity_name:
+            def find_installed_package():
+                return msix_deploy.find_installed(self.msix_identity_name)
+
         return msix_install.run(
             package_path,
             check_existing=self.check_existing_install,
@@ -941,6 +955,7 @@ class InstallerAPI:
             progress=report_progress,
             log=log,
             package_must_exist=True,
+            find_installed_package=find_installed_package,
         )
 
     def _trigger_installation_impl_inner(self, create_desktop_shortcut, skip_process_check, log_lines, log):

@@ -135,6 +135,82 @@ class DeploymentFailureTest(unittest.TestCase):
         self.assertNotIn("deploy", recorder.order)
 
 
+class ExistingMsixPackageTest(unittest.TestCase):
+    """稽核 D3：同一個 identity 已經以 MSIX 裝過的情形原本完全沒有處置。
+
+    `check_existing` 接的是登錄表查詢，只看得到傳統模式的舊安裝。Windows 對
+    版本較高的套件本來就會就地更新，因此升級那條路一直是好的；問題出在同版本
+    重裝與降版——那兩種會直接失敗，而使用者拿到的是系統的原始錯誤碼。
+
+    這一輪的處置是「查得到就把話說清楚」，不自動移除：自動移除的前提是失敗
+    原因確實是同名套件已存在，而失敗也可能來自別的原因（憑證不受信任、磁碟
+    空間不足），那時移除等於白白弄丟使用者的既有應用程式，而重試照樣失敗。
+    自動移除待 `add_package_async` 對同版本／降版的真實行為於虛擬機驗證後
+    再決定（見 docs/investigations/MSIX稽核與缺陷修正.md 的待辦清單）。
+    """
+
+    def test_a_failure_with_an_installed_package_names_it(self):
+        recorder = Recorder(deploy_outcome=msix_deploy.Outcome(
+            False, "錯誤 0x80073D06", 0x80073D06))
+        result = run(recorder,
+                     find_installed_package=lambda: "My.App_1.0.0.0_x64__abc")
+        self.assertEqual(result["status"], "error")
+        self.assertIn("My.App_1.0.0.0_x64__abc", result["message"])
+
+    def test_the_failure_message_keeps_the_systems_own_wording(self):
+        """系統給的說明是完整且已在地化的，附加說明不該取代它。"""
+        recorder = Recorder(deploy_outcome=msix_deploy.Outcome(
+            False, "錯誤 0x80073D06", 0x80073D06))
+        result = run(recorder,
+                     find_installed_package=lambda: "My.App_1.0.0.0_x64__abc")
+        self.assertIn("錯誤 0x80073D06", result["message"])
+
+    def test_the_failure_message_says_where_to_remove_it(self):
+        recorder = Recorder(deploy_outcome=msix_deploy.Outcome(False, "壞了", 1))
+        result = run(recorder, find_installed_package=lambda: "My.App_1_x64__a")
+        self.assertIn("設定", result["message"])
+
+    def test_a_failure_without_an_installed_package_says_nothing_extra(self):
+        recorder = Recorder(deploy_outcome=msix_deploy.Outcome(False, "壞了", 1))
+        result = run(recorder, find_installed_package=lambda: None)
+        self.assertEqual(result["message"], "安裝失敗：壞了")
+
+    def test_an_installed_package_is_reported_before_deploying(self):
+        """使用者看到安裝程式在動一個已經存在的東西時，應該已經知道那是
+        預期中的步驟——比照傳統模式舊版被移除時的告知。"""
+        recorder = Recorder()
+        lines = []
+        run(recorder, find_installed_package=lambda: "My.App_1_x64__a",
+            log=lines.append)
+        self.assertTrue(any("My.App_1_x64__a" in line for line in lines))
+
+    def test_the_lookup_happens_only_once(self):
+        """列舉當前使用者的所有套件不是免費的，查一次就夠。"""
+        calls = []
+
+        def find():
+            calls.append(1)
+            return "My.App_1_x64__a"
+
+        run(Recorder(deploy_outcome=msix_deploy.Outcome(False, "壞了", 1)),
+            find_installed_package=find)
+        self.assertEqual(len(calls), 1)
+
+    def test_without_the_lookup_the_behaviour_is_unchanged(self):
+        """沒有傳這個參數時（例如舊的呼叫端）流程完全不變。"""
+        recorder = Recorder(deploy_outcome=msix_deploy.Outcome(False, "壞了", 1))
+        result = run(recorder)
+        self.assertEqual(result["message"], "安裝失敗：壞了")
+
+    def test_a_lookup_that_raises_does_not_take_down_the_install(self):
+        """查詢失敗不該讓一次本來會成功的安裝失敗。"""
+        def find():
+            raise RuntimeError("winrt 掛了")
+
+        result = run(Recorder(), find_installed_package=find)
+        self.assertEqual(result["status"], "success")
+
+
 class NoUninstallerTest(unittest.TestCase):
     """ADR-0006：MSIX 模式不提供自訂解除安裝介面，解除安裝由系統接管。"""
 

@@ -1024,6 +1024,26 @@ class TestMsixConfigFields(BuildAllTestBase):
         self.assertEqual(captured.get("install_engine"), "msix")
         self.assertEqual(captured.get("msix_package"), "MyCompany.MyApp.msix")
 
+    def test_the_msix_identity_name_reaches_the_installer_config(self):
+        """稽核 D3：安裝端要能查「同一個 identity 的套件是不是已經裝過」，
+        而 identity 只有打包端知道——它不由 app_name 推導（ADR-0007）。"""
+        signed = os.path.join(self.app_dir, "MyCompany.MyApp.msix")
+        with open(signed, "wb") as f:
+            f.write(b"PK")
+        captured = {}
+
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
+            config_path = os.path.join(self.workspace_dir, "installer_config.json")
+            if os.path.exists(config_path):
+                with open(config_path, encoding="utf-8") as f:
+                    captured.update(json.load(f))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        self._call_build_all(run_side_effect=fake_run, install_engine="msix",
+                             signed_msix=signed,
+                             msix_identity_name="MyCompany.MyApp")
+        self.assertEqual(captured.get("msix_identity_name"), "MyCompany.MyApp")
+
     def test_the_traditional_engine_records_itself_too(self):
         captured = {}
 
