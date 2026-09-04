@@ -14,7 +14,10 @@ CI 只有 `windows-latest`、英文、無互動桌面。這兩台補的是它涵
 | `win1809` | Win10 Enterprise LTSC 2019 · 17763.316 · en-US | MinVersion 部署、側載預設值、缺 WebView2 |
 | `win11` | Win11 25H2 · 26200.8037 · **zh-TW** | 中文介面、新版 Windows 的 MSIX 與憑證 |
 
-密碼由環境變數提供，機器清單定義在 `tools/vms.py`（含各自的變數名稱）。
+密碼由環境變數提供。**機器清單不在這個 repo 裡**，改由 vm-lease 保管
+（`vm-lease machines list` 可以直接看，`vm-lease machines show win11`
+看單一一台的完整內容含所有起始情境）——清單描述的是這台實體電腦的事實，
+跟哪個專案在用無關。清單只記密碼放在哪個環境變數，不記密碼本身。
 
 ### 起始情境（`profile`）
 

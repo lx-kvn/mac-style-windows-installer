@@ -61,21 +61,22 @@ class FakeRun:
         return found
 
 
+# snapshot 與 user 不是欄位，而是由 default 情境推出來的——兩者必須成對，
+# 分開給會出現「拿管理員帳號登入標準使用者快照」這種對不起來的組合。
 PLAIN = vms.Machine(
     key="plain",
     vmx=r"D:\VMware\X\X.vmx",
-    snapshot="Clean",
-    user="Tester",
     password_env="PLAIN_PW",
     encryption_env=None,
     profiles={"default": vms.Profile("default", "Clean", "Tester", "")},
 )
 
-ENCRYPTED = PLAIN._replace(
+ENCRYPTED = vms.Machine(
     key="encrypted",
     vmx=r"D:\VMware\Y\Y.vmx",
     password_env="ENC_PW",
     encryption_env="ENC_KEY",
+    profiles={"default": vms.Profile("default", "Clean", "Tester", "")},
 )
 
 
@@ -103,7 +104,7 @@ class MachineLookupTests(unittest.TestCase):
         with self.assertRaises(vms.VmError) as caught:
             vms.machine("win98")
         message = str(caught.exception)
-        for key in vms.MACHINES:
+        for key in vms.all_machines():
             self.assertIn(key, message)
 
     def test_the_windows_11_machine_declares_an_encryption_variable(self):

@@ -33,6 +33,7 @@ import time
 # 的搬移混進一批與搬移無關的更名。
 try:
     import vm_lease as vm_lock
+    from vm_lease import machines
 except ImportError as _error:  # pragma: no cover - 只在沒安裝時走到
     raise ImportError(
         "找不到 vm_lease。虛擬機的占用協調由獨立的 vm-lease 提供，請先安裝：\n"
@@ -64,66 +65,22 @@ READY_PROBE = r"C:\Windows\System32\whoami.exe"
 REDACTED = "***"
 
 
-Machine = collections.namedtuple(
-    "Machine", "key vmx snapshot user password_env encryption_env profiles")
-
-# 一張快照代表一種起始情境。快照名稱與登入帳號綁在同一個具名元組裡，因為
-# 兩者必須成對——標準使用者的快照裡登入的是 `User` 而不是 `Tester`。分開記
-# 會出現「拿管理員帳號去登入標準使用者快照」這種對不起來的組合，而 vmrun
-# 回報的會是認證失敗，不會指向情境選錯。
-Profile = collections.namedtuple("Profile", "key snapshot user note")
-
-
-def _machine(profiles, **fields):
-    """由 profiles 推出預設的 snapshot／user，避免同一份資料寫兩次。"""
-    default = profiles["default"]
-    return Machine(snapshot=default.snapshot, user=default.user,
-                   profiles=profiles, **fields)
+# 機器清單不定義在這裡，改由 vm-lease 提供（`vm-lease machines list` 可以
+# 直接看）。清單描述的是「這台實體電腦上有哪些虛擬機」，跟哪個專案在用無關
+# ——與占用租約同一種性質。寫在這個 repo 裡的後果已經發生過：FileLocker 必須
+# 知道這個 repo 的路徑才開得了虛擬機。
+#
+# Machine 與 Profile 也一併沿用該模組的定義，不在這裡另立一份同名的類別。
+Machine = machines.Machine
+Profile = machines.Profile
 
 
-MACHINES = {
-    # 驗證 MSIX 的 MinVersion 能否部署、企業版側載預設值、缺少 WebView2
-    # Runtime 時安裝精靈的行為。組建停在 17763.316（不連網路，見 SKILL）。
-    "win1809": _machine(
-        {"default": Profile("default", "Clean", "Tester",
-                            "單一 C 槽，Tester（管理員帳號）已登入")},
-        key="win1809",
-        vmx=r"D:\VMware\Win10-1809-LTSC\Windows10-1809-LTSC.vmx",
-        password_env="WIN1809_VM_PASSWORD",
-        encryption_env=None,
-    ),
-    # 真正的繁體中文 Windows 環境——CI 的 runner 是英文的，中文介面從未
-    # 在真的中文系統上跑過。也用於新版 Windows 上的 MSIX 與憑證行為。
-    #
-    # encryption_env 不是可選的裝飾：Windows 11 要求 TPM 2.0，VMware 以
-    # 虛擬 TPM 滿足它，而帶虛擬 TPM 的機器必須加密存放。沒帶 -vp 時連
-    # 「列出快照」都會被回以 "A password is required for this operation"。
-    #
-    # 四張快照對應四種起始情境。`User` 與 `Tester` 共用同一個密碼，因此
-    # 只有一個 password_env。
-    "win11": _machine(
-        {
-            "default": Profile(
-                "default", "Clean", "Tester",
-                "單一 C 槽，Tester（管理員帳號）已登入"),
-            "two_disks": Profile(
-                "two_disks", "Clean_C:/E:", "Tester",
-                "C 與 E 兩顆磁碟，用於驗證跨磁碟的安裝行為（稽核 F08）"),
-            "standard_user": Profile(
-                "standard_user", "Clean_User", "User",
-                "單一 C 槽，User（標準使用者）已登入。與 interactive=True 的"
-                "未提升權杖不同：這個帳號本身沒有管理員身分，無法經 UAC 提升"),
-            "standard_user_two_disks": Profile(
-                "standard_user_two_disks", "Clean_User_C:/E:", "User",
-                "兩顆磁碟 + 標準使用者，同時涵蓋前兩種情境"),
-        },
-        key="win11",
-        vmx=r"D:\VMware\Windows11-25h2\Windows11-25H2.vmx",
-        password_env="WIN11_VM_PASSWORD",
-        encryption_env="WIN11_VM_ENCRYPTION_PASSWORD",
-    ),
-}
-
+def all_machines():
+    """讀出這台電腦上登記過的虛擬機。清單不存在時的訊息會指出下一步。"""
+    try:
+        return machines.load()
+    except machines.MachineListError as error:
+        raise VmError(str(error)) from None
 
 # VmError 定義在 vm_lease 而不是這裡，因為占用協調的錯誤（機器被別人佔著）
 # 跟操作失敗是同一類事情，呼叫端理應用同一個 except 接住。在這裡再定義一個
@@ -142,12 +99,13 @@ renew = vm_lock.renew
 
 def machine(key):
     """依代號取出機器定義。找不到時把可選的代號一併說出來。"""
+    found = all_machines()
     try:
-        return MACHINES[key]
+        return found[key]
     except KeyError:
         raise VmError(
             "沒有代號為 " + repr(key) + " 的虛擬機。可用的有："
-            + "、".join(sorted(MACHINES))
+            + "、".join(sorted(found))
         )
 
 
@@ -195,8 +153,9 @@ def connect(machine_or_key, environ=None, profile=None, reserve=True,
     用途（測試即是）。
     """
     target = _as_machine(machine_or_key)
-    chosen = _profile(target, profile or "default")
-    target = target._replace(snapshot=chosen.snapshot, user=chosen.user)
+    # with_profile 回傳一份新的機器定義，不動到清單上那一份——同一份清單會被
+    # 多個呼叫端共用。
+    target = target.with_profile(profile or "default")
     environ = os.environ if environ is None else environ
     encryption = None
     if target.encryption_env:
