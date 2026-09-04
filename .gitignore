@@ -17,4 +17,21 @@ release_output/
 test_output/
 
 # Claude Code 本機設定/skill，不進版控
-.claude/
+
+# .claude 只收這個專案自己的 skill。
+#
+# 這些 skill 是專案的一部分：CLAUDE.md 直接指名它們，而 run-test-vm 的
+# REFERENCE.md 收錄了十三項實測出來的陷阱與兩台虛擬機的環境事實——那些
+# 內容在別處沒有第二份，不進版就只存在於單一一台機器上。
+#
+# 其餘一律排除：底下大部分是第三方 skill（見 skills/THIRD_PARTY_SKILLS.md），
+# 收進來會讓版本紀錄充滿與本專案無關的內容；worktrees 是 agent 的工作副本，
+# 實測 194 MB；settings.local.json 與 scheduled_tasks.lock 是本機狀態。
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/run-test-vm/
+!.claude/skills/run-installer-gui/
+!.claude/skills/released/
+!.claude/skills/test-packaging-options/
+!.claude/skills/grill-with-docs/
