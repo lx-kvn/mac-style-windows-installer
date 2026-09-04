@@ -24,7 +24,9 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import _fakes
-from tools import vm_lock, vms
+import vm_lease as vm_lock
+
+from tools import vms
 
 
 class FakeCompleted:

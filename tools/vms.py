@@ -24,7 +24,21 @@ import re
 import subprocess
 import time
 
-from . import vm_lock
+# 占用協調由獨立的 vm-lease 提供，不留在這個 repo 裡面。搬出去的理由是它
+# 不屬於這個專案：同一批虛擬機也被 FileLocker 使用，規則留在其中一個 repo
+# 裡面時，另一邊就得知道這個 repo 的路徑才協調得起來，而規則的說明會落在
+# 沒有進版的地方（`.claude/` 被 .gitignore 排除）。
+#
+# 以 vm_lock 這個名字匯入，是因為這個模組原本就這樣稱呼它；改名會讓這一次
+# 的搬移混進一批與搬移無關的更名。
+try:
+    import vm_lease as vm_lock
+except ImportError as _error:  # pragma: no cover - 只在沒安裝時走到
+    raise ImportError(
+        "找不到 vm_lease。虛擬機的占用協調由獨立的 vm-lease 提供，請先安裝：\n"
+        r"    pip install -e D:\Github\vm-lease_專案\vm-lease" "\n"
+        "（用法見該 repo 的 docs/使用說明書.md）"
+    ) from _error
 
 
 VMRUN = r"C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe"
@@ -111,17 +125,19 @@ MACHINES = {
 }
 
 
-# VmError 定義在 vm_lock 而不是這裡，因為占用協調的錯誤（機器被別人佔著）
+# VmError 定義在 vm_lease 而不是這裡，因為占用協調的錯誤（機器被別人佔著）
 # 跟操作失敗是同一類事情，呼叫端理應用同一個 except 接住。在這裡再定義一個
 # 同名類別會變成兩個不同的例外型別，catch 得到一個、漏掉另一個。
 VmError = vm_lock.VmError
 VmBusy = vm_lock.VmBusy
+LeaseLost = vm_lock.LeaseLost
 
 # 占用協調的公開介面就掛在 vms 底下，呼叫端不必再多 import 一個模組。
 acquire = vm_lock.acquire
 release = vm_lock.release
 holder = vm_lock.holder
 reserved = vm_lock.reserved
+renew = vm_lock.renew
 
 
 def machine(key):
@@ -168,7 +184,7 @@ def connect(machine_or_key, environ=None, profile=None, reserve=True,
     profile 選定起始情境，同時決定用哪張快照與哪個帳號登入（見 Profile）。
     省略時用 "default"。
 
-    這裡順手取得占用租約（見 vm_lock）——這台機器上可能同時有多個 agent
+    這裡順手取得占用租約（見 vm-lease 的 docs/規格文件.md）——這台機器上可能同時有多個 agent
     session 在跑，而 revertToSnapshot 會把另一邊做到一半的工作無聲還原掉。
     協調掛在 connect 而不是掛在 revert：真正要保護的是「先佔住再慢慢做」
     這整段時間，等到送出還原指令那一瞬間才比對已經太晚，另一邊那時已經在
@@ -366,7 +382,7 @@ class Vm:
         多久視為離開」——前者猜不準，訂短了會在工作進行中被別人接手，而那種
         接手不會有任何錯誤訊息。
 
-        比對編號後若發現租約已經不是自己的，`vm_lock.renew` 會拋 `LeaseLost`，
+        比對編號後若發現租約已經不是自己的，`vm_lease.renew` 會拋 `LeaseLost`，
         這裡讓它往上拋，且**在送出指令之前**——另一邊可能正在這台機器上工作。
         """
         if self._lease is None:
