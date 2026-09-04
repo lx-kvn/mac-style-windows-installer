@@ -39,6 +39,7 @@ msix_deploy.py
 spike 結果第七項的附帶發現）。
 """
 import os
+import urllib.parse
 from collections import namedtuple
 
 
@@ -121,7 +122,7 @@ def deploy(package_path, manager=None, manager_factory=None, progress=None):
     if error:
         return Outcome(False, error, None)
     try:
-        uri = _file_uri(package_path)
+        uri = _deployment_uri(package_path)
         operation = manager.add_package_async(uri, [], _deployment_options())
         result = _await_operation(operation, progress)
     except Exception as e:
@@ -173,13 +174,32 @@ def remove(package_full_name, manager=None, manager_factory=None, progress=None)
 
 
 def _file_uri(package_path):
-    """把本機路徑轉成部署介面要的 URI。"""
+    """把本機路徑轉成部署介面要的 URI 字串。
+
+    **一定要做百分比編碼**（稽核 S4）。修正前是字串直接相接：套件路徑來自
+    `sys._MEIPASS`，也就是使用者的 `%TEMP%`，其中含使用者名稱——而 Windows
+    帳號名稱允許 `#`。`#` 在 URI 裡是片段的起點，路徑會從那裡被截斷，部署
+    因此找不到檔案，而錯誤訊息不會提到帳號名稱。`%` 與空白同理。
+
+    `safe="/:"` 保留磁碟機代號的冒號與路徑分隔符。編碼過頭會讓 URI 不再
+    指向同一個檔案，那與不編碼是同一種錯誤的另一半。
+    """
+    path = os.path.abspath(package_path).replace(os.sep, "/")
+    return "file:///" + urllib.parse.quote(path, safe="/:")
+
+
+def _deployment_uri(package_path):
+    """把路徑包成部署介面吃的 `Uri` 物件。
+
+    winrt 不在時直接回傳字串——測試注入替身時不需要真的綁定套件，替身只
+    看得到路徑。字串的組法與編碼在 `_file_uri()`，兩條路徑共用同一份。
+    """
+    uri = _file_uri(package_path)
     try:
         from winrt.windows.foundation import Uri
     except Exception:
-        # 測試注入替身時不需要真的 winrt；此時直接傳字串，替身只看得到路徑。
-        return f"file:///{os.path.abspath(package_path).replace(os.sep, '/')}"
-    return Uri(f"file:///{os.path.abspath(package_path).replace(os.sep, '/')}")
+        return uri
+    return Uri(uri)
 
 
 def _deployment_options():

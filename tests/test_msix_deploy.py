@@ -195,6 +195,38 @@ class RemoveTest(unittest.TestCase):
         self.assertEqual(outcome.error_text, "移除失敗")
 
 
+class FileUriTest(unittest.TestCase):
+    """稽核 S4：套件路徑轉成部署介面要的 URI 時必須做百分比編碼。
+
+    修正前是字串直接相接。套件路徑來自 `sys._MEIPASS`，也就是使用者的
+    `%TEMP%`，其中含使用者名稱——而 Windows 帳號名稱允許 `#`。`#` 在 URI
+    裡是片段的起點，路徑會從那裡被截斷，部署因此找不到檔案，而錯誤訊息
+    不會提到帳號名稱。`%` 與空白同理。
+    """
+
+    def test_a_hash_in_the_path_is_encoded_not_left_to_start_a_fragment(self):
+        uri = msix_deploy._file_uri("C:\\Users\\a#b\\app.msix")
+        self.assertNotIn("#", uri)
+        self.assertIn("%23", uri)
+
+    def test_a_percent_sign_is_encoded(self):
+        uri = msix_deploy._file_uri("C:\\Users\\a%b\\app.msix")
+        self.assertIn("%25", uri)
+
+    def test_a_space_is_encoded(self):
+        uri = msix_deploy._file_uri("C:\\Program Files\\app.msix")
+        self.assertNotIn(" ", uri)
+        self.assertIn("%20", uri)
+
+    def test_the_drive_colon_and_separators_survive(self):
+        """編碼過頭會讓 URI 不再指向同一個檔案。"""
+        uri = msix_deploy._file_uri("C:\\x\\app.msix")
+        self.assertEqual(uri, "file:///C:/x/app.msix")
+
+    def test_it_still_starts_with_the_expected_scheme(self):
+        self.assertTrue(msix_deploy._file_uri("C:\\x\\app.msix").startswith("file:///"))
+
+
 class AvailabilityTest(unittest.TestCase):
     """綁定套件缺席時要講清楚，不是拋一個看不懂的 ImportError。"""
 

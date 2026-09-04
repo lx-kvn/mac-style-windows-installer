@@ -128,6 +128,39 @@ class TestEncryptDecryptRoundTrip(unittest.TestCase):
         install_encryption.decrypt_to_directory(self.encrypted_file, self.dest_dir, "pw")
         self.assertEqual(os.listdir(self.dest_dir), [])
 
+    def test_an_entry_pointing_outside_the_destination_is_refused(self):
+        """稽核 S3：解壓時檢查每一項的落點。
+
+        這份 zip 由 `encrypt_directory()` 以 `os.walk` 產生，實務上不會出現
+        穿越項目，因此現況是安全的。加上檢查的理由是一致性——
+        `sdk_tools._safe_extract_bin()` 對一份已通過 SHA-256 驗證的檔案尚且
+        檢查落點，其註釋寫著「不該由『檔案內容可信』推導出『可以把它寫到它
+        自己指定的任何路徑』」。同一條原則在這裡沒有理由不適用：密文的來源
+        是安裝檔本身，而安裝檔會被傳來傳去。
+        """
+        import io
+        import zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("../escaped.txt", b"nope")
+        install_encryption._write_encrypted(buf.getvalue(), self.encrypted_file, "pw")
+
+        with self.assertRaises(install_encryption.UnsafeArchiveEntry):
+            install_encryption.decrypt_to_directory(self.encrypted_file, self.dest_dir, "pw")
+        self.assertFalse(
+            os.path.exists(os.path.join(os.path.dirname(self.dest_dir), "escaped.txt")))
+
+    def test_an_absolute_entry_is_refused(self):
+        import io
+        import zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("C:/escaped.txt", b"nope")
+        install_encryption._write_encrypted(buf.getvalue(), self.encrypted_file, "pw")
+
+        with self.assertRaises(install_encryption.UnsafeArchiveEntry):
+            install_encryption.decrypt_to_directory(self.encrypted_file, self.dest_dir, "pw")
+
 
 if __name__ == "__main__":
     unittest.main()

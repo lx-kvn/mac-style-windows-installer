@@ -26,12 +26,22 @@ point 匯入，兩者又會被 `gui_config.py`/`builder_cli.py` 匯入，如果�
 因為沒裝 `cryptography` 就連 GUI/CLI 都開不了。
 """
 import io
+import ntpath
 import os
+import shutil
 import zipfile
 
 _SALT_SIZE = 16
 _NONCE_SIZE = 12
 _PBKDF2_ITERATIONS = 600_000  # OWASP 2023 建議的 PBKDF2-HMAC-SHA256 最低迭代次數
+
+
+class UnsafeArchiveEntry(Exception):
+    """解密出來的內容裡有一項會落在解壓目錄之外（見 _extract_within()）。
+
+    與 WrongPasswordError 分開：密碼錯誤是使用者可以自行處理的事，這一項
+    代表這份安裝檔的內容不對，重試沒有意義。
+    """
 
 
 class WrongPasswordError(Exception):
@@ -57,18 +67,27 @@ def _zip_directory(source_dir):
     return buf.getvalue()
 
 
-def encrypt_directory(source_dir, dest_file, password):
-    """把 source_dir 整包壓成 zip、加密，寫到 dest_file。"""
+def _write_encrypted(plaintext, dest_file, password):
+    """把一段位元組加密後寫到 dest_file。
+
+    與 `encrypt_directory()` 分開，是為了讓「壓成 zip」與「加密並落地」兩件
+    事各自可測——後者的正確性（每次都是新的隨機 salt/nonce）不該只能透過
+    一個真的資料夾來驗證。
+    """
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     salt = os.urandom(_SALT_SIZE)
     nonce = os.urandom(_NONCE_SIZE)
     key = _derive_key(password, salt)
-    plaintext = _zip_directory(source_dir)
     ciphertext = AESGCM(key).encrypt(nonce, plaintext, associated_data=None)
     with open(dest_file, "wb") as f:
         f.write(salt)
         f.write(nonce)
         f.write(ciphertext)
+
+
+def encrypt_directory(source_dir, dest_file, password):
+    """把 source_dir 整包壓成 zip、加密，寫到 dest_file。"""
+    _write_encrypted(_zip_directory(source_dir), dest_file, password)
 
 
 def decrypt_to_directory(encrypted_file, dest_dir, password):
@@ -87,4 +106,41 @@ def decrypt_to_directory(encrypted_file, dest_dir, password):
 
     os.makedirs(dest_dir, exist_ok=True)
     with zipfile.ZipFile(io.BytesIO(plaintext)) as zf:
-        zf.extractall(dest_dir)
+        _extract_within(zf, dest_dir)
+
+
+def _extract_within(zip_file, dest_dir):
+    """逐項解壓，並確認每一項的落點都仍在 dest_dir 之內。
+
+    這份 zip 由 encrypt_directory() 以 os.walk 產生，實務上不會出現穿越
+    項目，因此這道檢查在正常路徑上永遠通過。加上它的理由是一致性：
+    sdk_tools._safe_extract_bin() 對一份已通過 SHA-256 驗證的檔案尚且檢查
+    落點，其理由是「不該由『檔案內容可信』推導出『可以把它寫到它自己指定
+    的任何路徑』」——而這裡的密文來源是安裝檔本身，安裝檔會被傳來傳去。
+
+    不使用 zipfile 自己的 extractall()：它會把不合法的項目名稱靜默地改成
+    合法的（去掉開頭的斜線、丟掉 `..`），結果是檔案落在一個與封裝時不同
+    的位置而沒有任何人知道。這裡選擇出聲。
+    """
+    dest_root = os.path.realpath(dest_dir)
+    for info in zip_file.infolist():
+        name = info.filename.replace("\\", "/")
+        # 絕對路徑與帶磁碟機代號的項目要獨立擋下，不能只靠下面的落點比對：
+        # os.path.join() 對 "C:" 這種片段的處理是把它當成磁碟機規格，結果
+        # 是那個項目安靜地落回 dest_dir 底下——沒有穿越，但也沒有出聲，而
+        # 「安靜地改寫成另一個位置」正是這個函式不採用 extractall() 的原因。
+        if name.startswith("/") or ntpath.splitdrive(name)[0]:
+            raise UnsafeArchiveEntry(
+                f"安裝檔內容含有絕對路徑的項目，已中止：{info.filename}"
+            )
+        target = os.path.realpath(os.path.join(dest_root, *name.split("/")))
+        if target != dest_root and not target.startswith(dest_root + os.sep):
+            raise UnsafeArchiveEntry(
+                f"安裝檔內容含有指向解壓目錄之外的項目，已中止：{info.filename}"
+            )
+        if info.is_dir():
+            os.makedirs(target, exist_ok=True)
+            continue
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with zip_file.open(info) as src, open(target, "wb") as dst:
+            shutil.copyfileobj(src, dst)
