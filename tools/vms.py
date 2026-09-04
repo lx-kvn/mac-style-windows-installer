@@ -187,12 +187,15 @@ def connect(machine_or_key, environ=None, profile=None, reserve=True,
         encryption = password_from_env(target.encryption_env, environ)
     # 占用排在密碼解析之後——環境變數沒設就直接失敗，不要先佔住一台機器再
     # 因為設定問題離開，那會留下一筆沒人要用卻擋著別人的租約。
+    lease = None
     if reserve:
-        vm_lock.acquire(target.key, purpose=purpose, minutes=lock_minutes,
-                        lock_dir=lock_dir, environ=environ)
+        lease = vm_lock.acquire(target.key, purpose=purpose,
+                                minutes=lock_minutes, lock_dir=lock_dir,
+                                environ=environ)
     return Vm(target,
               password_from_env(target.password_env, environ),
               encryption_password=encryption,
+              lease=lease, lock_dir=lock_dir, lock_minutes=lock_minutes,
               **kwargs)
 
 
@@ -223,7 +226,9 @@ def write_guest_script(path, text):
 
 class Vm:
     def __init__(self, machine, password, encryption_password=None,
-                 vmrun=VMRUN, run=None, log=None, sleep=None):
+                 vmrun=VMRUN, run=None, log=None, sleep=None,
+                 lease=None, lock_dir=None,
+                 lock_minutes=vm_lock.DEFAULT_MINUTES):
         self.machine = machine
         self.vmrun = vmrun
         self._password = password
@@ -231,6 +236,12 @@ class Vm:
         self._run = run or subprocess.run
         self._log = log
         self._sleep = sleep or time.sleep
+        # 租約與續租所需的一切。lease 為 None 時完全不碰協調機制——那是
+        # reserve=False 的用途（只組指令列、不真的碰機器）。
+        self._lease = lease
+        self._lock_dir = lock_dir
+        self._lock_minutes = lock_minutes
+        self._lease_now = time.time
 
     # ---- 主機端操作（不進客體，因此不帶客體帳密）----
 
@@ -348,7 +359,25 @@ class Vm:
 
     # ---- 內部 ----
 
+    def _renew_lease(self):
+        """每次真的要碰這台機器之前續租一次。
+
+        這使租約時間的意思從「一次工作最多能做多久」變成「最後一次碰它之後
+        多久視為離開」——前者猜不準，訂短了會在工作進行中被別人接手，而那種
+        接手不會有任何錯誤訊息。
+
+        比對編號後若發現租約已經不是自己的，`vm_lock.renew` 會拋 `LeaseLost`，
+        這裡讓它往上拋，且**在送出指令之前**——另一邊可能正在這台機器上工作。
+        """
+        if self._lease is None:
+            return
+        self._lease = vm_lock.renew(
+            self.machine.key, owner=self._lease.owner,
+            token=self._lease.token, minutes=self._lock_minutes,
+            now=self._lease_now(), lock_dir=self._lock_dir)
+
     def _invoke(self, subcommand, args=(), guest=False, check=True):
+        self._renew_lease()
         cmd = [self.vmrun, "-T", "ws"]
         # 加密的機器連還原、開機、列快照都要帶 -vp，不只客體操作。
         if self._encryption_password:

@@ -18,6 +18,7 @@ import io
 import os
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -339,6 +340,61 @@ class ConnectReservationTests(unittest.TestCase):
         self.assertEqual(
             vm_lock.holder(PLAIN.key, lock_dir=self.lock_dir).purpose,
             "驗證 Pipe is broken")
+
+
+class LeaseRenewalTests(unittest.TestCase):
+    """每一次真的碰虛擬機的動作都順手續租。
+
+    租約時間因此不是「一次工作最多能做多久」，而是「最後一次碰它之後多久
+    視為離開」。少了這一段時，租約長度等於單次工作的上限，而那個值猜不準
+    ——訂短了會在工作進行中被別人接手（且不會有任何錯誤訊息），訂長了則在
+    session 當掉之後把機器擋著。
+
+    續租點掛在 _invoke：所有操作最後都經過它，掛在個別方法上會漏掉新增的。
+    """
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.lock_dir = self._dir.name
+        self.addCleanup(self._dir.cleanup)
+
+    def make_vm(self, run=None):
+        return vms.connect(PLAIN, environ={"PLAIN_PW": "guest",
+                                           "VM_LOCK_OWNER": "agent-a"},
+                           lock_dir=self.lock_dir, purpose="測試",
+                           run=run or FakeRun(), vmrun=r"C:mrun.exe")
+
+    def test_an_operation_extends_the_lease(self):
+        vm = self.make_vm()
+        before = vm_lock.holder(PLAIN.key, lock_dir=self.lock_dir).expires_at
+        # 推到過了一半之後——前半段續租不寫檔（省掉的是寫入，不是保護）。
+        vm._lease_now = lambda: time.time() + vm_lock.DEFAULT_MINUTES * 60 * 0.8
+        vm.start()
+        after = vm_lock.holder(PLAIN.key, lock_dir=self.lock_dir,
+                               now=vm._lease_now()).expires_at
+        self.assertGreater(after, before)
+
+    def test_losing_the_lease_stops_the_operation_before_it_runs(self):
+        """被接手之後不能再碰那台機器——另一邊可能正在上面工作。"""
+        run = FakeRun()
+        vm = self.make_vm(run=run)
+        vm_lock.release(PLAIN.key, force=True, lock_dir=self.lock_dir)
+        vm_lock.acquire(PLAIN.key, owner="agent-b", lock_dir=self.lock_dir)
+
+        calls_before = len(run.calls)
+        with self.assertRaises(vm_lock.LeaseLost):
+            vm.revert()
+        self.assertEqual(len(run.calls), calls_before,
+                         "失去租約時不能真的送出指令")
+
+    def test_reserve_false_does_not_renew(self):
+        """只是要組指令列、不會真的碰到機器的用途（測試即是）。"""
+        vm = vms.connect(PLAIN, environ={"PLAIN_PW": "guest",
+                                         "VM_LOCK_OWNER": "agent-a"},
+                         reserve=False, lock_dir=self.lock_dir,
+                         run=FakeRun(), vmrun=r"C:mrun.exe")
+        vm.start()
+        self.assertIsNone(vm_lock.holder(PLAIN.key, lock_dir=self.lock_dir))
 
 
 class WriteGuestScriptTests(unittest.TestCase):
