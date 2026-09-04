@@ -125,6 +125,46 @@ Agent 也可以主動提出範圍授權的請求，但必須把範圍講清楚�
 `PRE-RELEASE_NOTES_v<版本號>.md` 寫進 `docs/releases/`。
 
 
+## 跑測試一律從 repo 根目錄，用 unittest
+
+```bash
+python -m unittest discover -s tests -p "test_*.py"
+```
+
+**不要 `cd tests` 之後再跑**，也不要改用別的執行器。
+
+**Why：** 已經因此誤判過一次。另一個 session 在 `tests/` 底下執行
+`discover -s .`，拿到 4 個 failure 加 1 個 error，回報說「可能是你進行中的
+工作弄壞的」；同一份程式碼從 repo 根目錄跑是 1456 個全綠。成因是部分測試以
+相對路徑尋找 repo 裡的檔案，工作目錄一換就對不到。這種紅燈**指不出真正的
+成因**——它看起來像產品程式碼壞了，而實際上只是跑的位置不對。
+
+另有一個相鄰的陷阱：直接指定模組名（`python -m unittest tests.test_xxx`）時，
+`tests/_fakes.py` 會匯入不到，因為只有 `discover -s tests` 會把那個目錄放進
+搜尋路徑。症狀是 `ModuleNotFoundError: No module named '_fakes'`。
+
+## 換行符與跳脫字元：改檔案時的兩個陷阱
+
+**這個 repo 的換行符是混的**，沒有統一慣例——實測 `docs/adr/` 底下 13 份文件
+裡 6 份是 CRLF、7 份是 LF。**改檔案時要維持該檔案原本的樣子**，不要順手統一：
+整份檔案的換行被翻掉會讓 diff 變成「每一行都改了」，真正的改動就看不見了。
+
+作法是讀進來時記住原本是哪一種，寫回去時還原：
+
+```python
+raw = open(path, "rb").read()
+crlf = b"\r\n" in raw
+text = raw.decode("utf-8").replace("\r\n", "\n")
+...                                   # 改內容
+open(path, "wb").write((text.replace("\n", "\r\n") if crlf else text).encode("utf-8"))
+```
+
+**不要用 shell 的 heredoc 寫含有反斜線或 `\n` 的程式碼。** 這個環境的 heredoc
+會把它們提前展開，即使用了 `<<'EOF'` 這種本該原樣傳遞的寫法也一樣。實測後果是
+字串裡多出真正的換行字元與垂直定位字元，產生 `unterminated string literal`，
+而錯誤訊息指向的行數與真正的成因無關。改檔案時把修改腳本先寫成檔案再執行，
+避開 shell 那一層。
+
 ## CI 驗不到的事情，本機有兩台虛擬機可以驗
 
 GitHub Actions 只有一台英文的 `windows-latest`、沒有互動桌面，而且**每次都是
