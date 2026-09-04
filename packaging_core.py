@@ -197,6 +197,11 @@ SHARED_DEEP_MODULES = [
     # 因此這支不能只存在於打包端。messages.py 是它的相依——那幾則對話框在
     # 視窗建立之前顯示，用不到 ui/*.html 的翻譯表。
     "webview2_runtime.py", "messages.py",
+    # webview2_runtime 的相依：載入器下載回來之後、執行之前要驗數位簽章
+    # （稽核 S2）。authenticode 用 cert_subject 把憑證主體轉成字串，因此
+    # 兩支一起帶。cert_subject 對 cryptography 的匯入是延遲的，安裝檔不會
+    # 因此綁上那個相依。
+    "authenticode.py", "cert_subject.py",
 ]
 
 # `ui/` 底下「使用者可能自己換掉」的靜態資源。ensure_workspace_files() 只有

@@ -282,26 +282,111 @@ class DialogTests(unittest.TestCase):
 
 
 class AcquireTests(unittest.TestCase):
-    def test_downloads_then_runs(self):
+    def test_downloads_verifies_then_runs(self):
+        """順序有意義：驗簽章在下載之後、執行之前（稽核 S2）。"""
         order = []
 
         def fake_download(url, dest, **kwargs):
             order.append("download")
             return True
 
+        def fake_verify(path):
+            order.append("verify")
+            return True, ""
+
         def fake_run(path, **kwargs):
             order.append("run")
             return True
 
         self.assertTrue(webview2_runtime.acquire(
-            download_fn=fake_download, run_fn=fake_run))
-        self.assertEqual(order, ["download", "run"])
+            download_fn=fake_download, run_fn=fake_run, verify_fn=fake_verify))
+        self.assertEqual(order, ["download", "verify", "run"])
 
     def test_a_failed_download_does_not_run_anything(self):
         ran = []
         self.assertFalse(webview2_runtime.acquire(
             download_fn=lambda url, dest, **k: False,
             run_fn=lambda path, **k: ran.append(True)))
+        self.assertEqual(ran, [])
+
+
+class SignatureGateTests(unittest.TestCase):
+    """稽核 S2：下載回來的載入器，執行之前先驗數位簽章。
+
+    這個檔案是在**終端使用者的機器上**被執行的，而安裝檔常常是已提升權限的。
+    `sdk_tools.py` 對「下載回來會被執行的東西」訂的判準（釘死版本加 SHA-256）
+    在這裡不適用——Evergreen 載入器是內容會變動的永久連結，釘不住雜湊——但
+    「要驗」這件事本身沒有因此改變，可以驗的是簽章。
+    """
+
+    def _download(self, path_seen=None):
+        def fake_download(url, dest, **kwargs):
+            with open(dest, "wb") as f:
+                f.write(b"MZ")
+            if path_seen is not None:
+                path_seen.append(dest)
+            return True
+        return fake_download
+
+    def test_an_unverified_file_is_never_executed(self):
+        ran = []
+        ok = webview2_runtime.acquire(
+            download_fn=self._download(),
+            run_fn=lambda path, **k: ran.append(True) or True,
+            verify_fn=lambda path: (False, "簽章者不是預期的組織"),
+        )
+        self.assertFalse(ok)
+        self.assertEqual(ran, [])
+
+    def test_an_unverified_file_is_deleted(self):
+        """留著一個沒通過驗證的執行檔，下一次就可能被當成「已經下載過」。"""
+        seen = []
+        webview2_runtime.acquire(
+            download_fn=self._download(seen),
+            run_fn=lambda path, **k: True,
+            verify_fn=lambda path: (False, "沒有簽章"),
+        )
+        self.assertTrue(seen)
+        self.assertFalse(os.path.exists(seen[0]))
+
+    def test_a_verified_file_runs(self):
+        ran = []
+        ok = webview2_runtime.acquire(
+            download_fn=self._download(),
+            run_fn=lambda path, **k: ran.append(True) or True,
+            verify_fn=lambda path: (True, "數位簽章有效。"),
+        )
+        self.assertTrue(ok)
+        self.assertEqual(ran, [True])
+
+    def test_the_verification_receives_the_downloaded_file(self):
+        seen = []
+        verified = []
+        webview2_runtime.acquire(
+            download_fn=self._download(seen),
+            run_fn=lambda path, **k: True,
+            verify_fn=lambda path: (verified.append(path), (True, ""))[1],
+        )
+        self.assertEqual(verified, seen)
+
+    def test_the_expected_signer_is_microsoft(self):
+        """只驗「簽章有效」的話，任何一張有效憑證簽出來的檔案都會通過，而
+        遭竊的程式碼簽章憑證是真實存在的東西。"""
+        self.assertEqual(webview2_runtime.BOOTSTRAPPER_ORGANIZATION,
+                         "Microsoft Corporation")
+
+    def test_the_default_verification_is_the_real_one(self):
+        """沒有注入替身時走的必須是真的驗證，不是一個永遠回傳 True 的預設。
+
+        用一個假的兩位元組檔案當樣本：它不可能有有效的簽章，因此「沒有被
+        執行」就代表預設的驗證真的在把關。
+        """
+        ran = []
+        ok = webview2_runtime.acquire(
+            download_fn=self._download(),
+            run_fn=lambda path, **k: ran.append(True) or True,
+        )
+        self.assertFalse(ok, "假的兩位元組檔案不該通過驗證")
         self.assertEqual(ran, [])
 
 

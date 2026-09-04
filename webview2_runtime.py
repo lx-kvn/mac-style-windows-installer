@@ -57,6 +57,11 @@ _ABSENT_VERSION = "0.0.0.0"
 # 執行階段；**不傳 /silent**，讓它顯示微軟自己的進度介面——安裝端沒有可用的
 # 畫面可以自行顯示進度（HTML 打不開、Tkinter 不在安裝檔裡）。
 BOOTSTRAPPER_URL = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+# 載入器的簽章者組織。執行之前要驗到這個名字——只驗「簽章有效」的話，任何
+# 一張有效憑證簽出來的檔案都會通過，而遭竊的程式碼簽章憑證是真實存在的東西
+# （見 authenticode.py）。實測本機已安裝的 msedgewebview2.exe，其簽章者主體
+# 為 `CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US`。
+BOOTSTRAPPER_ORGANIZATION = "Microsoft Corporation"
 DOWNLOAD_PAGE_URL = "https://developer.microsoft.com/microsoft-edge/webview2/"
 
 INSTALLED = "installed"
@@ -275,18 +280,41 @@ def open_download_page(opener=None, url=None):
         pass
 
 
-def acquire(download_fn=None, run_fn=None, workdir=None):
-    """下載並執行載入器。成功回傳 True。
+def verify_bootstrapper(path):
+    """驗載入器的數位簽章，回傳 `(是否通過, 說明)`。
+
+    延遲匯入 `authenticode`：它是純 ctypes、沒有第三方相依，但這個模組
+    在三個進入點都會被匯入，而只有安裝端這一條路會真的下載東西。
+    """
+    import authenticode
+    return authenticode.verify_file(path, BOOTSTRAPPER_ORGANIZATION)
+
+
+def acquire(download_fn=None, run_fn=None, workdir=None, verify_fn=None):
+    """下載、驗簽章、執行載入器。成功回傳 True。
 
     下載失敗時不執行任何東西——半截或不存在的檔案沒有執行的意義，而
     download() 失敗時已經把殘檔刪掉了。
+
+    **驗簽章不是可選的步驟**（稽核 S2）。這個檔案是在終端使用者的機器上被
+    執行的，而安裝檔常常是已提升權限的；Content-Length 比對防的是「下載被
+    截斷」，不是「下載回來的是不是那個東西」。理由與兩道關卡的細節見
+    `authenticode.py`。
+
+    沒通過就刪掉：留著一個沒通過驗證的執行檔，下一次就可能被當成「已經下載
+    過」而直接執行——這與 `download()` 刪除半截檔案是同一個理由。
     """
     import tempfile
     download_fn = download_fn or download
     run_fn = run_fn or run_bootstrapper
+    verify_fn = verify_fn or verify_bootstrapper
     folder = workdir or tempfile.mkdtemp(prefix="mswi_webview2_")
     target = os.path.join(folder, "MicrosoftEdgeWebview2Setup.exe")
     if not download_fn(BOOTSTRAPPER_URL, target):
+        return False
+    trusted, _reason = verify_fn(target)
+    if not trusted:
+        _remove(target)
         return False
     return run_fn(target)
 
