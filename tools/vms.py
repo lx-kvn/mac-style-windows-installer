@@ -24,6 +24,8 @@ import re
 import subprocess
 import time
 
+from . import vm_lock
+
 
 VMRUN = r"C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe"
 VMWARE_EXE = r"C:\Program Files (x86)\VMware\VMware Workstation\vmware.exe"
@@ -109,8 +111,17 @@ MACHINES = {
 }
 
 
-class VmError(Exception):
-    """虛擬機操作失敗。訊息一律不含密碼。"""
+# VmError 定義在 vm_lock 而不是這裡，因為占用協調的錯誤（機器被別人佔著）
+# 跟操作失敗是同一類事情，呼叫端理應用同一個 except 接住。在這裡再定義一個
+# 同名類別會變成兩個不同的例外型別，catch 得到一個、漏掉另一個。
+VmError = vm_lock.VmError
+VmBusy = vm_lock.VmBusy
+
+# 占用協調的公開介面就掛在 vms 底下，呼叫端不必再多 import 一個模組。
+acquire = vm_lock.acquire
+release = vm_lock.release
+holder = vm_lock.holder
+reserved = vm_lock.reserved
 
 
 def machine(key):
@@ -146,7 +157,9 @@ def password_from_env(name, environ=None):
     return value
 
 
-def connect(machine_or_key, environ=None, profile=None, **kwargs):
+def connect(machine_or_key, environ=None, profile=None, reserve=True,
+            purpose="", lock_minutes=vm_lock.DEFAULT_MINUTES, lock_dir=None,
+            **kwargs):
     """依機器定義組出一個 Vm，密碼從它宣告的環境變數讀取。
 
     未宣告 encryption_env 的機器不會去讀那個變數——未加密的機器不該因為
@@ -154,6 +167,16 @@ def connect(machine_or_key, environ=None, profile=None, **kwargs):
 
     profile 選定起始情境，同時決定用哪張快照與哪個帳號登入（見 Profile）。
     省略時用 "default"。
+
+    這裡順手取得占用租約（見 vm_lock）——這台機器上可能同時有多個 agent
+    session 在跑，而 revertToSnapshot 會把另一邊做到一半的工作無聲還原掉。
+    協調掛在 connect 而不是掛在 revert：真正要保護的是「先佔住再慢慢做」
+    這整段時間，等到送出還原指令那一瞬間才比對已經太晚，另一邊那時已經在
+    這台機器上做了半小時的事。`purpose` 會寫進租約，另一邊被擋下來時看得到
+    是誰、為了什麼佔著。用完請呼叫 `vms.release(機器代號)` 交回去。
+
+    `reserve=False` 明確跳過協調，給「只是要組指令列、不會真的碰到機器」的
+    用途（測試即是）。
     """
     target = _as_machine(machine_or_key)
     chosen = _profile(target, profile or "default")
@@ -162,6 +185,11 @@ def connect(machine_or_key, environ=None, profile=None, **kwargs):
     encryption = None
     if target.encryption_env:
         encryption = password_from_env(target.encryption_env, environ)
+    # 占用排在密碼解析之後——環境變數沒設就直接失敗，不要先佔住一台機器再
+    # 因為設定問題離開，那會留下一筆沒人要用卻擋著別人的租約。
+    if reserve:
+        vm_lock.acquire(target.key, purpose=purpose, minutes=lock_minutes,
+                        lock_dir=lock_dir, environ=environ)
     return Vm(target,
               password_from_env(target.password_env, environ),
               encryption_password=encryption,

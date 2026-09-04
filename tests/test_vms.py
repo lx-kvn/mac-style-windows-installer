@@ -23,7 +23,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import _fakes
-from tools import vms
+from tools import vm_lock, vms
 
 
 class FakeCompleted:
@@ -145,6 +145,7 @@ class ProfileTests(unittest.TestCase):
         vm = vms.connect("win11", profile="standard_user_two_disks",
                          environ={"WIN11_VM_PASSWORD": "p",
                                   "WIN11_VM_ENCRYPTION_PASSWORD": "k"},
+                         reserve=False,
                          run=run, vmrun=r"C:\vmware\vmrun.exe")
         vm.revert()
         self.assertIn("Clean_User_C:/E:", run.calls[0])
@@ -156,7 +157,8 @@ class ProfileTests(unittest.TestCase):
         with self.assertRaises(vms.VmError) as caught:
             vms.connect("win11", profile="nope",
                         environ={"WIN11_VM_PASSWORD": "p",
-                                 "WIN11_VM_ENCRYPTION_PASSWORD": "k"})
+                                 "WIN11_VM_ENCRYPTION_PASSWORD": "k"},
+                        reserve=False)
         message = str(caught.exception)
         self.assertIn("standard_user", message)
         self.assertIn("nope", message)
@@ -269,6 +271,7 @@ class ConnectTests(unittest.TestCase):
     def test_supplies_both_passwords_for_an_encrypted_machine(self):
         run = FakeRun()
         vm = vms.connect(ENCRYPTED, environ={"ENC_PW": "guest", "ENC_KEY": "disk"},
+                         reserve=False,
                          run=run, vmrun=r"C:\vmware\vmrun.exe")
         vm.revert()
         cmd = run.calls[0]
@@ -279,6 +282,7 @@ class ConnectTests(unittest.TestCase):
         """未加密的機器不該因為少設一個不相干的環境變數而無法使用。"""
         run = FakeRun()
         vm = vms.connect(PLAIN, environ={"PLAIN_PW": "guest"},
+                         reserve=False,
                          run=run, vmrun=r"C:\vmware\vmrun.exe")
         vm.revert()
         self.assertNotIn("-vp", run.calls[0])
@@ -286,8 +290,55 @@ class ConnectTests(unittest.TestCase):
     def test_accepts_a_machine_key_as_well_as_a_machine(self):
         run = FakeRun()
         vms.connect("win1809", environ={"WIN1809_VM_PASSWORD": "guest"},
+                    reserve=False,
                     run=run, vmrun=r"C:\vmware\vmrun.exe").revert()
         self.assertIn(vms.machine("win1809").vmx, run.calls[0])
+
+
+class ConnectReservationTests(unittest.TestCase):
+    """connect 是所有人共同的入口，占用協調就掛在這裡——掛在個別的破壞性
+    指令上，會漏掉「先佔住再慢慢做」這個真正需要保護的用法（另一邊的還原
+    要在我們開始之前就被擋下來，不是在我們送出還原指令的那一瞬間才比對）。
+    """
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.lock_dir = self._dir.name
+        self.addCleanup(self._dir.cleanup)
+
+    def test_connect_reserves_the_machine_by_default(self):
+        vms.connect(PLAIN, environ={"PLAIN_PW": "guest",
+                                    "VM_LOCK_OWNER": "agent-a"},
+                    lock_dir=self.lock_dir,
+                    run=FakeRun(), vmrun=r"C:mwaremrun.exe")
+        self.assertEqual(
+            vm_lock.holder(PLAIN.key, lock_dir=self.lock_dir).owner, "agent-a")
+
+    def test_connect_is_refused_while_another_owner_holds_it(self):
+        vm_lock.acquire(PLAIN.key, owner="agent-a", purpose="裝 MSIX",
+                        lock_dir=self.lock_dir)
+        with self.assertRaises(vms.VmBusy) as caught:
+            vms.connect(PLAIN, environ={"PLAIN_PW": "guest",
+                                        "VM_LOCK_OWNER": "agent-b"},
+                        lock_dir=self.lock_dir,
+                        run=FakeRun(), vmrun=r"C:mwaremrun.exe")
+        self.assertIn("agent-a", str(caught.exception))
+
+    def test_reserve_false_leaves_the_lock_alone(self):
+        vms.connect(PLAIN, environ={"PLAIN_PW": "guest",
+                                    "VM_LOCK_OWNER": "agent-a"},
+                    reserve=False, lock_dir=self.lock_dir,
+                    run=FakeRun(), vmrun=r"C:mwaremrun.exe")
+        self.assertIsNone(vm_lock.holder(PLAIN.key, lock_dir=self.lock_dir))
+
+    def test_purpose_reaches_the_lock_so_the_other_side_sees_why(self):
+        vms.connect(PLAIN, environ={"PLAIN_PW": "guest",
+                                    "VM_LOCK_OWNER": "agent-a"},
+                    purpose="驗證 Pipe is broken", lock_dir=self.lock_dir,
+                    run=FakeRun(), vmrun=r"C:mwaremrun.exe")
+        self.assertEqual(
+            vm_lock.holder(PLAIN.key, lock_dir=self.lock_dir).purpose,
+            "驗證 Pipe is broken")
 
 
 class WriteGuestScriptTests(unittest.TestCase):
