@@ -48,6 +48,7 @@ import urllib.request
 from datetime import datetime
 
 import dependency_defs
+import file_extension
 import version_info
 import install_encryption
 import sdk_tools
@@ -433,7 +434,7 @@ def build_all(
     # 每個副檔名各自的專屬圖示（見 doc_icons 參數）用固定命名規則
     # doc_icon_<副檔名去掉點>.ico 內嵌，跟共用的 doc_icon.ico 是分開的檔案，
     # 彼此不會互相覆蓋，installer_core.py 也是靠這個固定檔名去複製/引用。
-    doc_icons_embedded = {ext: f"doc_icon_{ext.lstrip('.')}.ico" for ext in doc_icons}
+    doc_icons_embedded = {ext: file_extension.traditional_icon_name(ext) for ext in doc_icons}
     # pre/post-install 腳本比照 doc_icon 的做法：固定命名內嵌，安裝端只認這個
     # 固定檔名，不需要知道開發者原本選的檔案叫什麼。保留原始副檔名（.bat/.exe/
     # .ps1 等），因為執行方式（是不是要透過 cmd /c 或 powershell）由副檔名

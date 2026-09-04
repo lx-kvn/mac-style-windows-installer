@@ -25,6 +25,7 @@ import subprocess
 import packaging_settings
 import dependency_defs
 import cert_subject
+import file_extension
 import install_engine
 import messages
 import msix_settings
@@ -179,6 +180,9 @@ def _refused(key, lang=messages.DEFAULT_LANGUAGE, /, **params):
 ENTRY_SCRIPTS = ["installer_core.py", "uninstall.py"]
 SHARED_DEEP_MODULES = [
     "window_drag.py", "disk_space.py", "file_assoc.py", "lang_detect.py",
+    # file_assoc.py 的相依：副檔名的規則（正規化、驗證、各處要用的
+    # 名字）集中在這裡，ProgID 由它推導（見稽核 D2）。
+    "file_extension.py",
     "restart_manager.py", "dependency_defs.py", "install_scope.py",
     "self_delete.py", "system_entries.py", "explorer_lock_release.py",
     "windows_service.py", "scheduled_task.py", "restore_point.py", "bits_download.py",
@@ -855,16 +859,15 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     except Exception as e:
         return None, _t("app_dir.read_failed", lang, reason=e)
 
-    # 解析副檔名清單："txt, .abc,xyz" -> [".txt", ".abc", ".xyz"]
-    file_associations = []
-    if file_assoc_raw:
-        for part in file_assoc_raw.replace("，", ",").split(","):
-            ext = part.strip()
-            if not ext:
-                continue
-            if not ext.startswith("."):
-                ext = "." + ext
-            file_associations.append(ext.lower())
+    # 解析副檔名清單："txt, .abc,xyz" -> [".txt", ".abc", ".xyz"]。
+    # 正規化與驗證都在 file_extension.py：這個字串會成為登錄表的 ProgID、
+    # 套件清單的關聯群組名，以及兩種引擎各自的圖示檔名，規則散在四處各自
+    # 實作正是稽核 D2 的成因。
+    file_associations, file_assoc_error = file_extension.parse_list(file_assoc_raw, lang)
+    if file_assoc_error:
+        # 訊息已經是成品（file_extension 有自己的訊息表），只補前綴，
+        # 比照上方讀憑證失敗那一條的作法。
+        return None, _t("prefix.invalid", lang) + file_assoc_error
 
     # 每個副檔名各自的專屬文件圖示（選填）：{副檔名: 圖示絕對路徑}，
     # 不在這裡指定的副檔名會 fallback 用共用的 doc_icon，兩者都沒有就沿用
@@ -873,11 +876,9 @@ def validate_and_build_pack_data(data, app_dir, png_path, ico_path, doc_icon_pat
     doc_icons_raw = data.get("doc_icons", {}) or {}
     doc_icons = {}
     for raw_ext, icon_path in doc_icons_raw.items():
-        ext = str(raw_ext).strip().lower()
+        ext = file_extension.normalize(raw_ext)
         if not ext:
             continue
-        if not ext.startswith("."):
-            ext = "." + ext
         icon_path = str(icon_path or "").strip()
         if not icon_path:
             continue

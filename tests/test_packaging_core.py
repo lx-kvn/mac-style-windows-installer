@@ -504,6 +504,43 @@ class TestValidateAndBuildPackData(PackDataValidationTestBase):
         self.assertIsNone(error)
         self.assertEqual(pack_data["file_associations"], [".txt", ".abc", ".xyz"])
 
+    def test_an_extension_with_a_space_is_rejected(self):
+        """稽核 D2：修正前只做「補點、轉小寫」，字元集完全沒有檢查，這種
+        輸入會一路通到 makeappx，錯誤訊息不指向副檔名欄位。"""
+        _, error = self._validate(
+            self._base_data(need_file_assoc=True, file_associations="txt, my ext")
+        )
+        self.assertIsNotNone(error)
+        self.assertIn("my ext", error)
+
+    def test_an_extension_that_escapes_the_staging_directory_is_rejected(self):
+        """這個字串會成為套件目錄裡的檔名，穿越出去就寫到組裝目錄之外。"""
+        _, error = self._validate(
+            self._base_data(need_file_assoc=True, file_associations="..\\..\\evil")
+        )
+        self.assertIsNotNone(error)
+
+    def test_a_non_ascii_extension_is_rejected(self):
+        _, error = self._validate(
+            self._base_data(need_file_assoc=True, file_associations=".中文")
+        )
+        self.assertIsNotNone(error)
+
+    def test_an_over_long_extension_is_rejected(self):
+        """MSIX 套件清單對關聯群組名的長度上限是 64 個字元。"""
+        _, error = self._validate(
+            self._base_data(need_file_assoc=True, file_associations="." + "x" * 65)
+        )
+        self.assertIsNotNone(error)
+
+    def test_a_duplicated_extension_collapses_to_one(self):
+        """同一個副檔名出現兩次會產生兩個同名的關聯群組，使套件清單無效。"""
+        pack_data, error = self._validate(
+            self._base_data(need_file_assoc=True, file_associations="txt, .TXT, abc")
+        )
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["file_associations"], [".txt", ".abc"])
+
     def test_does_not_have_workspace_dir_key(self):
         """workspace_dir 是呼叫端呼叫 ensure_workspace_files() 之後才加進去的
         （那一步有真的複製檔案的副作用，刻意留在純函式外面），這裡確認沒有洩漏進來。"""

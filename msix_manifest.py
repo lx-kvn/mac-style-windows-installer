@@ -44,6 +44,8 @@ msix_manifest.py
 """
 import os
 
+import file_extension
+
 # 應用程式識別碼。固定值，不由任何使用者可改的欄位推導——變更它會使使用者
 # 釘選於工作列的捷徑失效（第五輪決議第四項）。第二個供「命令列工具與主程式
 # 不是同一支」時使用。
@@ -65,11 +67,12 @@ SHARED_ASSOCIATION_LOGO = "doc.png"
 def association_logo_name(extension):
     """某個副檔名專屬的關聯圖示在套件內的檔名。
 
-    比照 `builder.py` 對 `doc_icon_<副檔名>.ico` 的既有慣例：每個副檔名各自
-    複製一份固定命名的圖示，避免不同副檔名指向同名不同內容的來源檔案時互相
-    覆蓋。
+    實作在 `file_extension.msix_logo_name()`——這個名字與傳統引擎的
+    `doc_icon_<副檔名>.ico`、登錄表的 ProgID 都是從同一個副檔名推導出來的，
+    四處各自實作正是稽核 D2 的成因（四處都沒有驗證，帶 `..\\` 的副檔名會讓
+    圖示被複製到組裝目錄之外）。
     """
-    return f"doc_{association_group_name(extension)}.png"
+    return file_extension.msix_logo_name(extension)
 
 
 DEFAULT_MIN_WINDOWS_VERSION = "10.0.17763.0"
@@ -160,11 +163,16 @@ def escape(value):
 def association_group_name(extension):
     """副檔名 -> 關聯群組名稱。
 
-    格式限制為 1 到 64 字元、全小寫、無空白。這裡只做去點與轉小寫，字元集
-    的檢查留在驗證階段——在這裡靜默地把不合法的字元換掉，會產生一個與使用者
-    輸入對不起來的群組名稱。
+    格式限制為 1 到 64 字元、全小寫、無空白（Microsoft 對
+    `uap:FileTypeAssociation` 的 `Name` 屬性的規定）。實作與規則都在
+    `file_extension.msix_group()`。
+
+    修正前這裡只做去點與轉小寫，註釋寫著「字元集的檢查留在驗證階段」——而
+    專案裡不存在那個階段（稽核 D2）。不合法的值一路通到 `makeappx`，錯誤
+    訊息不指向副檔名欄位。現在推導本身會擋下未通過驗證的值，不靜默替換：
+    替換會產生一個與使用者輸入對不起來的群組名稱。
     """
-    return str(extension).lstrip(".").lower()
+    return file_extension.msix_group(extension)
 
 
 def _quad_version(version):

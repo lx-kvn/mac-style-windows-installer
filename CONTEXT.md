@@ -10,6 +10,7 @@
 - [檔案關聯（File Association）](#檔案關聯file-association)
 - [使用者關聯覆寫（User Association Override）](#使用者關聯覆寫user-association-override)
 - [registry seam](#registry-seam)
+- [副檔名（file_extension.py）](#副檔名file_extensionpy)
 - [拖曳安裝（Drag-to-Install）與視窗拖曳（Window Drag）](#拖曳安裝drag-to-install與視窗拖曳window-drag)
   - [ui/ 底下的共用前端檔案](#ui-底下的共用前端檔案)
 - [深模組拆分（installer_core.py 瘦身）](#深模組拆分installer_corepy-瘦身)
@@ -69,6 +70,30 @@ Windows 針對「使用者選過這個副檔名要用什麼開」記住的三層
 真正的 `winreg` 模組；測試用 `tests/_fakes.py` 的 `FakeWinReg`（介面跟 `winreg`
 一致）當這個參數傳進去，不需要 monkeypatch `sys.modules` 或模組屬性。這是這個
 專案裡「登錄表」這個概念唯一的注入點。
+
+## 副檔名（file_extension.py）
+
+「副檔名」在這個專案裡不只是一段字串——它會被推導成四個不同的名字，分別給
+四個地方使用：
+
+| 推導出來的名字 | 用在哪裡 | 形式 |
+| --- | --- | --- |
+| **ProgID** | 傳統引擎的登錄表關聯 | `AppFile<副檔名去掉所有句點>` |
+| **傳統引擎的內嵌圖示檔名** | 打包端內嵌、安裝端取用 | `doc_icon_<副檔名去掉開頭的點>.ico` |
+| **關聯群組名** | MSIX 套件清單的 `uap:FileTypeAssociation@Name` | 副檔名去掉開頭的點 |
+| **MSIX 套件內的圖示檔名** | 套件目錄裡的實體檔案 | `doc_<關聯群組名>.png` |
+
+四個推導與「什麼樣的副檔名算合法」這條規則都收斂在 `file_extension.py`。
+`file_assoc.prog_id()` 與 `msix_manifest.association_group_name()`／
+`association_logo_name()` 保留原名，實作轉呼叫這裡——那兩個名字是 CONTEXT.md
+與 ADR 記載過的對齊點。
+
+**合法性的兩層來源**：長度上限 64、全小寫、不含空白，是 Microsoft 對關聯群組名
+的規定；字元集限於英文字母、數字、句點、連字號、底線，是本工具自訂的限制
+（官方文件未載明字元集，而這個字串同時會成為檔名，放行路徑分隔符等於讓設定值
+決定檔案寫到哪裡）。
+
+這個模組的由來見 `docs/investigations/MSIX稽核與缺陷修正.md` 的 D2。
 
 ## 拖曳安裝（Drag-to-Install）與視窗拖曳（Window Drag）
 

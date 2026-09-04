@@ -17,6 +17,12 @@
   - [方案評估](#方案評估)
   - [實際做了什麼](#實際做了什麼)
   - [驗收](#驗收)
+- [D2 副檔名的字元從未被驗證](#d2-副檔名的字元從未被驗證)
+  - [重現方式](#重現方式-1)
+  - [機制](#機制-1)
+  - [方案評估](#方案評估-1)
+  - [實際做了什麼](#實際做了什麼-1)
+  - [驗收](#驗收-1)
 - [已知限制](#已知限制)
 - [待辦清單](#待辦清單)
 - [已完成之待辦](#已完成之待辦)
@@ -124,6 +130,96 @@ else:
 
 全套測試 `1455` 項通過（稽核基準為 `1439`）。
 
+## D2 副檔名的字元從未被驗證
+
+嚴重程度：中。失敗發生在流程尾端，錯誤訊息不指向副檔名欄位；其中一種輸入會
+使檔案被寫到組裝目錄之外。
+
+### 重現方式
+
+於檔案關聯欄位填入以下任一內容，皆通過打包階段的驗證：
+
+| 輸入 | 推導出來的關聯群組名／檔名 | 後果 |
+| --- | --- | --- |
+| `.my ext` | `my ext` | 含空白，不符合 `Name` 屬性的規定 |
+| `.中文` | `中文` | 非 ASCII |
+| `.a"b` | `a"b` | 引號 |
+| `.` + 80 個字元 | 80 個字元 | 超過 64 字元上限 |
+| `..\..\evil` | 圖示檔名 `doc_\..\evil.png` | 圖示被複製到組裝目錄之外 |
+
+前四種於 `makeappx` 階段失敗，錯誤訊息不指向副檔名欄位。第五種不報錯。
+
+以上為實際呼叫 `msix_manifest.association_group_name()` 與
+`association_logo_name()` 取得的結果，非推論。
+
+### 機制
+
+副檔名這個概念的規則散在四個地方各自實作：
+
+1. `packaging_core` 解析使用者輸入的清單——只做「補上開頭的點、轉小寫」
+2. `file_assoc.prog_id()` 推 ProgID
+3. `builder.py` 推傳統引擎的內嵌圖示檔名 `doc_icon_<副檔名>.ico`
+4. `msix_manifest.association_group_name()`／`association_logo_name()` 推套件
+   清單的關聯群組名與套件內的圖示檔名
+
+四處皆未檢查字元集。`association_group_name()` 的註釋寫著「字元集的檢查留在
+驗證階段」——專案裡不存在那個階段。此為「規則沒有一個歸屬處」的典型後果：
+每一處都假定驗證由別處負責。
+
+路徑穿越的成立條件為第 3、4 點——推導出來的字串被直接用作檔名
+（`shutil.copy(source, os.path.join(staging_dir, name))`）。輸入來源是打包者
+自己的設定檔而非終端使用者，因此不構成可遠端利用的漏洞；列為缺陷的理由是
+`sdk_tools._safe_extract_bin()` 對一份已通過 SHA-256 驗證的檔案尚且檢查解壓
+落點，同一條原則在此處未被套用。
+
+### 方案評估
+
+**方案一（採用）：抽出 `file_extension.py`，規則與四個推導集中於此。**
+推導函式一律先驗證再產出——推導是最後一道防線，驗證被繞過時不該安靜地產出
+一個會被當成路徑使用的字串。
+
+**方案二（不採用）：只在 `packaging_core` 加一段字元檢查。** 這修得了本次
+的五種輸入，但四個推導點仍各自實作、仍無歸屬，下一個新增的推導點會重複同樣
+的假定。D2 的成因不是漏了一段檢查，是沒有一個地方負責這件事。
+
+**方案三（不採用）：於推導時靜默替換不合法的字元。** 會產生一個與使用者輸入
+對不起來的群組名稱，且他不會知道。
+
+**字元集的界定。** 長度上限 64、全小寫、不含空白，取自 Microsoft 對
+`uap:FileTypeAssociation` 的 `Name` 屬性的規定（原文為「A string between 1
+and 64 characters in length」與「must be all lower case characters with no
+spaces」）。字元集限於英文字母、數字、句點、連字號、底線，則是本工具自訂的
+限制，不宣稱為格式的規定：官方文件未載明 `Name` 與 `uap:FileType` 的字元集，
+依推測放寬等同作出無人驗證的承諾；且該字串同時會成為檔名。實際會用到的形式
+（`.txt`、`.tar.gz`、`.7z`、`.my-type`）皆在此集合內。
+
+### 實際做了什麼
+
+1. 新增 `file_extension.py`：`normalize()`（形狀）、`validate()`（判斷）、
+   `parse_list()`（使用者輸入的整串解析），以及四個推導 `prog_id()`、
+   `traditional_icon_name()`、`msix_group()`、`msix_logo_name()`。推導函式
+   對未通過驗證的值拋 `InvalidExtension`。
+2. `packaging_core`：清單解析改呼叫 `parse_list()`，錯誤加上既有的「欄位驗證
+   失敗」前綴後回傳。`doc_icons` 的鍵改用 `normalize()`。
+3. `file_assoc.prog_id()`、`msix_manifest.association_group_name()`／
+   `association_logo_name()`、`builder.py` 的內嵌圖示檔名，四處改為轉呼叫
+   新模組。前三者保留原名——那些名字是 CONTEXT.md 與 ADR 記載過的對齊點。
+4. `packaging_core.SHARED_DEEP_MODULES` 加入 `file_extension.py`。`file_assoc`
+   會匯入它，漏加的話 frozen exe 產出的安裝檔一執行即 `ModuleNotFoundError`。
+5. `CONTEXT.md` 新增「副檔名（file_extension.py）」一節，含四個推導的對照表。
+
+**附帶修正的一項**：重複填寫的副檔名（`txt, .TXT`）原本會產生兩筆關聯，於
+MSIX 下即兩個同名的關聯群組，使套件清單無效。`parse_list()` 收斂為一項並保留
+第一次出現的位置。
+
+### 驗收
+
+新增測試 34 項：`tests/test_file_extension.py` 29 項（正規化、驗證、清單解析、
+四個推導的既有慣例、推導對未驗證輸入拋例外），`tests/test_packaging_core.py`
+5 項（空白、路徑穿越、非 ASCII、超長、重複收斂皆於打包階段被擋下）。
+
+全套測試 `1489` 項通過。
+
 ## 已知限制
 
 - MSIX 模式下的安裝密碼保護仍未實作，目前的處置是於打包階段擋下並說明。
@@ -137,10 +233,11 @@ else:
   `install_engine._FIELD_CATEGORIES`、`packaging_core` 的 msix 區塊與圖示檢查、
   以及 `builder.build_all()` 中六處 `is_msix` 分支。每新增一個打包欄位即多
   一次同類缺口的機會。
-- 稽核其餘項目（D2、D3、S2、S3、S4）之修正。
+- 稽核其餘項目（D3、S2、S3、S4）之修正。
 - S1（簽章憑證密碼經由命令列參數傳給 `signtool`）之處置。該項會新增打包設定
   欄位，屬新功能，依 `CLAUDE.md`「製作新功能前要先問清楚需求」先行確認需求。
 
 ## 已完成之待辦
 
 - D1 安裝密碼保護在 MSIX 引擎下產出無法安裝的安裝檔（2026-09-05）。
+- D2 副檔名的字元從未被驗證（2026-09-05）。

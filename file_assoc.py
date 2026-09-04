@@ -17,12 +17,19 @@ sys.modules 或模組屬性就能注入假的登錄表。
 import ctypes
 import winreg as _real_winreg
 
+import file_extension
 from install_scope import InstallScope
 
 
 def prog_id(ext):
-    """副檔名 -> ProgID 的命名慣例，register()/unregister() 都靠這個對齊。"""
-    return f"AppFile{ext.replace('.', '')}"
+    """副檔名 -> ProgID 的命名慣例，register()/unregister() 都靠這個對齊。
+
+    實作在 `file_extension.prog_id()`。這裡保留同名函式，是因為
+    CONTEXT.md 記載的對齊點是這個名字，而 `register()`／`unregister()` 也
+    以它對齊；把慣例本身搬過去的理由見 `file_extension.py` 的模組說明
+    （副檔名推導出來的名字原本散在四處，四處都沒有驗證，稽核 D2）。
+    """
+    return file_extension.prog_id(ext)
 
 
 def register(extensions, main_exe_path, app_name, icon_refs, log=None, registry=_real_winreg, no_admin_install=False):
