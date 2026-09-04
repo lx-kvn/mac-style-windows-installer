@@ -170,6 +170,18 @@ class ExistingMsixPackageTest(unittest.TestCase):
         result = run(recorder, find_installed_package=lambda: "My.App_1_x64__a")
         self.assertIn("設定", result["message"])
 
+    def test_the_message_does_not_claim_a_same_version_reinstall_fails(self):
+        """2026-09-05 於 Windows 11 25H2（26200，zh-TW）實測推翻的前提。
+
+        量測結果：同版本重新安裝**會成功**（系統重新註冊），版本較新會就地
+        更新，只有降版會失敗（`0x80073D06`）。訊息若把同版本也講成失敗原因，
+        使用者會照著去移除一個其實不需要移除的東西。
+        """
+        recorder = Recorder(deploy_outcome=msix_deploy.Outcome(False, "壞了", 1))
+        result = run(recorder, find_installed_package=lambda: "My.App_1_x64__a")
+        self.assertIn("舊", result["message"])
+        self.assertNotIn("同一個版本或更舊", result["message"])
+
     def test_a_failure_without_an_installed_package_says_nothing_extra(self):
         recorder = Recorder(deploy_outcome=msix_deploy.Outcome(False, "壞了", 1))
         result = run(recorder, find_installed_package=lambda: None)
