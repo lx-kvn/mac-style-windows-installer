@@ -2,8 +2,9 @@
 
 ## 狀態
 
-已接受（2026-09-01 決定）。尚未實作。決定範圍屬於 MSIX 輸出功能，規劃見
-[`docs/proposals/MSIX輸出規劃.md`](../proposals/MSIX輸出規劃.md)。
+已接受（2026-09-01 決定）。**已實作**——MSIX 模式的檔案關聯圖示要求 PNG
+（`packaging_core` 的 `doc_icon_extension`），每個副檔名各自成為一個關聯
+群組（`msix_manifest._render_applications()`）。
 
 ## 背景
 

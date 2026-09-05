@@ -2,7 +2,10 @@
 
 ## 狀態
 
-已接受（2026-09-05 決定）。尚未實作。決定所依據的行為事實取自同日於
+已接受（2026-09-05 決定）。**已實作**（`msix_install._handle_existing_package()`、
+`installer_core.check_msix_existing_package()`、安裝端前端的降版對話框），
+並於同日在 Windows 11 25H2 實機驗證：互動安裝跳出警示、靜默安裝直接執行
+並將告知寫入 `/LOG=` 紀錄檔。決定所依據的行為事實取自同日於
 Windows 11 25H2（26200、zh-TW）的實機量測，量測經過見
 [`docs/investigations/MSIX稽核與缺陷修正.md`](../investigations/MSIX稽核與缺陷修正.md)
 的 D3。

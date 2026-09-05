@@ -2,8 +2,10 @@
 
 ## 狀態
 
-已接受（2026-08-31 決定）。決定範圍屬於尚未實作的 MSIX 輸出功能，
-規劃見 [`docs/proposals/MSIX輸出規劃.md`](../proposals/MSIX輸出規劃.md)。
+已接受（2026-08-31 決定）。**已實作**——`msix.identity_name` 為必填且
+不由 `app_name` 推導（`msix_settings.validate()`）。安裝端另以它查詢
+「同一個應用程式的套件是否已安裝」，見
+[ADR-0015](0015-msix-downgrade-asks-the-user-except-in-silent-mode.md)。
 
 ## 背景
 

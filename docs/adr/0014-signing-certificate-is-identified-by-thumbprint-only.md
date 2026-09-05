@@ -2,7 +2,9 @@
 
 ## 狀態
 
-已接受（2026-09-05 決定）。尚未實作。不取代任何既有 ADR；
+已接受（2026-09-05 決定）。**已實作**（`cert_store.py`、`signing` 的
+`cert_thumbprint` 欄位、`list-certs` 子指令、配置精靈的來源二選一），
+並於同日以真實憑證與真實 `signtool` 實機驗證。不取代任何既有 ADR；
 [ADR-0005](0005-installer-never-installs-certificates-into-trust-stores.md)
 決定二所述的「寫入本機信任存放區的輔助指令」與本決定無關——那一項處理的是
 **信任**存放區，本決定處理的是放置憑證與私鑰的**個人**存放區。

@@ -2,8 +2,9 @@
 
 ## 狀態
 
-已接受（2026-08-31 決定）。決定範圍屬於尚未實作的 MSIX 輸出功能，
-規劃見 [`docs/proposals/MSIX輸出規劃.md`](../proposals/MSIX輸出規劃.md)。
+已接受（2026-08-31 決定）。**已實作**——MSIX 模式不編 `uninstall.exe`，
+成功訊息指向系統的解除安裝路徑（`msix_install.SUCCESS_MESSAGE`），
+`test-packaging-options.yml` 亦斷言該模式不產出 `uninstall.exe`。
 
 ## 背景
 
