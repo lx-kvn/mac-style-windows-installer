@@ -1,0 +1,58 @@
+name: Tests
+
+# 只做一件事：在一台乾淨的英文機器上跑一次測試套件。
+#
+# 為什麼要有它：另外兩個 workflow 都不會因為 push 而跑——`build.yml` 由
+# `v*` tag 或手動觸發，`test-packaging-options.yml` 只能手動。也就是說在這
+# 個檔案存在之前，CI 的結果**必然**晚於「tag 已經推上去」這件對外可見的
+# 事實。v0.16.0 發布時就是這樣拿到一次紅燈的：三個測試綁到執行機器的環境
+# （兩個匯入只有開發機才裝的 vm_lease、一個未指定語言就斷言中文字串），
+# 本機全綠、CI 全紅，而發現的時候 tag 已經在 GitHub 上了。
+#
+# 這個 workflow 只跑測試，不編譯、不打包、不上傳附件：今天抓到問題的是測試
+# 套件那一段，把 `build.yml` 整個搬來每次 push 都跑，多花的兩分鐘與堆出來的
+# 附件換不到額外的訊號。「編得出一份能用的發布產物嗎」是發布時才需要問的
+# 問題，留在 `build.yml`。
+#
+# 分支限定為所有分支而不是不加條件：不加的話推 `v*` tag 也會觸發它，而那個
+# 時間點 `build.yml` 已經在跑同一份測試了。
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: windows-latest
+
+    # 理由同 build.yml：runner 預設的主控台/檔案編碼是英文語系（cp1252），
+    # 這個專案到處是中文訊息與寫中文內容的暫存檔，不強制 UTF-8 會整批
+    # UnicodeEncodeError。
+    env:
+      PYTHONUTF8: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # 套件清單是 requirements.txt，不在這裡另外列一份（見該檔說明）。
+          # pywin32 對測試而言不是選填：tests/test_file_associations.py 會
+          # mock.patch("win32com.client.Dispatch", ...)，那個 patch 本身就
+          # 需要模組存在才解析得到，缺少的話不是測試失敗，是 ModuleNotFoundError。
+          pip install -r requirements.txt
+
+      # 一律從 repo 根目錄執行、用 unittest discover（見 CLAUDE.md）：部分
+      # 測試以相對路徑尋找 repo 裡的檔案，工作目錄一換就對不到，而那種紅燈
+      # 指不出真正的成因。
+      - name: 跑測試套件
+        run: python -m unittest discover -s tests -p "test_*.py"
