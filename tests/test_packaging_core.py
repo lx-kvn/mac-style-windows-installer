@@ -1064,6 +1064,113 @@ class TestValidateSigningConfig(unittest.TestCase):
         self.assertEqual(signing["timestamp_url"], "http://timestamp.digicert.com")
 
 
+class TestSigningCertificateStoreMode(unittest.TestCase):
+    """憑證存放區模式（ADR-0014）：填了 cert_thumbprint 就走這一條，命令列上
+    不會有密碼。
+
+    存放區的查詢是可注入的參數（比照 file_assoc.py 的 registry seam）：這台
+    機器上有沒有那張憑證不在測試的控制範圍內。
+    """
+
+    def _certificate(self, thumbprint="AB" * 20, store=None):
+        import cert_store
+        return cert_store.StoreCertificate(
+            thumbprint=thumbprint, subject="CN=Tester, O=Tester, C=TW",
+            store=store or cert_store.CURRENT_USER, has_private_key=True,
+            not_after="2030-01-01", usages=(cert_store.OID_CODE_SIGNING,))
+
+    def _validate(self, raw, found=None):
+        return packaging_core._validate_signing_config(
+            raw, find_certificate=lambda t: found)
+
+    def test_a_thumbprint_alone_is_accepted(self):
+        signing, error = self._validate(
+            {"cert_thumbprint": "AB" * 20}, found=self._certificate())
+        self.assertIsNone(error)
+        self.assertEqual(signing["cert_thumbprint"], "AB" * 20)
+
+    def test_the_thumbprint_is_normalised(self):
+        """使用者從 certmgr 複製過來的形式帶空格。"""
+        spaced = " ".join("AB" for _ in range(20))
+        signing, error = self._validate(
+            {"cert_thumbprint": spaced}, found=self._certificate())
+        self.assertIsNone(error)
+        self.assertEqual(signing["cert_thumbprint"], "AB" * 20)
+
+    def test_the_file_mode_fields_are_not_required_in_store_mode(self):
+        signing, error = self._validate(
+            {"cert_thumbprint": "AB" * 20}, found=self._certificate())
+        self.assertIsNone(error)
+        self.assertEqual(signing.get("cert_path", ""), "")
+        self.assertEqual(signing.get("cert_password_env", ""), "")
+
+    def test_giving_both_modes_is_rejected(self):
+        """兩種來源互斥（ADR-0014 決定一），比照 ADR-0004 對兩種密碼填法的
+        處置——安靜地挑一邊會讓使用者以為自己設定的那一種正在生效。"""
+        signing, error = self._validate(
+            {"cert_thumbprint": "AB" * 20, "cert_path": "C:\\x.pfx",
+             "cert_password_env": "PW"},
+            found=self._certificate())
+        self.assertIsNone(signing)
+        self.assertIsNotNone(error)
+
+    def test_a_malformed_thumbprint_is_rejected(self):
+        signing, error = self._validate({"cert_thumbprint": "not-a-thumbprint"})
+        self.assertIsNone(signing)
+        self.assertIsNotNone(error)
+
+    def test_a_thumbprint_that_is_not_in_any_store_is_rejected_at_packaging_time(self):
+        """在清空 dist/、build/ 之前就攔下來（比照 ADR-0003 決定四建立的慣例）。
+        留到 signtool 才失敗的話，makeappx 與時間戳記的往返都已經跑完了。"""
+        signing, error = self._validate({"cert_thumbprint": "AB" * 20}, found=None)
+        self.assertIsNone(signing)
+        self.assertIsNotNone(error)
+        self.assertIn("AB" * 20, error)
+
+    def test_a_certificate_without_a_private_key_is_rejected(self):
+        import cert_store
+        without_key = self._certificate()._replace(has_private_key=False)
+        signing, error = self._validate(
+            {"cert_thumbprint": "AB" * 20}, found=without_key)
+        self.assertIsNone(signing)
+        self.assertIsNotNone(error)
+
+    def test_the_located_certificate_travels_with_the_config(self):
+        """簽章那一步要知道憑證在哪個存放區才決定得了要不要帶 /sm，而那件事
+        驗證階段已經查過了——再查一次等於同一個問題問兩遍，答案還可能不同。"""
+        signing, error = self._validate(
+            {"cert_thumbprint": "AB" * 20}, found=self._certificate())
+        self.assertIsNone(error)
+        self.assertIsNotNone(signing.get("certificate"))
+        self.assertEqual(signing["certificate"].subject, "CN=Tester, O=Tester, C=TW")
+
+    def test_the_timestamp_url_still_defaults(self):
+        signing, error = self._validate(
+            {"cert_thumbprint": "AB" * 20}, found=self._certificate())
+        self.assertEqual(signing["timestamp_url"], "http://timestamp.digicert.com")
+
+    def test_the_msix_publisher_is_filled_in_from_the_store_certificate(self):
+        """存放區模式下沒有 .pfx 可以讀，自動填入要改從找到的那張憑證來——
+        少了這一段，選這個模式的人就得自己去查那串形式不直覺的字串。"""
+        signing = {"certificate": self._certificate(), "cert_thumbprint": "AB" * 20}
+        self.assertEqual(packaging_core._read_signing_cert_subject(signing),
+                         "CN=Tester, O=Tester, C=TW")
+
+    def test_the_file_mode_path_is_unchanged(self):
+        """檔案模式仍然走 read_from_pfx，注入的替身要被呼叫到。"""
+        asked = []
+
+        def reader(path, password):
+            asked.append(path)
+            return "CN=From The File"
+
+        signing = {"cert_path": "C:\\x.pfx", "cert_password_env": "PW"}
+        self.assertEqual(
+            packaging_core._read_signing_cert_subject(signing, reader),
+            "CN=From The File")
+        self.assertEqual(asked, ["C:\\x.pfx"])
+
+
 class TestValidateInstallPassword(unittest.TestCase):
     """_validate_install_password()（安裝密碼保護，見 CONTEXT.md 與
     docs/adr/0004）：獨立測試，不用像 TestInstallPasswordModes 那樣先準備

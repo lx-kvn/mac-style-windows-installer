@@ -1145,6 +1145,104 @@ class TestSubprocessOutputDecoding(BuildAllTestBase):
             )
         self.assertIn(_fakes.UTF8_PROBE_TEXT, str(ctx.exception))
 
+    def test_store_mode_never_puts_a_password_on_the_command_line(self):
+        """ADR-0014：這個模式存在的唯一理由就是這件事。"""
+        import cert_store
+        located = sdk_tools.ToolLocation(
+            os.path.join(self.workspace_dir, "signtool.exe"), "manual", "", "signtool.exe")
+        certificate = cert_store.StoreCertificate(
+            "AB" * 20, "CN=Tester, O=Tester, C=TW", cert_store.CURRENT_USER,
+            True, "2030-01-01", (cert_store.OID_CODE_SIGNING,))
+        signing = {
+            "cert_thumbprint": "AB" * 20,
+            "certificate": certificate,
+            "timestamp_url": "http://timestamp.example/",
+        }
+        seen = {}
+
+        def fake_run(cmd, **kwargs):
+            seen["cmd"] = list(cmd)
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        builder._sign_file(os.path.join(self.workspace_dir, "installer_core.py"),
+                           signing, find_tool=lambda name: located, run=fake_run)
+        self.assertIn("/sha1", seen["cmd"])
+        self.assertIn("AB" * 20, seen["cmd"])
+        self.assertNotIn("/p", seen["cmd"])
+        self.assertNotIn("/f", seen["cmd"])
+
+    def test_a_local_machine_certificate_gets_the_machine_store_flag(self):
+        import cert_store
+        located = sdk_tools.ToolLocation(
+            os.path.join(self.workspace_dir, "signtool.exe"), "manual", "", "signtool.exe")
+        certificate = cert_store.StoreCertificate(
+            "CD" * 20, "CN=Tester", cert_store.LOCAL_MACHINE, True, "", ())
+        seen = {}
+
+        def fake_run(cmd, **kwargs):
+            seen["cmd"] = list(cmd)
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        builder._sign_file(
+            os.path.join(self.workspace_dir, "installer_core.py"),
+            {"cert_thumbprint": "CD" * 20, "certificate": certificate,
+             "timestamp_url": "http://timestamp.example/"},
+            find_tool=lambda name: located, run=fake_run)
+        self.assertIn("/sm", seen["cmd"])
+
+    def test_store_mode_logs_which_certificate_was_used(self):
+        """指紋人讀不懂，ADR-0014 決定二接受那個代價的條件就是這一行輸出。"""
+        import cert_store
+        located = sdk_tools.ToolLocation(
+            os.path.join(self.workspace_dir, "signtool.exe"), "manual", "", "signtool.exe")
+        certificate = cert_store.StoreCertificate(
+            "AB" * 20, "CN=Tester, O=Tester, C=TW", cert_store.CURRENT_USER,
+            True, "2030-01-01", ())
+        lines = []
+        builder._sign_file(
+            os.path.join(self.workspace_dir, "installer_core.py"),
+            {"cert_thumbprint": "AB" * 20, "certificate": certificate,
+             "timestamp_url": "http://timestamp.example/"},
+            find_tool=lambda name: located,
+            run=lambda cmd, **kw: mock.Mock(returncode=0, stdout="", stderr=""),
+            log=lines.append)
+        self.assertTrue(any("CN=Tester, O=Tester, C=TW" in line for line in lines))
+
+    def test_file_mode_warns_that_the_password_reaches_the_command_line(self):
+        """保留檔案模式但不告知等於只修了一半（ADR-0014 決定四）。"""
+        located = sdk_tools.ToolLocation(
+            os.path.join(self.workspace_dir, "signtool.exe"), "manual", "", "signtool.exe")
+        cert = os.path.join(self.workspace_dir, "cert.pfx")
+        with open(cert, "wb") as f:
+            f.write(b"fake")
+        lines = []
+        with mock.patch.dict(os.environ, {"TEST_CERT_PW": "hunter2"}):
+            builder._sign_file(
+                os.path.join(self.workspace_dir, "installer_core.py"),
+                {"cert_path": cert, "cert_password_env": "TEST_CERT_PW",
+                 "timestamp_url": "http://timestamp.example/"},
+                find_tool=lambda name: located,
+                run=lambda cmd, **kw: mock.Mock(returncode=0, stdout="", stderr=""),
+                log=lines.append)
+        self.assertTrue(any("命令列" in line for line in lines),
+                        f"沒有提醒密碼會出現在命令列上：{lines}")
+
+    def test_store_mode_does_not_emit_that_warning(self):
+        import cert_store
+        located = sdk_tools.ToolLocation(
+            os.path.join(self.workspace_dir, "signtool.exe"), "manual", "", "signtool.exe")
+        certificate = cert_store.StoreCertificate(
+            "AB" * 20, "CN=Tester", cert_store.CURRENT_USER, True, "", ())
+        lines = []
+        builder._sign_file(
+            os.path.join(self.workspace_dir, "installer_core.py"),
+            {"cert_thumbprint": "AB" * 20, "certificate": certificate,
+             "timestamp_url": "http://timestamp.example/"},
+            find_tool=lambda name: located,
+            run=lambda cmd, **kw: mock.Mock(returncode=0, stdout="", stderr=""),
+            log=lines.append)
+        self.assertFalse(any("命令列" in line for line in lines))
+
     def test_uninstall_compile_failure_reports_what_pyinstaller_printed(self):
         with self.assertRaises(Exception) as ctx:
             self._call_build_all(

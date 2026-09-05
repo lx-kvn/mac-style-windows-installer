@@ -24,6 +24,7 @@ import subprocess
 
 import packaging_settings
 import dependency_defs
+import cert_store
 import cert_subject
 import file_extension
 import install_engine
@@ -87,6 +88,9 @@ MESSAGES = {
         "signing.cert_password_env": "signing.cert_password_env 必須指定存放憑證密碼的環境變數名稱（密碼本身不放在設定檔裡）。",
         "signing.cert_password_missing": "環境變數「{name}」目前沒有值，請先設定好憑證密碼再打包。",
         "signing.cert_path": "signing.cert_path 必須指向一個實際存在的憑證檔案（.pfx）。",
+        "signing.both_sources": "signing 同時給了 cert_thumbprint 與 cert_path，兩者互斥。憑證來源只能擇一：填 cert_thumbprint 走存放區模式（密碼不會出現在命令列上），或填 cert_path 加 cert_password_env 走檔案模式。",
+        "signing.thumbprint_not_found": "在這台電腦的個人憑證存放區裡找不到指紋為 {thumbprint} 的憑證（目前使用者與本機電腦兩個都找過了）。用本工具的 list-certs 指令可以看到可用的憑證與它們的指紋。",
+        "signing.no_private_key": "指紋為 {thumbprint} 的憑證（{subject}）沒有私鑰，簽不了東西。請匯入含私鑰的版本（.pfx），而不是只有公開憑證的那一份（.cer）。",
         "task.exe_not_found": "scheduled_task 指定的執行檔「{exe}」不存在於應用程式資料夾中，請重新選擇。",
         "task.incomplete": "scheduled_task 的 task_name 跟 exe_relative_path 必須同時填寫，或都留空不使用這個功能。",
         "text_fields.required": "所有文字欄位（名稱、版本、發行者、安裝檔名）皆為必填項目，請檢查是否有欄位遺漏。",
@@ -139,6 +143,9 @@ MESSAGES = {
         "signing.cert_password_env": "signing.cert_password_env must name the environment variable holding the certificate password (the password itself does not go in the config file).",
         "signing.cert_password_missing": "The environment variable \"{name}\" currently has no value. Set the certificate password before packaging.",
         "signing.cert_path": "signing.cert_path must point at a certificate file (.pfx) that actually exists.",
+        "signing.both_sources": "signing was given both cert_thumbprint and cert_path, which are mutually exclusive. Pick one certificate source: cert_thumbprint for store mode (no password ever reaches the command line), or cert_path plus cert_password_env for file mode.",
+        "signing.thumbprint_not_found": "No certificate with thumbprint {thumbprint} was found in this machine's personal certificate stores (both the current user's and the local machine's were searched). This tool's list-certs command shows the usable certificates and their thumbprints.",
+        "signing.no_private_key": "The certificate with thumbprint {thumbprint} ({subject}) has no private key, so it cannot sign anything. Import the version that includes the private key (.pfx) rather than the public certificate alone (.cer).",
         "task.exe_not_found": "The executable \"{exe}\" named by scheduled_task is not in the application folder; choose it again.",
         "task.incomplete": "scheduled_task needs both task_name and exe_relative_path filled in, or both left empty to skip the feature.",
         "text_fields.required": "Every text field (name, version, publisher, installer filename) is required; check whether one was left blank.",
@@ -467,19 +474,60 @@ def ensure_workspace_files(workspace_dir, lang=messages.DEFAULT_LANGUAGE):
         )
 
 
-def _validate_signing_config(signing_raw, lang=messages.DEFAULT_LANGUAGE):
+def _validate_signing_config(signing_raw, lang=messages.DEFAULT_LANGUAGE,
+                             find_certificate=None):
     """驗證 signing 設定，回傳 (signing_dict_or_None, error_or_None)。
 
-    signing 的驗證規則（憑證檔案存在、密碼環境變數有值）只跟 signing 自己
-    有關，跟 custom_dependencies/no_admin_install 等其他欄位完全無關，
-    原本混在 validate_and_build_pack_data() 那個大函式裡，只是因為大家都
-    要塞進同一個 pack_data dict——獨立成一個函式，才能不用建構一整包
-    app_dir/png_path 等其他欄位，直接單獨測 signing 的驗證規則。"""
+    signing 的驗證規則只跟 signing 自己有關，跟 custom_dependencies/
+    no_admin_install 等其他欄位完全無關，原本混在
+    validate_and_build_pack_data() 那個大函式裡，只是因為大家都要塞進同一個
+    pack_data dict——獨立成一個函式，才能不用建構一整包 app_dir/png_path 等
+    其他欄位，直接單獨測 signing 的驗證規則。
+
+    **兩種憑證來源**（見 CONTEXT.md「簽章憑證的兩種來源」與
+    docs/adr/0014）：填了 `cert_thumbprint` 是存放區模式，填了 `cert_path`
+    加 `cert_password_env` 是檔案模式。兩者互斥，同時給就報錯——安靜地挑一邊
+    會讓使用者以為自己設定的那一種正在生效。
+
+    `find_certificate` 是測試接縫（比照 file_assoc.py 的 registry 參數）：
+    這台機器上有沒有那張憑證不在測試的控制範圍內。
+    """
     if not signing_raw:
         return None, None
     cert_path = str(signing_raw.get("cert_path", "")).strip()
     cert_password_env = str(signing_raw.get("cert_password_env", "")).strip()
+    thumbprint_raw = str(signing_raw.get("cert_thumbprint", "")).strip()
     timestamp_url = str(signing_raw.get("timestamp_url", "")).strip()
+    timestamp_url = timestamp_url or "http://timestamp.digicert.com"
+
+    if thumbprint_raw and (cert_path or cert_password_env):
+        return None, _invalid("signing.both_sources", lang)
+
+    if thumbprint_raw:
+        format_error = cert_store.validate_thumbprint(thumbprint_raw, lang)
+        if format_error:
+            return None, _t("prefix.invalid", lang) + format_error
+        thumbprint = cert_store.normalize_thumbprint(thumbprint_raw)
+        find_certificate = find_certificate or cert_store.find_by_thumbprint
+        certificate = find_certificate(thumbprint)
+        # 在清空 dist/、build/ 之前就攔下來（ADR-0003 決定四建立的慣例）。
+        # 留到 signtool 才失敗的話，makeappx 與時間戳記的往返都已經跑完了。
+        if certificate is None:
+            return None, _invalid("signing.thumbprint_not_found", lang,
+                                  thumbprint=thumbprint)
+        if not certificate.has_private_key:
+            return None, _invalid("signing.no_private_key", lang,
+                                  thumbprint=thumbprint,
+                                  subject=certificate.subject)
+        return {
+            "cert_thumbprint": thumbprint,
+            # 憑證本身帶著走：簽章那一步要知道它在哪個存放區才決定得了要不要
+            # 帶 /sm，而那件事這裡已經查過了。再查一次等於同一個問題問兩遍，
+            # 而兩次之間存放區可能已經變了。
+            "certificate": certificate,
+            "timestamp_url": timestamp_url,
+        }, None
+
     if not cert_path or not os.path.exists(cert_path):
         return None, _invalid("signing.cert_path", lang)
     if not cert_password_env:
@@ -489,7 +537,7 @@ def _validate_signing_config(signing_raw, lang=messages.DEFAULT_LANGUAGE):
     return {
         "cert_path": cert_path,
         "cert_password_env": cert_password_env,
-        "timestamp_url": timestamp_url or "http://timestamp.digicert.com",
+        "timestamp_url": timestamp_url,
     }, None
 
 
@@ -712,6 +760,13 @@ def _read_signing_cert_subject(signing, reader=None):
     """
     if not signing:
         return None
+    # 存放區模式：憑證在驗證階段就已經找出來了，主體跟著它一起帶過來。
+    # 不因此走 read_from_pfx——那條路只認 .pfx 檔案，而存放區模式根本沒有
+    # 檔案可以給它。少了這一段，選存放區模式的人就失去自動填入這項便利，
+    # 得自己去查那串形式不直覺的字串（見 cert_subject 的模組說明）。
+    certificate = signing.get("certificate")
+    if certificate is not None:
+        return certificate.subject
     reader = reader or cert_subject.read_from_pfx
     password = os.environ.get(signing.get("cert_password_env", ""), "")
     try:

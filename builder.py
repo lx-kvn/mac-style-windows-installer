@@ -47,6 +47,7 @@ import shutil
 import urllib.request
 from datetime import datetime
 
+import cert_store
 import dependency_defs
 import embedded_payload
 import file_extension
@@ -149,6 +150,31 @@ def _download_file(url, dest_path, timeout=60, expected_sha256=None):
         raise
 
 
+def _certificate_arguments(signing, log=None):
+    """簽章要用哪幾個參數指定憑證，並在建置紀錄說明這次用的是哪一張。
+
+    兩種來源（見 CONTEXT.md「簽章憑證的兩種來源」與 docs/adr/0014）：
+
+    - **存放區模式**——`/sha1 <指紋>`，私鑰由作業系統保管，命令列上沒有密碼。
+      驗證階段已經把憑證找出來並放進 `signing["certificate"]`，這裡不再查一次
+      ——同一個問題問兩遍，兩次之間存放區還可能已經變了。並印出憑證的主體：
+      指紋人讀不懂，ADR-0014 決定二接受那個代價的條件就是這一行。
+    - **檔案模式**——`/f <路徑> /p <密碼>`。密碼會出現在命令列上，而同一台
+      機器上任何行程都讀得到別的行程的命令列，因此印一行提醒。保留這個模式
+      卻不告知，等於只修了一半（決定四）。
+    """
+    certificate = signing.get("certificate")
+    if signing.get("cert_thumbprint") and certificate is not None:
+        if log:
+            log(certificate.describe())
+        return cert_store.signtool_arguments(certificate)
+
+    if log:
+        log(PASSWORD_ON_COMMAND_LINE_NOTICE)
+    return ["/f", signing["cert_path"],
+            "/p", os.environ.get(signing["cert_password_env"], "")]
+
+
 def _sign_file(target_path, signing, find_tool=None, run=None, log=None):
     """用 signtool 幫產出的檔案簽數位簽章（見 signing 設定欄位）。
 
@@ -181,13 +207,9 @@ def _sign_file(target_path, signing, find_tool=None, run=None, log=None):
     located = find_tool("signtool.exe")
     if log:
         log(located.describe())
-    password = os.environ.get(signing["cert_password_env"], "")
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     result = run(
-        [
-            located.path, "sign",
-            "/f", signing["cert_path"],
-            "/p", password,
+        [located.path, "sign"] + _certificate_arguments(signing, log) + [
             "/fd", "sha256",
             "/tr", signing["timestamp_url"],
             "/td", "sha256",
@@ -200,6 +222,16 @@ def _sign_file(target_path, signing, find_tool=None, run=None, log=None):
         # 額外把 password 變數帶進錯誤訊息，避免哪天有人手滑加進去）。
         tail = ((result.stdout or "") + "\n" + (result.stderr or ""))[-1000:]
         raise Exception(f"簽署 {os.path.basename(target_path)} 失敗：\n{tail}")
+
+
+# 檔案模式簽章時印進建置紀錄的提醒。文字留在這裡而不是走 packaging_core
+# 的訊息表：builder 的建置紀錄本來就都是直接寫的中文（「正在簽署套件...」、
+# 「簽署 X 失敗」），為一行字跨模組取字串還要處理循環匯入不划算。
+PASSWORD_ON_COMMAND_LINE_NOTICE = (
+    "提醒：這次用的是憑證檔案模式，憑證密碼會以參數的形式出現在 signtool 的"
+    "命令列上，而同一台機器上任何行程都讀得到別的行程的命令列。要避開這一點，"
+    "把憑證匯入個人存放區之後改填 signing.cert_thumbprint（見 docs/adr/0014）。"
+)
 
 
 MSIX_STAGING_DIRNAME = "msix_staging"
