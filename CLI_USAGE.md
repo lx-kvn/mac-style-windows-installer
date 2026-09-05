@@ -15,13 +15,14 @@ JSON 設定檔 + 命令列參數，不是表單）跟「進度怎麼呈現」（
 ## 目錄
 
 - [環境需求](#環境需求)
-- [五個子指令](#五個子指令)
+- [六個子指令](#六個子指令)
   - [init：產生範本設定檔](#init產生範本設定檔)
   - [list-files：列出 app_dir 底下的檔案](#list-files列出-app_dir-底下的檔案)
   - [pack：驗證並編譯](#pack驗證並編譯)
   - [pack-msix：產出未簽章的 .msix](#pack-msix產出未簽章的-msix)
   - [MSIX 模式下的 pack：一體式與兩截式](#msix-模式下的-pack一體式與兩截式)
   - [fetch-sdk-tools：取得 Windows SDK 工具](#fetch-sdk-tools取得-windows-sdk-工具)
+  - [list-certs：列出可以簽章的憑證](#list-certs列出可以簽章的憑證)
 - [欄位對照表](#欄位對照表)
   - [MSIX 模式的版本號](#msix-模式的版本號)
   - [訊息語言](#訊息語言)
@@ -52,7 +53,7 @@ pip install -r requirements.txt
 
 ---
 
-## 五個子指令
+## 六個子指令
 
 ### `init`：產生範本設定檔
 
@@ -170,6 +171,26 @@ python builder_cli.py fetch-sdk-tools [--cache-dir 目錄] [--force]
 Windows SDK**，依「你表達這個意圖有多明確」排列。建置過程會印出本次
 實際採用的來源與版本，用來診斷「兩台機器打包結果不同」這類問題。
 
+### `list-certs`：列出可以簽章的憑證
+
+```
+python builder_cli.py list-certs
+```
+
+`signing` 有兩種憑證來源（見下面的欄位對照表），其中「憑證存放區」那一種要
+填四十個十六進位字元的指紋。這個指令就是那個指紋的來源——它列出「目前使用者」
+與「本機電腦」兩個個人存放區裡，**含私鑰、且可以用於程式碼簽章**的憑證，
+帶主體、有效期與存放區位置。
+
+只讀個人存放區，不讀也不寫任何信任存放區（那是另一件事，見
+[`docs/adr/0005`](docs/adr/0005-installer-never-installs-certificates-into-trust-stores.md)）。
+
+存放區裡沒有可用憑證時，指令會告訴你怎麼把 `.pfx` 匯入：
+
+```powershell
+Import-PfxCertificate -FilePath cert.pfx -CertStoreLocation Cert:\CurrentUser\My -Password (Read-Host -AsSecureString)
+```
+
 ---
 
 ## 欄位對照表
@@ -207,7 +228,7 @@ Windows SDK**，依「你表達這個意圖有多明確」排列。建置過程�
 | `bundle_dependencies` | `--bundle-dependencies` | 否 | 逗號分隔，列在 `dependencies`（或 `custom_dependencies`）裡的相依元件 key，打包當下就把安裝檔下載下來內嵌進 Setup.exe，安裝時不需要再連網下載（安裝檔會變大）。沒列在這裡的相依元件維持原本「安裝時才連網下載」的行為。見規格文件 §8.24 |
 | `no_admin_install` | `--no-admin-install` / `--no-no-admin-install` | 否 | 開啟後整個安裝檔（含解除安裝）完全不要求系統管理員權限，不會跳出 UAC 提示：預設安裝路徑改成 `%LOCALAPPDATA%\Programs\<folder_name>`，解除安裝登錄表、PATH、捷徑都改寫到使用者層級（HKCU、`%APPDATA%`/`%USERPROFILE%\Desktop`）而不是系統層級。適合單一使用者自己安裝、不需要讓電腦上其他使用者共用的情境。見規格文件 §8.25 |
 | `pre_install_script` / `post_install_script` | `--pre-install-script` / `--post-install-script` | 否 | 相對於 `app_dir` 的路徑，指向一支要在安裝前/安裝後自動靜默執行的腳本或執行檔（例如 `.bat`/`.exe`/`.ps1`）。前置腳本失敗會中止整個安裝並回報錯誤；後置腳本失敗只記錄警告，不影響安裝結果（此時主程式已經裝好）。見規格文件 §8.26 |
-| `signing` | （只能透過 JSON） | 否 | 設定後打包時自動用 `signtool` 幫 Setup.exe/uninstall.exe 簽數位簽章：`{"cert_path": "憑證檔案(.pfx)路徑", "cert_password_env": "存放密碼的環境變數名稱", "timestamp_url": "時間戳記伺服器（選填，預設 DigiCert）"}`。密碼不放在設定檔明文裡，只存環境變數名稱；打包當下這個環境變數必須有值，簽章失敗會讓整個 `pack` 流程失敗。`signtool` 用 `fetch-sdk-tools` 子指令取得即可（也可以用系統上既有的 Windows SDK，或用 `--sdk-tools-dir` 指定），憑證要自行準備（本工具不提供、也無法生成憑證）。見規格文件 §8.27 |
+| `signing` | （只能透過 JSON） | 否 | 設定後打包時自動用 `signtool` 簽數位簽章（MSIX 模式連 `.msix` 一起簽）。**憑證有兩種來源，兩者互斥、同時填會在打包階段報錯**：<br>**存放區模式（建議）**——`{"cert_thumbprint": "憑證指紋", "timestamp_url": "…（選填）"}`。憑證與私鑰事先放在 Windows 的個人存放區，私鑰由作業系統保管，**命令列上完全沒有密碼**。指紋用 `list-certs` 子指令取得（空格與冒號會自動忽略）。只接受指紋、不接受主體名稱片段，理由見 [`docs/adr/0014`](docs/adr/0014-signing-certificate-is-identified-by-thumbprint-only.md)。<br>**檔案模式**——`{"cert_path": "憑證檔案(.pfx)路徑", "cert_password_env": "存放密碼的環境變數名稱", "timestamp_url": "…（選填）"}`。密碼不放在設定檔明文裡，只存環境變數名稱，打包當下該環境變數必須有值。**要知道一件事：那個密碼會以參數的形式出現在 `signtool` 的命令列上，而同一台機器上任何行程都讀得到別的行程的命令列。** 打包時會印一行提醒。在意這一點就改用存放區模式。<br>兩種模式都一樣：簽章失敗會讓整個 `pack` 流程失敗；`signtool` 用 `fetch-sdk-tools` 取得即可（也可以用系統上既有的 Windows SDK，或用 `--sdk-tools-dir` 指定）；憑證要自行準備（本工具不提供、也無法生成憑證）。見規格文件 §8.27 |
 | `windows_service` | （只能透過 JSON） | 否 | 安裝時額外把應用程式的某支執行檔註冊成 Windows 服務：`{"service_name": "服務名稱", "exe_relative_path": "相對於 app_dir 的執行檔路徑", "start_type": "auto/demand/disabled 其中之一，預設 auto"}`。`service_name`/`exe_relative_path` 要嘛兩個都填，要嘛都留空；`exe_relative_path` 指定的檔案必須真的存在於 `app_dir`。解除安裝時會自動移除這個服務。 |
 | `scheduled_task` | （只能透過 JSON） | 否 | 安裝時額外把應用程式的某支執行檔註冊成排程工作：`{"task_name": "工作名稱", "exe_relative_path": "相對於 app_dir 的執行檔路徑", "trigger": "schtasks /sc 支援的觸發條件，預設 onlogon"}`。`task_name`/`exe_relative_path` 要嘛兩個都填，要嘛都留空；`exe_relative_path` 指定的檔案必須真的存在於 `app_dir`。解除安裝時會自動移除這個排程工作。 |
 | `create_restore_point_before_install` | （只能透過 JSON） | 否 | 開啟後，安裝流程開始寫入檔案前，先嘗試建立一個系統還原點，讓使用者萬一想反悔可以透過 Windows 內建的系統還原整個復原（不是這個工具自己的解除安裝功能，是作業系統層級的還原點）。Windows 8 以後同一天內只會真的建立一次還原點（節流限制），短時間內重複安裝不保證每次都產生新的還原點；建立失敗（例如系統還原功能被使用者關閉）不會中止安裝，只是沒有還原點可用。 |
