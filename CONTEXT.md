@@ -11,6 +11,8 @@
 - [使用者關聯覆寫（User Association Override）](#使用者關聯覆寫user-association-override)
 - [registry seam](#registry-seam)
 - [副檔名（file_extension.py）](#副檔名file_extensionpy)
+- [簽章憑證的兩種來源](#簽章憑證的兩種來源)
+- [降版（Downgrade）](#降版downgrade)
 - [內嵌內容（embedded_payload.py）](#內嵌內容embedded_payloadpy)
 - [引擎相容性的三份清單（install_engine.py）](#引擎相容性的三份清單install_enginepy)
 - [拖曳安裝（Drag-to-Install）與視窗拖曳（Window Drag）](#拖曳安裝drag-to-install與視窗拖曳window-drag)
@@ -96,6 +98,41 @@ Windows 針對「使用者選過這個副檔名要用什麼開」記住的三層
 決定檔案寫到哪裡）。
 
 這個模組的由來見 `docs/investigations/MSIX稽核與缺陷修正.md` 的 D2。
+
+## 簽章憑證的兩種來源
+
+打包工具要簽章時，憑證可以從兩個地方來。兩者互斥，設定裡同時給會在打包階段
+報錯：
+
+- **檔案模式** — `signing.cert_path` 指向一個 `.pfx` 檔案，密碼放在
+  `signing.cert_password_env` 指名的環境變數裡。密碼會以 `signtool /p` 的形式
+  出現在命令列上，而同一台機器上任何行程都讀得到別的行程的命令列。
+- **存放區模式** — `signing.cert_thumbprint` 給憑證的指紋，憑證與私鑰事先放在
+  Windows 的**個人存放區**裡，私鑰由作業系統保管。命令列上完全沒有密碼。
+
+**指紋是唯一的指認方式**，不接受主體名稱的片段比對——那種比對對到兩張時
+signtool 會自己挑一張且不報錯（理由見 [ADR-0014](docs/adr/0014-signing-certificate-is-identified-by-thumbprint-only.md)）。
+
+注意這裡講的是**個人存放區**（放憑證與私鑰，簽章要用），跟
+[ADR-0005](docs/adr/0005-installer-never-installs-certificates-into-trust-stores.md)
+談的**信任存放區**（決定這台電腦信不信任某個簽章者）是兩件不同的事，講的時候
+不要混用「憑證存放區」這個籠統的說法。
+
+## 降版（Downgrade）
+
+「這次要裝的版本比機器上已經裝的那份舊」。兩種引擎都允許降版，但都要先問過
+使用者——判斷與呈現的形狀相同（`upgrade.check_existing()` 的「較新／相同／
+較舊」三分法），差別在後果：
+
+- **傳統引擎** — 覆蓋既有安裝。
+- **MSIX 引擎** — 必須先請系統移除既有套件，而**系統移除套件時會連同該應用
+  程式的資料一併清除**。因此警示要多講這一句，傳統引擎不需要。
+
+靜默安裝（`/S`）兩種引擎都直接做，不詢問也不需要額外旗標，只把發生的事寫進
+紀錄檔（[ADR-0015](docs/adr/0015-msix-downgrade-asks-the-user-except-in-silent-mode.md)）。
+
+**跟「發行者不同的同名套件」不是同一件事**：降版的兩者在系統眼中是同一個應用
+程式，發行者不同的兩者不是（系統會讓它們並存），因此後者只告知、不移除。
 
 ## 內嵌內容（embedded_payload.py）
 
