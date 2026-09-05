@@ -50,15 +50,23 @@ class FakeOperation:
         return FakeResult(is_registered=False, error_text="", error_code=0)
 
 
+class FakeVersion:
+    def __init__(self, text):
+        parts = [int(p) for p in text.split(".")]
+        self.major, self.minor, self.build, self.revision = parts
+
+
 class FakePackageId:
-    def __init__(self, name, full_name):
+    def __init__(self, name, full_name, version="1.0.0.0", publisher="CN=Tester"):
         self.name = name
         self.full_name = full_name
+        self.version = FakeVersion(version)
+        self.publisher = publisher
 
 
 class FakePackage:
-    def __init__(self, name, full_name):
-        self.id = FakePackageId(name, full_name)
+    def __init__(self, name, full_name, version="1.0.0.0", publisher="CN=Tester"):
+        self.id = FakePackageId(name, full_name, version, publisher)
 
 
 class FakeManager:
@@ -149,17 +157,48 @@ class DeployTest(unittest.TestCase):
 
 class FindInstalledTest(unittest.TestCase):
     """第十一輪 CI 探針確認的綁定命名：列舉當前使用者的套件用
-    find_packages_by_user_security_id("")，沒有 find_packages_for_user。"""
+    find_packages_by_user_security_id("")，沒有 find_packages_for_user。
 
-    def test_a_matching_package_returns_its_full_name(self):
+    回傳的不只是完整名稱：呼叫端要比版本（降版要問過使用者，見
+    docs/adr/0015）也要比發行者（發行者不同的同名套件會並存），兩者都從
+    套件物件直接讀，不從完整名稱拆字串——那個格式是系統的內部慣例。
+    """
+
+    def test_a_matching_package_is_returned(self):
         manager = FakeManager(packages=[
             FakePackage("Other.App", "Other.App_1.0.0.0_x64__abc"),
             FakePackage("My.App", "My.App_1.0.0.0_x64__xyz"),
         ])
+        found = msix_deploy.find_installed("My.App", manager=manager)
+        self.assertEqual(found.full_name, "My.App_1.0.0.0_x64__xyz")
+
+    def test_the_version_comes_back_as_four_numbers(self):
+        manager = FakeManager(packages=[
+            FakePackage("My.App", "My.App_2.3.4.5_x64__xyz", version="2.3.4.5"),
+        ])
+        self.assertEqual(msix_deploy.find_installed("My.App", manager=manager).version,
+                         "2.3.4.5")
+
+    def test_the_publisher_comes_back(self):
+        """發行者不同的同名套件會被系統當成兩個不相關的應用程式並存安裝。"""
+        manager = FakeManager(packages=[
+            FakePackage("My.App", "My.App_1.0.0.0_x64__xyz",
+                        publisher="CN=Someone Else, O=Someone Else"),
+        ])
         self.assertEqual(
-            msix_deploy.find_installed("My.App", manager=manager),
-            "My.App_1.0.0.0_x64__xyz",
-        )
+            msix_deploy.find_installed("My.App", manager=manager).publisher,
+            "CN=Someone Else, O=Someone Else")
+
+    def test_an_unreadable_version_does_not_break_the_lookup(self):
+        """版本讀不出來時仍然要回報找到了——呼叫端至少能說出「已經裝過」。"""
+        class Odd(FakePackage):
+            def __init__(self):
+                super().__init__("My.App", "My.App_1_x64__xyz")
+                self.id.version = object()
+
+        found = msix_deploy.find_installed("My.App", manager=FakeManager(packages=[Odd()]))
+        self.assertIsNotNone(found)
+        self.assertEqual(found.version, "")
 
     def test_no_match_returns_none(self):
         manager = FakeManager(packages=[FakePackage("Other.App", "Other.App_1_x64__abc")])

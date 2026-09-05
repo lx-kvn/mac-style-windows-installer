@@ -356,7 +356,8 @@ def build_all(
     windows_service=None, scheduled_task=None, dependencies_min_version=None,
     create_restore_point_before_install=False, install_password_env="", install_password="",
     workspace_dir=".", sdk_tools_settings=None, install_engine="traditional",
-    signed_msix="", msix_identity_name="", engine_notices=None,
+    signed_msix="", msix_identity_name="", msix_package_version="",
+    msix_publisher="", engine_notices=None,
     progress_callback=None,
 ):
     """流水線：產生配置 -> 編譯反安裝檔 -> 編譯主安裝檔
@@ -518,6 +519,11 @@ def build_all(
         # 套件身分名稱。安裝端用它查「同一個應用程式的套件是不是已經裝過」
         # （稽核 D3）。它不由 app_name 推導（ADR-0007），只能從這裡帶過去。
         "msix_identity_name": msix_identity_name if install_engine == "msix" else "",
+        # 這次套件的版本與發行者。安裝端拿它們跟已安裝的那一份比較——降版要
+        # 問過使用者（ADR-0015），而發行者不同的同名套件會並存、只告知不移除。
+        # 兩者都只有打包端知道：版本是補成四段的形式，發行者是憑證上的字串。
+        "msix_package_version": msix_package_version if install_engine == "msix" else "",
+        "msix_publisher": msix_publisher if install_engine == "msix" else "",
     }
     config_path = os.path.join(workspace_dir, CONFIG_FILE_NAME)
     with open(config_path, "w", encoding="utf-8") as f:

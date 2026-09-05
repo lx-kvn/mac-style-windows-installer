@@ -25,6 +25,16 @@ def ok(**overrides):
     return msix_deploy.Outcome(**values)
 
 
+def _package(full_name, version="", publisher=""):
+    """`find_installed_package` 回傳的形狀。
+
+    版本與發行者預設留空——這一組測試談的是「查到了同名套件」本身，不談
+    版本比較，而空值代表「不做比較」（見 msix_install.run 的說明）。
+    """
+    return msix_deploy.InstalledPackage(full_name=full_name, version=version,
+                                        publisher=publisher)
+
+
 class Recorder:
     """記錄呼叫順序，讓「先移除舊版再部署」這件事可以被驗證。"""
 
@@ -138,22 +148,19 @@ class DeploymentFailureTest(unittest.TestCase):
 class ExistingMsixPackageTest(unittest.TestCase):
     """稽核 D3：同一個 identity 已經以 MSIX 裝過的情形原本完全沒有處置。
 
-    `check_existing` 接的是登錄表查詢，只看得到傳統模式的舊安裝。Windows 對
-    版本較高的套件本來就會就地更新，因此升級那條路一直是好的；問題出在同版本
-    重裝與降版——那兩種會直接失敗，而使用者拿到的是系統的原始錯誤碼。
+    `check_existing` 接的是登錄表查詢，只看得到傳統模式的舊安裝。同一個
+    identity 已經以 MSIX 裝過的情形原本完全沒有分支。
 
-    這一輪的處置是「查得到就把話說清楚」，不自動移除：自動移除的前提是失敗
-    原因確實是同名套件已存在，而失敗也可能來自別的原因（憑證不受信任、磁碟
-    空間不足），那時移除等於白白弄丟使用者的既有應用程式，而重試照樣失敗。
-    自動移除待 `add_package_async` 對同版本／降版的真實行為於虛擬機驗證後
-    再決定（見 docs/investigations/MSIX稽核與缺陷修正.md 的待辦清單）。
+    這一組測的是**部署失敗之後**那段附加說明——降版的事前處置在
+    `DowngradeTest`。兩者都需要：事前的比較依賴打包端有寫進 `package_version`，
+    而修正之前編出的安裝檔沒有那個欄位，那些安裝檔仍然只走得到這條路。
     """
 
     def test_a_failure_with_an_installed_package_names_it(self):
         recorder = Recorder(deploy_outcome=msix_deploy.Outcome(
             False, "錯誤 0x80073D06", 0x80073D06))
         result = run(recorder,
-                     find_installed_package=lambda: "My.App_1.0.0.0_x64__abc")
+                     find_installed_package=lambda: _package("My.App_1.0.0.0_x64__abc"))
         self.assertEqual(result["status"], "error")
         self.assertIn("My.App_1.0.0.0_x64__abc", result["message"])
 
@@ -162,12 +169,12 @@ class ExistingMsixPackageTest(unittest.TestCase):
         recorder = Recorder(deploy_outcome=msix_deploy.Outcome(
             False, "錯誤 0x80073D06", 0x80073D06))
         result = run(recorder,
-                     find_installed_package=lambda: "My.App_1.0.0.0_x64__abc")
+                     find_installed_package=lambda: _package("My.App_1.0.0.0_x64__abc"))
         self.assertIn("錯誤 0x80073D06", result["message"])
 
     def test_the_failure_message_says_where_to_remove_it(self):
         recorder = Recorder(deploy_outcome=msix_deploy.Outcome(False, "壞了", 1))
-        result = run(recorder, find_installed_package=lambda: "My.App_1_x64__a")
+        result = run(recorder, find_installed_package=lambda: _package("My.App_1_x64__a"))
         self.assertIn("設定", result["message"])
 
     def test_the_message_does_not_claim_a_same_version_reinstall_fails(self):
@@ -178,7 +185,7 @@ class ExistingMsixPackageTest(unittest.TestCase):
         使用者會照著去移除一個其實不需要移除的東西。
         """
         recorder = Recorder(deploy_outcome=msix_deploy.Outcome(False, "壞了", 1))
-        result = run(recorder, find_installed_package=lambda: "My.App_1_x64__a")
+        result = run(recorder, find_installed_package=lambda: _package("My.App_1_x64__a"))
         self.assertIn("舊", result["message"])
         self.assertNotIn("同一個版本或更舊", result["message"])
 
@@ -192,7 +199,7 @@ class ExistingMsixPackageTest(unittest.TestCase):
         預期中的步驟——比照傳統模式舊版被移除時的告知。"""
         recorder = Recorder()
         lines = []
-        run(recorder, find_installed_package=lambda: "My.App_1_x64__a",
+        run(recorder, find_installed_package=lambda: _package("My.App_1_x64__a"),
             log=lines.append)
         self.assertTrue(any("My.App_1_x64__a" in line for line in lines))
 
@@ -202,7 +209,7 @@ class ExistingMsixPackageTest(unittest.TestCase):
 
         def find():
             calls.append(1)
-            return "My.App_1_x64__a"
+            return _package("My.App_1_x64__a")
 
         run(Recorder(deploy_outcome=msix_deploy.Outcome(False, "壞了", 1)),
             find_installed_package=find)
@@ -221,6 +228,176 @@ class ExistingMsixPackageTest(unittest.TestCase):
 
         result = run(Recorder(), find_installed_package=find)
         self.assertEqual(result["status"], "success")
+
+
+def installed(version="1.0.0.0", publisher="CN=Tester",
+              full_name="My.App_1.0.0.0_x64__abc"):
+    return msix_deploy.InstalledPackage(full_name=full_name, version=version,
+                                        publisher=publisher)
+
+
+class DowngradeTest(unittest.TestCase):
+    """降版要問過使用者（ADR-0015 決定一、二）。
+
+    實機量測（2026-09-05，Windows 11 25H2）：同版本重裝會成功、升版會就地
+    更新，只有降版會失敗（`0x80073D06`）。因此「要不要降版」這個決定要發生
+    在部署**之前**——放在失敗之後的話，使用者此時看到的是系統的錯誤訊息，
+    不是一個他可以回答的問題。
+
+    比照傳統引擎既有的形狀（`upgrade.check_existing()` 的三分法）。MSIX 多
+    一件傳統引擎沒有的事：移除會連同應用程式的資料一起清掉。
+    """
+
+    def _run(self, recorder, current="1.0.0.0", package_version="2.0.0.0",
+             publisher="CN=Tester", confirm=None, remove=None, log=None):
+        return msix_install.run(
+            "C:\\x\\app.msix",
+            check_existing=recorder.check_existing,
+            remove_existing=recorder.remove_existing,
+            deploy=recorder.deploy,
+            find_installed_package=lambda: installed(current, publisher),
+            package_version=package_version,
+            package_publisher="CN=Tester",
+            confirm_downgrade=confirm,
+            remove_installed_package=remove,
+            log=log,
+        )
+
+    def test_a_newer_version_just_deploys(self):
+        recorder = Recorder()
+        result = self._run(recorder, current="1.0.0.0", package_version="2.0.0.0")
+        self.assertEqual(result["status"], "success")
+        self.assertIn("deploy", recorder.order)
+
+    def test_the_same_version_just_deploys(self):
+        """實機量測：同版本重新安裝會成功（系統重新註冊）。不要多此一舉。"""
+        recorder = Recorder()
+        result = self._run(recorder, current="1.0.0.0", package_version="1.0.0.0")
+        self.assertEqual(result["status"], "success")
+
+    def test_a_downgrade_without_consent_is_refused(self):
+        recorder = Recorder()
+        asked = []
+        result = self._run(recorder, current="2.0.0.0", package_version="1.0.0.0",
+                           confirm=lambda info: asked.append(info) or False)
+        self.assertEqual(result["status"], "error")
+        self.assertNotIn("deploy", recorder.order)
+        self.assertEqual(len(asked), 1)
+
+    def test_the_question_carries_both_versions(self):
+        recorder = Recorder()
+        asked = []
+        self._run(recorder, current="2.0.0.0", package_version="1.0.0.0",
+                  confirm=lambda info: asked.append(info) or False)
+        self.assertEqual(asked[0]["installed_version"], "2.0.0.0")
+        self.assertEqual(asked[0]["new_version"], "1.0.0.0")
+
+    def test_the_question_says_the_data_will_go_too(self):
+        """傳統引擎的降版不會清資料，MSIX 的會——那是使用者答這個問題時
+        必須知道的事（ADR-0015 決定二）。"""
+        recorder = Recorder()
+        asked = []
+        self._run(recorder, current="2.0.0.0", package_version="1.0.0.0",
+                  confirm=lambda info: asked.append(info) or False)
+        self.assertIn("資料", asked[0]["message"])
+
+    def test_consenting_removes_the_old_package_then_deploys(self):
+        recorder = Recorder()
+        removed = []
+
+        def remove(full_name):
+            removed.append(full_name)
+            return msix_deploy.Outcome(True, "", 0)
+
+        result = self._run(recorder, current="2.0.0.0", package_version="1.0.0.0",
+                           confirm=lambda info: True, remove=remove)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(removed, ["My.App_1.0.0.0_x64__abc"])
+        self.assertIn("deploy", recorder.order)
+
+    def test_a_failed_removal_does_not_go_on_to_deploy(self):
+        recorder = Recorder()
+        result = self._run(
+            recorder, current="2.0.0.0", package_version="1.0.0.0",
+            confirm=lambda info: True,
+            remove=lambda full_name: msix_deploy.Outcome(False, "移不掉", 1))
+        self.assertEqual(result["status"], "error")
+        self.assertIn("移不掉", result["message"])
+        self.assertNotIn("deploy", recorder.order)
+
+    def test_without_a_confirm_callback_a_downgrade_proceeds(self):
+        """靜默安裝走這一條（ADR-0015 決定三）：直接做，不中止、不加旗標。"""
+        recorder = Recorder()
+        removed = []
+        result = self._run(
+            recorder, current="2.0.0.0", package_version="1.0.0.0", confirm=None,
+            remove=lambda full_name: removed.append(full_name) or msix_deploy.Outcome(True, "", 0))
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(len(removed), 1)
+
+    def test_the_silent_path_records_that_the_data_is_going(self):
+        """沒有畫面可以警示，紀錄檔就是唯一的出口。"""
+        recorder = Recorder()
+        lines = []
+        self._run(recorder, current="2.0.0.0", package_version="1.0.0.0",
+                  confirm=None, log=lines.append,
+                  remove=lambda full_name: msix_deploy.Outcome(True, "", 0))
+        joined = "\n".join(lines)
+        self.assertIn("2.0.0.0", joined)
+        self.assertIn("1.0.0.0", joined)
+        self.assertIn("資料", joined)
+
+    def test_without_a_package_version_nothing_is_compared(self):
+        """舊版工具編出來的安裝檔沒有那個欄位，行為維持修正前的樣子。"""
+        recorder = Recorder()
+        asked = []
+        result = msix_install.run(
+            "C:\\x\\app.msix", check_existing=recorder.check_existing,
+            remove_existing=recorder.remove_existing, deploy=recorder.deploy,
+            find_installed_package=lambda: installed("2.0.0.0"),
+            confirm_downgrade=lambda info: asked.append(info) or False)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(asked, [])
+
+
+class DifferentPublisherTest(unittest.TestCase):
+    """發行者不同的同名套件只警示、不移除（ADR-0015 決定四）。
+
+    套件身分由「名稱 + 發行者」共同構成。打包者換憑證時名稱不變而發行者
+    改變，系統把兩者當成互不相關的應用程式並存安裝。那份舊套件確有可能屬於
+    另一個開發者，工具不代使用者判定兩者為同一個應用程式。
+    """
+
+    def _run(self, recorder, publisher, confirm=None, remove=None, log=None):
+        return msix_install.run(
+            "C:\\x\\app.msix", check_existing=recorder.check_existing,
+            remove_existing=recorder.remove_existing, deploy=recorder.deploy,
+            find_installed_package=lambda: installed("9.0.0.0", publisher),
+            package_version="1.0.0.0", package_publisher="CN=Tester",
+            confirm_downgrade=confirm, remove_installed_package=remove, log=log)
+
+    def test_a_different_publisher_is_not_treated_as_a_downgrade(self):
+        """版本比較高也不問降版——系統眼中那不是同一個應用程式。"""
+        recorder = Recorder()
+        asked = []
+        result = self._run(recorder, "CN=Someone Else",
+                           confirm=lambda info: asked.append(info) or False)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(asked, [])
+
+    def test_it_is_never_removed_automatically(self):
+        recorder = Recorder()
+        removed = []
+        self._run(recorder, "CN=Someone Else",
+                  remove=lambda full_name: removed.append(full_name))
+        self.assertEqual(removed, [])
+
+    def test_the_user_is_told_the_two_will_coexist(self):
+        recorder = Recorder()
+        lines = []
+        self._run(recorder, "CN=Someone Else", log=lines.append)
+        joined = "\n".join(lines)
+        self.assertIn("並存", joined)
 
 
 class NoUninstallerTest(unittest.TestCase):

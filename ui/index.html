@@ -476,6 +476,8 @@
                 msix_destination_hint: "由 Windows 管理位置",
                 progress_preparing: "正在準備...",
                 desktop_shortcut_label: "建立桌面捷徑",
+                msix_downgrade_title: "這台電腦上的版本比較新",
+                msix_coexist_title: "偵測到同名但簽章者不同的套件",
                 upgrade_default_title: "偵測到已安裝的版本",
                 btn_cancel: "取消",
                 btn_update_overwrite: "更新覆蓋安裝",
@@ -523,6 +525,8 @@
                 msix_destination_hint: "Managed by Windows",
                 progress_preparing: "Preparing...",
                 desktop_shortcut_label: "Create a desktop shortcut",
+                msix_downgrade_title: "A newer version is installed on this machine",
+                msix_coexist_title: "A same-named package from a different signer was found",
                 upgrade_default_title: "Existing installation detected",
                 btn_cancel: "Cancel",
                 btn_update_overwrite: "Update",
@@ -689,7 +693,10 @@
         function cancelUpgrade() { document.getElementById('upgradeModal').classList.remove('active'); closeWindow(); }
         function confirmUpgrade() {
             document.getElementById('upgradeModal').classList.remove('active');
-            afterUpgradeCheck();
+            // 傳統模式的舊版確認過了，接著才輪到 MSIX 那一邊的檢查——兩者
+            // 問的是不同的東西（一個是登錄表裡的舊安裝，一個是已註冊的套件），
+            // 同一台機器上有可能兩者都有。
+            checkMsixExistingPackage();
         }
 
         // ---------------- 相依元件警告 ----------------
@@ -859,8 +866,63 @@
                 }
                 document.getElementById('upgradeModal').classList.add('active');
             } else {
-                afterUpgradeCheck();
+                await checkMsixExistingPackage();
             }
+        }
+
+        // ---------------- MSIX：已安裝的同名套件 ----------------
+        // 部署之前先問（見 docs/adr/0015）。問題一定要在觸發安裝之前問完——
+        // webview 的前端沒有辦法在 Python 呼叫中途回答問題。這與上面覆蓋安裝
+        // 提示的形狀相同，兩者也共用同一個對話框。
+        //
+        // 三種結果：none 什麼都不做；downgrade 要問過；coexist 只告知——那份
+        // 同名但簽章者不同的套件有可能屬於另一個開發者，工具不代為判定。
+        let msixDowngradeAllowed = false;
+
+        async function checkMsixExistingPackage() {
+            let info = null;
+            try {
+                info = await pywebview.api.check_msix_existing_package();
+            } catch (e) {
+                // 查不到就當作沒有：這個查詢只是為了先問使用者，不是安裝的
+                // 必要條件。真的有問題時部署自己會失敗，那裡的訊息更精確。
+                info = null;
+            }
+            if (!info || info.action === 'none') {
+                await afterUpgradeCheck();
+                return true;
+            }
+            if (info.action === 'coexist') {
+                showModal(t('msix_coexist_title'), info.message, false, false);
+                await afterUpgradeCheck();
+                return true;
+            }
+            if (info.action !== 'downgrade') {
+                // 認不得的結果照「什麼都不做」處理。落進降版對話框的話，
+                // 使用者會被問一個他的情況下沒有意義的問題。
+                await afterUpgradeCheck();
+                return true;
+            }
+            // downgrade：使用者同意才繼續，拒絕就不安裝。
+            const titleEl = document.getElementById('upgradeTitle');
+            const msgEl = document.getElementById('upgradeMessage');
+            const btnEl = document.getElementById('confirmUpgradeBtn');
+            const iconEl = document.getElementById('upgradeIcon');
+            iconEl.className = 'nice-icon downgrade';
+            iconEl.innerHTML = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L14.7 3.86a2 2 0 0 0-3.4 0z"></path></svg>';
+            titleEl.innerText = t('msix_downgrade_title');
+            msgEl.innerText = info.message;
+            btnEl.innerText = t('btn_continue_anyway');
+            btnEl.onclick = confirmMsixDowngrade;
+            document.getElementById('upgradeModal').classList.add('active');
+            return false;
+        }
+
+        function confirmMsixDowngrade() {
+            msixDowngradeAllowed = true;
+            document.getElementById('upgradeModal').classList.remove('active');
+            document.getElementById('confirmUpgradeBtn').onclick = confirmUpgrade;
+            afterUpgradeCheck();
         }
 
         async function afterUpgradeCheck() {
@@ -1090,7 +1152,8 @@
             document.getElementById('installProgressFill').style.width = '0%';
             pathPreview.innerText = t('installing');
 
-            const result = await pywebview.api.trigger_installation(createDesktopShortcut, !!skipProcessCheck);
+            const result = await pywebview.api.trigger_installation(
+                createDesktopShortcut, !!skipProcessCheck, msixDowngradeAllowed);
 
             if (result.status === 'success') {
                 setInstallState('done');

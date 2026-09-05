@@ -177,6 +177,10 @@ class InstallerAPI:
         # 套件是不是已經裝過」（稽核 D3）。它不由 app_name 推導
         # （ADR-0007），因此只能由打包端寫進設定檔。
         self.msix_identity_name = ""
+        # MSIX 引擎才有：這次套件的版本與發行者，用來跟已安裝的那一份比較
+        # （降版要問過使用者，見 docs/adr/0015）。兩者都只有打包端知道。
+        self.msix_package_version = ""
+        self.msix_publisher = ""
         self.no_admin_install = False
         self.custom_install_dir = ""
         self.pre_install_script = ""
@@ -283,6 +287,8 @@ class InstallerAPI:
                     self.install_engine = config.get("install_engine", "traditional") or "traditional"
                     self.msix_package = config.get("msix_package", "")
                     self.msix_identity_name = config.get("msix_identity_name", "")
+                    self.msix_package_version = config.get("msix_package_version", "")
+                    self.msix_publisher = config.get("msix_publisher", "")
                     self.no_admin_install = bool(config.get("no_admin_install", False))
                     self.custom_install_dir = config.get("custom_install_dir", "")
                     self.pre_install_script = config.get("pre_install_script", "")
@@ -829,7 +835,8 @@ class InstallerAPI:
         if registry_entry_created:
             system_entries.remove_registry_entry(self.app_name, self.no_admin_install)
 
-    def trigger_installation(self, create_desktop_shortcut=True, skip_process_check=False):
+    def trigger_installation(self, create_desktop_shortcut=True, skip_process_check=False,
+                             allow_downgrade=False):
         """薄包裝：實際安裝邏輯在 _trigger_installation_impl()。這裡負責兩件
         跟安裝本身無關、但每一條出口都要照顧到的事。
 
@@ -869,7 +876,8 @@ class InstallerAPI:
             self._install_in_progress = True
 
         try:
-            result = self._trigger_installation_impl(create_desktop_shortcut, skip_process_check)
+            result = self._trigger_installation_impl(
+                create_desktop_shortcut, skip_process_check, allow_downgrade)
             if isinstance(result, dict) and result.get("status") == "success":
                 self._install_completed = True
             return result
@@ -878,14 +886,16 @@ class InstallerAPI:
             explorer_lock_release.restore_after_lock_release(self._explorer_forced_down_state)
             self._explorer_forced_down_state = None
 
-    def _trigger_installation_impl(self, create_desktop_shortcut=True, skip_process_check=False):
+    def _trigger_installation_impl(self, create_desktop_shortcut=True, skip_process_check=False,
+                                   allow_downgrade=False):
         log_lines = [f"=== {self.app_name} 安裝紀錄 {datetime.now().isoformat()} ==="]
 
         def log(msg):
             log_lines.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
         try:
-            return self._trigger_installation_impl_inner(create_desktop_shortcut, skip_process_check, log_lines, log)
+            return self._trigger_installation_impl_inner(
+                create_desktop_shortcut, skip_process_check, log_lines, log, allow_downgrade)
         finally:
             # 真實抓到的 bug（F24）：這份 log 原本只在安裝完全成功那條路徑
             # 才會寫出，十幾個提早失敗的 return 分支完全沒有寫——偏偏失敗
@@ -919,7 +929,58 @@ class InstallerAPI:
                 shutil.rmtree(self._decrypted_payload_dir, ignore_errors=True)
                 self._decrypted_payload_dir = None
 
-    def _install_msix(self, log):
+    def check_msix_existing_package(self):
+        """部署之前先問一次：這台電腦上已經有同一個應用程式的套件嗎？
+
+        回傳 `{"action": ...}`，三種可能：
+
+        - `"none"`——沒有，或系統會自行處理（版本較新就地更新、相同重新註冊，
+          兩者皆經 2026-09-05 實機量測確認）。
+        - `"downgrade"`——這次要裝的比較舊。前端要先問過使用者才呼叫
+          `trigger_installation(allow_downgrade=True)`（ADR-0015 決定二）。
+        - `"coexist"`——同名但簽章者不同。系統會讓兩者並存，只告知、不移除
+          （決定四）。
+
+        **形狀比照既有的覆蓋安裝提示**：`check_existing_install()` 也是前端
+        先問、使用者同意才觸發安裝。webview 的前端沒有辦法在 Python 呼叫
+        中途回答問題，因此問題一定要在觸發之前問完。
+        """
+        if self.install_engine != "msix" or not self.msix_identity_name:
+            return {"action": "none"}
+        try:
+            import msix_deploy
+            import msix_install
+            existing = msix_deploy.find_installed(self.msix_identity_name)
+        except Exception:
+            # 查不到就當作沒有——這個查詢只是為了先問使用者，不是流程的必要
+            # 條件；真的有問題時部署自己會失敗，那裡的訊息比這裡精確。
+            return {"action": "none"}
+        if existing is None:
+            return {"action": "none"}
+
+        if (self.msix_publisher and existing.publisher
+                and existing.publisher != self.msix_publisher):
+            return {
+                "action": "coexist",
+                "message": (
+                    f"這台電腦上有一份同名但簽章者不同的套件（{existing.full_name}）。\n"
+                    "系統會把它與這次要安裝的視為兩個不相關的應用程式，安裝之後"
+                    "兩者會並存。\n"
+                    "這個安裝程式不會自動移除它——那份套件有可能屬於另一個開發者。"
+                ),
+                "package_full_name": existing.full_name,
+            }
+
+        if not self.msix_package_version or not existing.version:
+            return {"action": "none"}
+        if msix_install._compare_versions(self.msix_package_version,
+                                          existing.version) >= 0:
+            return {"action": "none"}
+        question = msix_install._downgrade_question(existing,
+                                                    self.msix_package_version)
+        return dict(question, action="downgrade")
+
+    def _install_msix(self, log, allow_downgrade=False):
         """MSIX 引擎的安裝：把內嵌的已簽章套件交給 Windows 的套件引擎。
 
         流程的順序與理由在 msix_install.run()；這裡只負責把這個安裝檔手上
@@ -956,15 +1017,24 @@ class InstallerAPI:
             log=log,
             package_must_exist=True,
             find_installed_package=find_installed_package,
+            package_version=self.msix_package_version,
+            package_publisher=self.msix_publisher,
+            # 前端在呼叫 trigger_installation() 之前就已經問過使用者了
+            # （比照既有的覆蓋安裝提示：check_existing_install() 先問、
+            # 同意才觸發安裝），因此這裡只是把那個答案轉成 msix_install
+            # 要的形狀。靜默安裝一律為真（ADR-0015 決定三）。
+            confirm_downgrade=lambda info: bool(allow_downgrade),
+            remove_installed_package=msix_deploy.remove,
         )
 
-    def _trigger_installation_impl_inner(self, create_desktop_shortcut, skip_process_check, log_lines, log):
+    def _trigger_installation_impl_inner(self, create_desktop_shortcut, skip_process_check,
+                                         log_lines, log, allow_downgrade=False):
         # MSIX 引擎走另一條路徑。兩者幾乎不共用邏輯——傳統路徑做的是
         # 「自己複製檔案、寫登錄表、產生 uninstall.exe」，MSIX 路徑做的是
         # 「把已簽章的套件交給系統」——因此在最上層分流，而不是在傳統
         # 流程裡插判斷。走錯路徑的後果是兩種落地方式同時發生。
         if self.install_engine == "msix":
-            return self._install_msix(log)
+            return self._install_msix(log, allow_downgrade=allow_downgrade)
 
         # 這一整批都提前在最外層宣告：任何階段（複製迴圈開始前/開始後、
         # 登錄表/捷徑/檔案關聯/服務/排程工作/PATH 任一步之後）才失敗，
@@ -1614,7 +1684,11 @@ def run_silent_install(install_dir=None, create_desktop_shortcut=True, log_path=
     for w in warnings:
         log(f"[警告] 建議先安裝：{w.get('name')}（{w.get('url')}）")
 
-    result = api.trigger_installation(create_desktop_shortcut=create_desktop_shortcut)
+    # 靜默安裝沒有畫面可以問，直接做（ADR-0015 決定三）：兩種引擎的靜默行為
+    # 不該分岔，同一份部署腳本換個引擎就不能用會比資料被清掉更難察覺。發生了
+    # 什麼由 msix_install 寫進這份紀錄——那是這條路唯一的出口。
+    result = api.trigger_installation(create_desktop_shortcut=create_desktop_shortcut,
+                                      allow_downgrade=True)
     if result.get("status") == "success":
         log(f"[成功] {result.get('message')}")
         # F01：安裝過程收集到的非致命失敗（服務/排程工作/還原點/後置腳本/

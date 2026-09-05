@@ -619,6 +619,8 @@ def cmd_pack(args):
             install_engine=pack_data.get("install_engine", "traditional"),
             signed_msix=signed_msix,
             msix_identity_name=(pack_data.get("msix") or {}).get("identity_name", ""),
+            msix_package_version=(pack_data.get("msix") or {}).get("package_version", ""),
+            msix_publisher=(pack_data.get("msix") or {}).get("certificate_subject", ""),
             engine_notices=pack_data.get("engine_notices"),
             sdk_tools_settings=sdk_settings,
             progress_callback=progress_handler,

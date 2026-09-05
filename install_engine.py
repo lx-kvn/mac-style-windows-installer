@@ -215,9 +215,11 @@ ENGINE_PLUMBING_FIELDS = frozenset({
     "png_path", "ico_path", "workspace_dir",
     # 建置過程的回報與工具位置。
     "progress_callback", "sdk_tools_settings",
-    # 引擎的選擇本身，以及選了 MSIX 之後才有意義的兩個輸入。它們不是「一項
-    # 打包能力」，而是這個機制自己的參數。
+    # 引擎的選擇本身，以及選了 MSIX 之後才有意義的幾個輸入。它們不是「一項
+    # 打包能力」，而是這個機制自己的參數——後三個都是從 msix 區塊推導出來、
+    # 要讓安裝端知道的事實（套件身分、版本、發行者），不是使用者另外填的欄位。
     "install_engine", "signed_msix", "msix_identity_name",
+    "msix_package_version", "msix_publisher",
     # check_settings() 的第四類結果，由 packaging_core 組好後傳進來印進建置
     # 紀錄。它是這個機制的輸出，不是使用者填的東西。
     "engine_notices",

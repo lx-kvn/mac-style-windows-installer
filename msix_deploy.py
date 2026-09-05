@@ -130,8 +130,35 @@ def deploy(package_path, manager=None, manager_factory=None, progress=None):
     return _outcome_from(result)
 
 
+class InstalledPackage(namedtuple("InstalledPackage",
+                                  "full_name version publisher")):
+    """已經裝在這台電腦上的一份同名套件。
+
+    帶版本與發行者，不只帶完整名稱：呼叫端要比版本（降版要問過使用者，見
+    docs/adr/0015）也要比發行者（發行者不同的同名套件會被系統當成兩個不相關
+    的應用程式並存安裝）。
+
+    兩者都從套件物件直接讀，不從完整名稱拆字串——`Name_Version_Arch__Hash`
+    是系統的內部慣例，拆它等於把一個我們控制不了的格式變成本專案的相依。
+    """
+
+    __slots__ = ()
+
+
+def _version_text(version):
+    """把套件版本轉成 `1.2.3.4` 這種字串；讀不出來時回傳空字串。
+
+    版本讀不出來不該讓整個查詢失敗——呼叫端至少還能說出「已經裝過」。
+    """
+    try:
+        return "{}.{}.{}.{}".format(version.major, version.minor,
+                                    version.build, version.revision)
+    except Exception:
+        return ""
+
+
 def find_installed(identity_name, manager=None, manager_factory=None):
-    """找出已安裝的同名套件，回傳它的完整名稱；沒有則回傳 None。
+    """找出已安裝的同名套件，回傳 `InstalledPackage`；沒有則回傳 None。
 
     只查當前使用者的套件。列舉全機器所有使用者的套件會被系統以權限不足
     拒絕，那是正確的權限檢查而非故障（第三輪 spike 結果第二項）。
@@ -143,7 +170,11 @@ def find_installed(identity_name, manager=None, manager_factory=None):
         packages = manager.find_packages_by_user_security_id("")
         for package in packages:
             if package.id.name == identity_name:
-                return package.id.full_name
+                return InstalledPackage(
+                    full_name=package.id.full_name,
+                    version=_version_text(getattr(package.id, "version", None)),
+                    publisher=str(getattr(package.id, "publisher", "") or ""),
+                )
     except Exception:
         # 查不到就是查不到——呼叫端的處置（例如「沒有舊版就直接裝」）在兩種
         # 情況下相同，把例外往上拋只會讓呼叫端多一段一樣的處理。
