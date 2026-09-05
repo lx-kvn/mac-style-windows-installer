@@ -500,6 +500,16 @@ def _validate_signing_config(signing_raw, lang=messages.DEFAULT_LANGUAGE,
     timestamp_url = str(signing_raw.get("timestamp_url", "")).strip()
     timestamp_url = timestamp_url or "http://timestamp.digicert.com"
 
+    # 欄位都在但都沒填 = 沒有啟用簽章，比照 windows_service 的既有規則
+    # （「或都留空不使用這個功能」）。`init` 產生的範本要把欄位列出來才看得出
+    # 這一塊長什麼形狀，而列出來就一定是空值；少了這條規則，跑 pack 會得到
+    # 「cert_path 必須指向一個實際存在的憑證檔案」——使用者根本沒有要簽章，
+    # 訊息卻要他去補一個檔案。
+    #
+    # timestamp_url 不算：它是簽章時的參數，不是「要不要簽章」的依據。
+    if not (cert_path or cert_password_env or thumbprint_raw):
+        return None, None
+
     if thumbprint_raw and (cert_path or cert_password_env):
         return None, _invalid("signing.both_sources", lang)
 

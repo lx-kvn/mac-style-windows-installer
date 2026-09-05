@@ -83,7 +83,21 @@ TEMPLATE = {
     "post_install_script": "",
     "custom_dependencies": [],
     "bundle_dependencies": [],
-    "signing": {},
+    # signing：憑證有兩種來源，兩者互斥（見 CONTEXT.md「簽章憑證的兩種來源」
+    # 與 docs/adr/0014）。四個欄位都列出來，是因為空字典連「有兩種填法」這件事
+    # 都傳達不了——而這一塊的形狀正是使用者最需要範本告訴他的東西。
+    #
+    # 值全部留空即代表沒有啟用簽章（比照 windows_service 的規則），因此範本
+    # 產出來可以直接拿去打包，不會因為這一塊而失敗。
+    #
+    # cert_thumbprint 排在最前面：那是建議的做法，私鑰由作業系統保管，打包時
+    # 不會有任何密碼出現在命令列上。指紋用 list-certs 子指令取得。
+    "signing": {
+        "cert_thumbprint": "",
+        "cert_path": "",
+        "cert_password_env": "",
+        "timestamp_url": "",
+    },
     "dependencies_min_version": {},
     # windows_service/scheduled_task/create_restore_point_before_install：
     # 真實抓到的問題（A3：config schema 單一真實來源）——這幾個欄位原本

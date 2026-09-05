@@ -1026,6 +1026,38 @@ class TestValidateSigningConfig(unittest.TestCase):
         self.assertIsNone(signing)
         self.assertIsNone(error)
 
+    def test_a_block_whose_fields_are_all_empty_means_the_feature_is_off(self):
+        """比照 `windows_service` 的既有規則（「或都留空不使用這個功能」）。
+
+        `init` 產生的範本要把欄位列出來才看得出這一塊長什麼形狀，而列出來就
+        一定是空值。少了這條規則，跑 `pack` 會得到「cert_path 必須指向一個
+        實際存在的憑證檔案」——使用者根本沒有要簽章，訊息卻要他去補一個檔案。
+        """
+        for block in (
+            {"cert_path": "", "cert_password_env": "", "timestamp_url": ""},
+            {"cert_thumbprint": "", "timestamp_url": ""},
+            {"cert_path": "", "cert_password_env": "", "cert_thumbprint": "",
+             "timestamp_url": ""},
+        ):
+            signing, error = packaging_core._validate_signing_config(block)
+            self.assertIsNone(error, f"{block} 不該報錯")
+            self.assertIsNone(signing, f"{block} 不該啟用簽章")
+
+    def test_only_a_timestamp_url_still_means_the_feature_is_off(self):
+        """時間戳記伺服器不是「要不要簽章」的依據——它是簽章時的參數。"""
+        signing, error = packaging_core._validate_signing_config(
+            {"timestamp_url": "http://timestamp.example/"})
+        self.assertIsNone(error)
+        self.assertIsNone(signing)
+
+    def test_a_half_filled_block_is_still_rejected(self):
+        """「都留空」與「填了一半」是兩件事，後者仍然要報錯——使用者顯然
+        想簽章，而工具知道他還缺什麼。"""
+        signing, error = packaging_core._validate_signing_config(
+            {"cert_path": "C:\\does\\not\\exist.pfx", "cert_password_env": ""})
+        self.assertIsNone(signing)
+        self.assertIsNotNone(error)
+
     def test_missing_cert_file_is_rejected(self):
         signing, error = packaging_core._validate_signing_config({
             "cert_path": "C:\\does\\not\\exist.pfx", "cert_password_env": "MY_CERT_PW",

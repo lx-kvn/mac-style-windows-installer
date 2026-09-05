@@ -63,6 +63,66 @@ class TestCmdInit(unittest.TestCase):
         ):
             self.assertIn(key, template, f"範本缺少欄位：{key}")
 
+    def test_the_signing_block_shows_both_certificate_sources(self):
+        """`signing` 原本是一個空字典，看不出這一塊長什麼形狀——而它現在有
+        兩種互斥的填法（ADR-0014），空字典連「有兩種」這件事都傳達不了。
+
+        比照 `windows_service`／`msix` 的做法：欄位列出來、值留空。
+        """
+        builder_cli.main(["init", "--output", self.output_path])
+        with open(self.output_path, "r", encoding="utf-8") as f:
+            signing = json.load(f)["signing"]
+        for key in ("cert_thumbprint", "cert_path", "cert_password_env",
+                    "timestamp_url"):
+            self.assertIn(key, signing, f"signing 缺少欄位：{key}")
+
+    def test_the_template_signing_block_is_inert(self):
+        """範本產出來就要能直接拿去打包。欄位列出來但值留空時，`signing`
+        必須被當成「沒有啟用簽章」——否則跑 `pack` 會得到一則要使用者去補
+        憑證檔案的訊息，而他根本沒有要簽章。
+        """
+        builder_cli.main(["init", "--output", self.output_path])
+        with open(self.output_path, "r", encoding="utf-8") as f:
+            signing = json.load(f)["signing"]
+        import packaging_core
+        resolved, error = packaging_core._validate_signing_config(signing)
+        self.assertIsNone(error, f"範本的 signing 區塊會讓打包失敗：{error}")
+        self.assertIsNone(resolved)
+
+    def test_the_template_passes_validation_once_the_paths_are_filled_in(self):
+        """範本裡的選填功能區塊不該讓驗證失敗。
+
+        使用者必須自己填的只有那幾個路徑與名稱；把它們補上之後，範本剩下的
+        部分——`signing`、`windows_service`、`scheduled_task` 這些列出了欄位
+        但留空的結構化區塊——必須被當成「沒有啟用」。
+
+        這一條是為了讓下一個被加進範本的結構化區塊，在忘記處理「留空」時會有
+        東西叫：那種缺陷的症狀是使用者跑 `init` 拿到範本、填完路徑、跑 `pack`，
+        然後被要求去補一個他根本沒有要用的功能的欄位。
+        """
+        builder_cli.main(["init", "--output", self.output_path])
+        with open(self.output_path, "r", encoding="utf-8") as f:
+            template = json.load(f)
+
+        app_dir = os.path.join(self.tmp_dir, "app")
+        os.makedirs(app_dir, exist_ok=True)
+        with open(os.path.join(app_dir, "MyApp.exe"), "wb") as f:
+            f.write(b"MZ")
+        png = os.path.join(self.tmp_dir, "icon.png")
+        write_test_png(png)
+
+        template["app_name"] = "TemplateProbe"
+        template["main_exe"] = "MyApp.exe"
+        template["exe_name"] = "Setup_TemplateProbe"
+        template["version"] = "1.0.0"
+        template["publisher"] = "Tester"
+
+        import packaging_core
+        pack_data, error = packaging_core.validate_and_build_pack_data(
+            template, app_dir, png, "fake.ico", "")
+        self.assertIsNone(error, f"補上路徑之後的範本仍然驗不過：{error}")
+        self.assertIsNone(pack_data.get("signing"))
+
 
 class TestCmdListFiles(unittest.TestCase):
     """list-files 子指令：CLI 使用者寫 --local-appdata-files 或 JSON 設定檔
