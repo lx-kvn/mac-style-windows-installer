@@ -118,34 +118,10 @@ class _WINTRUST_DATA(ctypes.Structure):
                 ("pSignatureSettings", ctypes.c_void_p)]
 
 
-class _CRYPT_BLOB(ctypes.Structure):
-    _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte))]
-
-
-class _CERT_INFO(ctypes.Structure):
-    """只需要讀到 `Subject` 這個欄位，但它的位置由前面所有欄位的大小決定，
-    因此整個結構都要宣告正確。`SignatureAlgorithm` 與 `SubjectPublicKeyInfo`
-    以位元組陣列占位——它們的內容用不到，只有大小重要。"""
-    _fields_ = [("dwVersion", wintypes.DWORD),
-                ("SerialNumber", _CRYPT_BLOB),
-                ("SignatureAlgorithm", ctypes.c_byte * 24),
-                ("Issuer", _CRYPT_BLOB),
-                ("NotBefore", wintypes.FILETIME),
-                ("NotAfter", wintypes.FILETIME),
-                ("Subject", _CRYPT_BLOB),
-                ("SubjectPublicKeyInfo", ctypes.c_byte * 32),
-                ("IssuerUniqueId", _CRYPT_BLOB),
-                ("SubjectUniqueId", _CRYPT_BLOB),
-                ("cExtension", wintypes.DWORD),
-                ("rgExtension", ctypes.c_void_p)]
-
-
-class _CERT_CONTEXT(ctypes.Structure):
-    _fields_ = [("dwCertEncodingType", wintypes.DWORD),
-                ("pbCertEncoded", ctypes.POINTER(ctypes.c_byte)),
-                ("cbCertEncoded", wintypes.DWORD),
-                ("pCertInfo", ctypes.POINTER(_CERT_INFO)),
-                ("hCertStore", ctypes.c_void_p)]
+# 憑證結構的宣告共用 cert_subject 那一份：三個模組（本模組、cert_subject、
+# cert_store）都要用同一組 Win32 結構，各自宣告一次等於同一件事有三個定義，
+# 而欄位順序或大小其中一份寫錯的症狀是讀到別的欄位的位元組。
+_CERT_CONTEXT = cert_subject.CERT_CONTEXT
 
 
 def _action_guid():
@@ -219,10 +195,8 @@ def _signer_subject(path):
         if not context:
             return None
         try:
-            blob = context.contents.pCertInfo.contents.Subject
-            der = ctypes.string_at(blob.pbData, blob.cbData)
             # 字串的形式交給 cert_subject——那裡記載了為什麼不自己組。
-            return cert_subject.subject_string_from_der(der)
+            return cert_subject.subject_string_from_context(context)
         except cert_subject.CertificateReadError:
             return None
         finally:

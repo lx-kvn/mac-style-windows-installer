@@ -87,8 +87,50 @@ class CertificateReadError(Exception):
         return _t(self.key, lang, **self.params)
 
 
-class _CERT_NAME_BLOB(ctypes.Structure):
+class CERT_NAME_BLOB(ctypes.Structure):
+    """一段長度加指標的位元組。Win32 的 `CRYPT_INTEGER_BLOB`、`CERT_NAME_BLOB`
+    等等都是同一個形狀，因此只宣告一份。"""
+
     _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte))]
+
+
+class CERT_INFO(ctypes.Structure):
+    """憑證的解析結果。實際只會讀到 `Subject` 與 `NotAfter`，但它們的位置由
+    前面所有欄位的大小決定，因此整個結構都要宣告正確。`SignatureAlgorithm`
+    與 `SubjectPublicKeyInfo` 以位元組陣列占位——內容用不到，只有大小重要。"""
+
+    _fields_ = [("dwVersion", wintypes.DWORD),
+                ("SerialNumber", CERT_NAME_BLOB),
+                ("SignatureAlgorithm", ctypes.c_byte * 24),
+                ("Issuer", CERT_NAME_BLOB),
+                ("NotBefore", wintypes.FILETIME),
+                ("NotAfter", wintypes.FILETIME),
+                ("Subject", CERT_NAME_BLOB),
+                ("SubjectPublicKeyInfo", ctypes.c_byte * 32),
+                ("IssuerUniqueId", CERT_NAME_BLOB),
+                ("SubjectUniqueId", CERT_NAME_BLOB),
+                ("cExtension", wintypes.DWORD),
+                ("rgExtension", ctypes.c_void_p)]
+
+
+class CERT_CONTEXT(ctypes.Structure):
+    _fields_ = [("dwCertEncodingType", wintypes.DWORD),
+                ("pbCertEncoded", ctypes.POINTER(ctypes.c_byte)),
+                ("cbCertEncoded", wintypes.DWORD),
+                ("pCertInfo", ctypes.POINTER(CERT_INFO)),
+                ("hCertStore", ctypes.c_void_p)]
+
+
+def subject_string_from_context(context):
+    """從一個 `CERT_CONTEXT` 指標取出主體字串。
+
+    `subject_string_from_der()` 的另一個入口：憑證來自存放區時拿到的是
+    context，來自 `.pfx` 時拿到的是 DER。字串的組法兩邊共用同一份——那件事
+    的規則不直覺（見模組說明），有兩份就會有一份是錯的。
+    """
+    blob = context.contents.pCertInfo.contents.Subject
+    return subject_string_from_der(
+        ctypes.string_at(blob.pbData, blob.cbData))
 
 
 def subject_string_from_der(der_bytes):
@@ -101,7 +143,7 @@ def subject_string_from_der(der_bytes):
     if not der_bytes:
         raise CertificateReadError("empty_subject")
     buffer = (ctypes.c_byte * len(der_bytes)).from_buffer_copy(der_bytes)
-    blob = _CERT_NAME_BLOB(
+    blob = CERT_NAME_BLOB(
         len(der_bytes), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_byte))
     )
     crypt32 = ctypes.WinDLL("crypt32.dll")

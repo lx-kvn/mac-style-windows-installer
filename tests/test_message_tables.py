@@ -20,6 +20,7 @@ MODULES = [
     "install_engine",
     "png_size",
     "cert_subject",
+    "cert_store",
     "msix_settings",
     "packaging_core",
     "webview2_runtime",
