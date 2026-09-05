@@ -347,6 +347,33 @@ class DowngradeTest(unittest.TestCase):
         self.assertIn("1.0.0.0", joined)
         self.assertIn("資料", joined)
 
+    def test_the_downgrade_notice_comes_back_in_the_result(self):
+        """實機驗證抓到的缺口（2026-09-05）：靜默安裝的 `/LOG=` 紀錄檔裡
+        只有一行成功訊息，那段「舊版連同其資料將被移除」完全不在裡面。
+
+        成因是兩份紀錄：`log` 收到的那些進的是安裝檔內部的 install_log.txt，
+        而 `/LOG=` 指定的那一份由 `run_silent_install()` 自己維護，兩者互不
+        相通。ADR-0015 決定三要求的是後者。
+
+        既有的出口就在回傳值裡——`run_silent_install()` 已經會把
+        `result["warnings"]` 逐條寫進紀錄檔（F01 建立的慣例）。降版這件事
+        走同一條路，不另外開一個管道。
+        """
+        recorder = Recorder()
+        result = self._run(recorder, current="2.0.0.0", package_version="1.0.0.0",
+                           confirm=None,
+                           remove=lambda full_name: msix_deploy.Outcome(True, "", 0))
+        warnings = result.get("warnings") or []
+        joined = "\n".join(warnings)
+        self.assertIn("2.0.0.0", joined)
+        self.assertIn("1.0.0.0", joined)
+        self.assertIn("資料", joined)
+
+    def test_a_normal_install_carries_no_downgrade_warning(self):
+        recorder = Recorder()
+        result = self._run(recorder, current="1.0.0.0", package_version="2.0.0.0")
+        self.assertEqual(result.get("warnings") or [], [])
+
     def test_without_a_package_version_nothing_is_compared(self):
         """舊版工具編出來的安裝檔沒有那個欄位，行為維持修正前的樣子。"""
         recorder = Recorder()

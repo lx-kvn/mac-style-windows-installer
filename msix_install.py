@@ -101,7 +101,8 @@ def _downgrade_question(existing, new_version):
 
 
 def _handle_existing_package(existing, package_version, package_publisher,
-                             confirm_downgrade, remove_installed_package, report):
+                             confirm_downgrade, remove_installed_package, report,
+                             warnings):
     """已安裝的同名套件要怎麼處置，回傳 `(可以繼續嗎, 中止時的訊息)`。
 
     三種情形（ADR-0015）：
@@ -134,11 +135,17 @@ def _handle_existing_package(existing, package_version, package_publisher,
             f"（{package_version}）新，而你選擇不移除它。"
         )
 
-    report(
+    notice = (
         f"要安裝的版本（{package_version}）比已安裝的（{existing.version}）舊，"
         f"因此會先請系統移除 {existing.full_name}——"
         "系統移除套件時會連同這個應用程式的資料一起清除。"
     )
+    report(notice)
+    # 也放進回傳值：`log` 收到的那些進的是安裝檔內部的 install_log.txt，而
+    # 靜默安裝 `/LOG=` 指定的那一份由 run_silent_install() 自己維護，兩者互不
+    # 相通。ADR-0015 決定三要求的是後者，而它已經會把 warnings 逐條寫進去
+    # （F01 建立的慣例）——實機驗證抓到這個缺口時，那個出口就已經在那裡了。
+    warnings.append(notice)
     outcome = (remove_installed_package(existing.full_name)
                if remove_installed_package else None)
     if outcome is not None and not outcome.ok:
@@ -214,11 +221,12 @@ def run(package_path, check_existing=None, remove_existing=None, deploy=None,
     # 同名的 MSIX 套件是否已安裝——查一次，供版本比較與失敗訊息使用。
     # 查在部署**之前**：「要不要降版」這個決定放在失敗之後的話，使用者此時
     # 看到的是系統的錯誤訊息，不是一個他可以回答的問題（ADR-0015 決定一）。
+    warnings = []
     installed_package = _find_installed(find_installed_package, log)
     if installed_package is not None:
         proceed, refusal = _handle_existing_package(
             installed_package, package_version, package_publisher,
-            confirm_downgrade, remove_installed_package, report)
+            confirm_downgrade, remove_installed_package, report, warnings)
         if not proceed:
             return {"status": "error", "message": refusal}
 
@@ -233,4 +241,4 @@ def run(package_path, check_existing=None, remove_existing=None, deploy=None,
         return {"status": "error", "message": message}
 
     report("安裝完成")
-    return {"status": "success", "message": SUCCESS_MESSAGE}
+    return {"status": "success", "message": SUCCESS_MESSAGE, "warnings": warnings}
