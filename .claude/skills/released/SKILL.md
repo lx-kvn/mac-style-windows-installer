@@ -10,7 +10,7 @@ push → GitHub Release，含 main 分支跟 tag）。流程中任何一步失�
 中止，不會跳過失敗的步驟繼續做下一步。push 與建立 GitHub Release 都是
 對外可見、難以完全還原的動作，**執行前一定要先明確列出這次要做的事情
 （push 的分支/tag/遠端；GitHub Release 的 tag/標題/附件），等使用者
-確認後才真的執行**（見步驟 10、11）——這是使用者把 tag/push/GitHub
+確認後才真的執行**（見步驟 12、13）——這是使用者把 tag/push/GitHub
 Release 加進這個 skill 時明確要求的，不能因為已經寫進 skill 就跳過
 確認、變成完全無人值守。
 
@@ -171,7 +171,7 @@ CMD 裡永遠打同一個指令 `mswi-cli`，不會因為升版就要改用法**
 
 ### 7. 備份這次的建置產物到本機版本庫
 
-除了 GitHub Release（步驟 12）以外，這個專案另外在
+除了 GitHub Release（步驟 13）以外，這個專案另外在
 `D:\Github\mac-style-windows-installer_專案\上傳到Github的版本\` 底下手動
 保留每個版本的建置產物副本（`v0.5.4`/`v0.6.0`/`v0.7.0` 這幾個既有資料夾），
 不透過 git 管理，純粹是本機的備份/歸檔。這一步把上一步產出的三個檔案
@@ -186,10 +186,76 @@ copy release_output\mac-style-windows-installer_CLI_v<版本號>.exe "D:\Github\
 
 如果 `v<版本號>` 這個資料夾已經存在（例如重跑這個流程修正上一次的失誤），
 直接覆蓋裡面的檔案即可，不需要另外確認——這是純本機備份，不是對外可見
-的動作，跟步驟 10/11/12 的 push/GitHub Release 性質不同，不用比照那幾步
+的動作，跟步驟 11/12/13 的 push/GitHub Release 性質不同，不用比照那幾步
 的確認把關。
 
-### 8. 產生 Release Notes 草稿
+### 8. 在虛擬機與 CI 上驗過真實產物（缺一不可）
+
+到這一步為止，被驗證過的只有「原始碼」——步驟 4 的測試套件全部跑在打包
+機器上，那台什麼都裝了、是中文環境、而且執行測試的行程權限與一般使用者
+不同。**編出來的那三顆檔案在別人的機器上會發生什麼，還沒有任何人知道。**
+
+兩件事都要做，因為它們回答的是不同的問題：
+
+- **CI**：這份程式碼在一台乾淨、英文、全新架設的機器上跑得起來嗎。
+- **虛擬機**：編出來的產物在真實的使用者機器上會發生什麼。
+
+#### 8a. 虛擬機：對產物做煙霧測試
+
+```bash
+python -m tools.verify_release_build release_output/Setup_<應用程式>_v<版本號>.exe
+```
+
+預設跑 `win11`（繁體中文、字碼頁 950）的 `standard_user` 情境——真正的
+標準使用者，不在 Administrators 群組。它會靜默安裝、確認兩顆 exe 與登錄表
+項目與 PATH 都到位、**實際執行裝好的 CLI**、再靜默移除並確認清乾淨。
+
+執行前先給自己一個名字（虛擬機的占用協調要求具名，見 `run-test-vm` skill）：
+
+```powershell
+$env:VM_LOCK_OWNER = "<你的 session 代號>"
+```
+
+版本內容有動到 MSIX 引擎、最低 Windows 版本、或安裝流程本身時，`win1809`
+（英文環境、Windows 10 LTSC）也跑一次：
+
+```bash
+python -m tools.verify_release_build release_output/Setup_...exe --machine win1809 --profile default
+```
+
+三項有任何一項不是 `pass` 就中止整個流程。`inconclusive` 也算——那代表這
+一輪根本沒有量到東西，不是「大概沒問題」。
+
+**為什麼一定要有這一關**：v0.16.0 發布時，`build_config_tool.py --cli` 在
+編譯途中因為主控台編不出某個字元而中止，沒有產出任何 exe；那個路徑在英文的
+CI runner 上永遠不會執行到。而更早之前，打包機器少裝五個綁定套件時，工具
+回報編譯成功、產出一顆在任何機器上都裝不起來的安裝檔，錯誤一路走到終端
+使用者手上才出現。這兩件事測試套件與 CI 都攔不到（見 `CLAUDE.md`「CI 驗
+不到的事情」）。
+
+#### 8b. CI：在乾淨的英文機器上跑一遍
+
+`build.yml` 只由 `v*` tag 或手動觸發，**push 到 main 不會觸發它**。也就是
+說，什麼都不做的話，CI 的結果會晚於「tag 已經推上去」這件對外可見的事實
+——v0.16.0 就是這樣拿到一次紅燈的。因此在打 tag 之前先手動跑一次：
+
+```bash
+gh workflow run build.yml --ref main -f version=<版本號>
+gh workflow run test-packaging-options.yml --ref main
+gh run list --limit 2
+```
+
+兩個都要綠。`test-packaging-options.yml` 驗的是打包選項實際落到系統上的
+效果（登錄表、服務、排程工作、PATH、檔案關聯、MSIX 引擎與憑證存放區
+簽章），跟 `build.yml` 涵蓋的範圍不同。
+
+CI 紅燈時中止流程，修好、重跑，綠了才往下走。**不要因為「本機是綠的」就
+判斷 CI 的紅燈可以忽略**——本機與 runner 的差異（語系、權限、已安裝的
+套件）正是這一關存在的理由。實際發生過的三種紅燈：測試模組匯入了只有
+本機才裝的相依套件、測試未指定語言卻斷言中文字串、以及斷言「不包含」的
+測試在英文機器上無條件通過（後者比失敗更糟，因為它不會被發現）。
+
+### 9. 產生 Release Notes 草稿
 
 在 `docs/releases/` 底下新增 `PRE-RELEASE_NOTES_v<版本號>.md`，格式沿用
 這個專案已經確立的雙語（英文 + 繁體中文）慣例，可以參考 `docs/releases/`
@@ -206,7 +272,7 @@ copy release_output\mac-style-windows-installer_CLI_v<版本號>.exe "D:\Github\
 標題註明「Pre-release」，結尾附上這次涵蓋的完整 commit 清單（hash + 訊息
 第一行），比照既有 Release Notes 的「Full commit list」段落慣例。
 
-### 9. Commit
+### 10. Commit
 
 加入：
 - `VERSION`
@@ -225,7 +291,7 @@ chore: 發布 v<版本號>
 <列出這次版本包含的重點變更，跟 Release Notes 草稿的重點對齊>
 ```
 
-### 10. 打 tag
+### 11. 打 tag
 
 ```
 git tag -a v<版本號> -m "v<版本號>"
@@ -235,7 +301,7 @@ git tag -a v<版本號> -m "v<版本號>"
 拿來當發布紀錄）。tag 名稱固定是 `v<版本號>` 前綴（跟 repo 既有的
 `v0.7.0`/`v0.6.0`/`v0.5.4` 這些既有 tag 命名慣例一致）。
 
-### 11. Push（執行前務必先明確確認）
+### 12. Push（執行前務必先明確確認）
 
 先確認遠端資訊：
 
@@ -258,9 +324,9 @@ git push <遠端> v<版本號>
 （分支跟 tag 一起 push，避免 tag 指向一個遠端上還看不到的 commit。）
 
 push 完成後，告知使用者：commit、tag、push 都已完成，GitHub 上應該
-可以看到 `v<版本號>` 這個 tag 跟對應的 commit 了，接著繼續步驟 12。
+可以看到 `v<版本號>` 這個 tag 跟對應的 commit 了，接著繼續步驟 13。
 
-### 12. 建立 GitHub Release（執行前務必先明確確認）
+### 13. 建立 GitHub Release（執行前務必先明確確認）
 
 用 `gh` CLI（假設已安裝並登入，`/released` 執行前不主動檢查，失敗了
 再處理即可）把 `release_output/` 底下這次的三個產物（GUI exe、CLI
