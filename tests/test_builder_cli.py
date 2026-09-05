@@ -858,5 +858,75 @@ class TerminalOutputCarriesNoMarkup(unittest.TestCase):
         self.assertIn("pip install -r requirements.txt", rendered)
 
 
+class TestListCerts(unittest.TestCase):
+    """`list-certs`：把可以拿來簽章的憑證與它們的指紋列出來。
+
+    存在的理由是新欄位 `signing.cert_thumbprint` 製造出來的摩擦——那四十個
+    十六進位字元要從某個地方來（ADR-0014 決定五）。
+
+    存放區的查詢是可注入的（比照 file_assoc.py 的 registry seam）：這台機器上
+    有什麼憑證不在測試的控制範圍內。
+    """
+
+    def _certificate(self, thumbprint="AB" * 20, subject="CN=Tester, O=Tester, C=TW",
+                     store=None):
+        import cert_store
+        return cert_store.StoreCertificate(
+            thumbprint=thumbprint, subject=subject,
+            store=store or cert_store.CURRENT_USER, has_private_key=True,
+            not_after="2030-01-01", usages=(cert_store.OID_CODE_SIGNING,))
+
+    def _run(self, found):
+        args = argparse.Namespace(command="list-certs")
+        out = io.StringIO()
+        with mock.patch("cert_store.list_signing_certificates", return_value=found), \
+                contextlib.redirect_stdout(out):
+            code = builder_cli.cmd_list_certs(args)
+        return code, out.getvalue()
+
+    def test_it_prints_the_thumbprint_so_it_can_be_copied(self):
+        code, output = self._run([self._certificate()])
+        self.assertEqual(code, 0)
+        self.assertIn("AB" * 20, output)
+
+    def test_it_prints_the_subject_so_the_user_knows_which_one_it_is(self):
+        code, output = self._run([self._certificate()])
+        self.assertIn("CN=Tester, O=Tester, C=TW", output)
+
+    def test_it_prints_the_expiry_date(self):
+        """過期的憑證簽不了東西，而清單上分不出來的話使用者會選到它。"""
+        code, output = self._run([self._certificate()])
+        self.assertIn("2030-01-01", output)
+
+    def test_it_names_the_field_the_value_goes_into(self):
+        """列出來之後使用者還要知道貼到哪裡去。"""
+        code, output = self._run([self._certificate()])
+        self.assertIn("cert_thumbprint", output)
+
+    def test_an_empty_store_says_so_rather_than_printing_nothing(self):
+        """什麼都不印的話，使用者分不出「沒有憑證」與「指令壞了」。"""
+        code, output = self._run([])
+        self.assertEqual(code, 0)
+        self.assertTrue(output.strip())
+
+    def test_it_does_not_fail_when_there_is_nothing_to_list(self):
+        """沒有憑證不是錯誤——這是一個查詢指令。"""
+        code, _ = self._run([])
+        self.assertEqual(code, 0)
+
+    def test_several_certificates_are_all_listed(self):
+        code, output = self._run([
+            self._certificate(thumbprint="AB" * 20, subject="CN=First"),
+            self._certificate(thumbprint="CD" * 20, subject="CN=Second"),
+        ])
+        self.assertIn("CN=First", output)
+        self.assertIn("CN=Second", output)
+
+    def test_the_subcommand_is_registered(self):
+        parser = builder_cli.build_arg_parser()
+        args = parser.parse_args(["list-certs"])
+        self.assertEqual(args.command, "list-certs")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

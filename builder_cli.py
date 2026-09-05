@@ -36,6 +36,7 @@ import messages
 import lang_detect
 import packaging_core
 import packaging_settings
+import cert_store
 import sdk_tools
 
 # init 產生的範本：每個欄位都是 validate_and_build_pack_data() /
@@ -268,6 +269,11 @@ def build_arg_parser():
         help="即使快取已存在也重新下載",
     )
 
+    sub.add_parser(
+        "list-certs",
+        help="列出可以用來簽章的憑證與它們的指紋（填進 signing.cert_thumbprint 用）",
+    )
+
     return parser
 
 
@@ -366,6 +372,40 @@ def cmd_fetch_sdk_tools(args):
     for tool, path in sorted(result.tools.items()):
         print(f"  {tool}: {path}")
     print(f"完成。版本 {result.version}，位置：{result.cache_dir}")
+    return 0
+
+
+def cmd_list_certs(args):
+    """列出個人存放區裡可以用來簽章的憑證（ADR-0014 決定五）。
+
+    這個指令服務的是 `signing.cert_thumbprint` 這個欄位製造出來的摩擦：那
+    四十個十六進位字元要從某個地方來。列出來還不夠——使用者還要知道貼到哪裡
+    去，因此最後印一行說明欄位名稱。
+
+    只讀個人存放區，不讀也不寫任何信任存放區，因此與 docs/adr/0005 的兩項
+    決定皆不衝突。兩者是不同的東西，見 CONTEXT.md「簽章憑證的兩種來源」。
+    """
+    found = cert_store.list_signing_certificates()
+    if not found:
+        # 什麼都不印的話，使用者分不出「沒有憑證」與「指令壞了」。
+        print("這台電腦的個人憑證存放區裡沒有可以用來簽章的憑證。")
+        print("把含私鑰的 .pfx 匯入之後再跑一次，例如：")
+        print("    Import-PfxCertificate -FilePath cert.pfx "
+              r"-CertStoreLocation Cert:\CurrentUser\My "
+              "-Password (Read-Host -AsSecureString)")
+        return 0
+
+    print(f"找到 {len(found)} 張可以用來簽章的憑證：")
+    for entry in found:
+        where = "目前使用者" if entry.store == cert_store.CURRENT_USER else "本機電腦"
+        print()
+        print(f"  {entry.subject}")
+        print(f"    指紋　：{entry.thumbprint}")
+        print(f"    有效至：{entry.not_after or '（讀不到）'}")
+        print(f"    存放區：{where}")
+    print()
+    print("把要用的那一張的指紋填進設定檔的 signing.cert_thumbprint，"
+          "打包時就不會有密碼出現在命令列上。")
     return 0
 
 
@@ -603,6 +643,8 @@ def main(argv=None):
         return cmd_pack(args)
     if args.command == "pack-msix":
         return cmd_pack_msix(args)
+    if args.command == "list-certs":
+        return cmd_list_certs(args)
     if args.command == sdk_tools.FETCH_SUBCOMMAND:
         return cmd_fetch_sdk_tools(args)
     parser.print_help()
