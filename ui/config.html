@@ -453,15 +453,28 @@
         <div class="form-group">
             <div class="checkbox-row"><input type="checkbox" id="enable_signing" onchange="toggleSigningFields(this.checked)"><label for="enable_signing" data-i18n="label_enable_signing">啟用數位簽章自動化</label></div>
             <div id="signing_section" style="display: none; margin-top: 8px;">
-                <div class="file-selector">
-                    <button class="btn-browse" onclick="browseCertFile()" data-i18n="btn_browse_cert">選擇 PFX 憑證</button>
-                    <span class="path-display" id="cert_path_display" data-i18n="no_file_selected">未選擇檔案</span>
+                <div class="checkbox-row"><input type="radio" name="cert_source" id="cert_source_store" value="store" checked onchange="onCertSourceChange()"><label for="cert_source_store" data-i18n="label_cert_source_store">用已經匯入這台電腦的憑證（推薦）</label></div>
+                <div class="checkbox-row"><input type="radio" name="cert_source" id="cert_source_file" value="file" onchange="onCertSourceChange()"><label for="cert_source_file" data-i18n="label_cert_source_file">用憑證檔案（.pfx）</label></div>
+
+                <div id="cert_store_row" style="margin-top: 8px;">
+                    <label data-i18n="label_cert_thumbprint">要用哪一張憑證</label>
+                    <select id="cert_thumbprint"></select>
+                    <span class="note" data-i18n="note_cert_store">私鑰由 Windows 保管，打包時不需要密碼，也不會有任何密碼出現在命令列上。清單只列得出含私鑰、且可以用於程式碼簽章的憑證；要新增的話用 PowerShell 的 Import-PfxCertificate 把 .pfx 匯入「目前使用者」的個人存放區，再回來重新整理。</span>
                 </div>
-                <label style="margin-top: 8px;" data-i18n="label_cert_password_env">憑證密碼的環境變數名稱</label>
-                <input type="text" id="cert_password_env" placeholder="例如: MSWI_CERT_PASSWORD" data-i18n-placeholder="ph_cert_password_env">
+
+                <div id="cert_file_row" style="display: none; margin-top: 8px;">
+                    <div class="file-selector">
+                        <button class="btn-browse" onclick="browseCertFile()" data-i18n="btn_browse_cert">選擇 PFX 憑證</button>
+                        <span class="path-display" id="cert_path_display" data-i18n="no_file_selected">未選擇檔案</span>
+                    </div>
+                    <label style="margin-top: 8px;" data-i18n="label_cert_password_env">憑證密碼的環境變數名稱</label>
+                    <input type="text" id="cert_password_env" placeholder="例如: MSWI_CERT_PASSWORD" data-i18n-placeholder="ph_cert_password_env">
+                    <span class="note" data-i18n="note_cert_file">密碼不會存進設定檔，只存放密碼的環境變數名稱。但要知道一件事：打包時那個密碼會以參數的形式出現在 signtool 的命令列上，而同一台機器上任何行程都讀得到別的行程的命令列。在意這一點的話請改用上面那個選項。</span>
+                </div>
+
                 <label style="margin-top: 8px;" data-i18n="label_timestamp_url">時間戳記伺服器（選填）</label>
                 <input type="text" id="timestamp_url" placeholder="http://timestamp.digicert.com" data-i18n-placeholder="ph_timestamp_url">
-                <span class="note" data-i18n="note_signing">打包時自動幫 Setup.exe/uninstall.exe 跑 signtool 簽章。密碼不會存在設定檔裡，只存放密碼的環境變數名稱，打包當下從這個環境變數讀取；需要事先安裝 Windows SDK 或 Visual Studio 取得 signtool，並自行準備好憑證。</span>
+                <span class="note" data-i18n="note_signing">打包時自動幫 Setup.exe/uninstall.exe 跑 signtool 簽章（MSIX 模式連 .msix 一起簽）。憑證要自行準備，本工具不提供也無法生成；signtool 可以用命令列的 fetch-sdk-tools 取得，或用系統上既有的 Windows SDK。兩種憑證來源的差別見上面各自的說明。</span>
             </div>
         </div>
         </div>
@@ -820,11 +833,17 @@
                 use_shared_icon: "沿用上方的 PNG 圖示",
                 note_msix: "套件身分名稱一經發布即不可變更——改了之後系統會把它當成另一個不相關的應用程式並存安裝，而且不會有任何警告。3 到 50 個字元，只能用英文字母、數字、句點、連字號。發行者必須與簽章憑證上記載的名稱完全一致，不一致時系統直接拒絕安裝；上面的「數位簽章」區塊選了憑證時留空即可，工具會自動填入。憑證就在這台機器上時，按下「開始編譯安裝檔」會一路編到底，跟傳統引擎一樣；憑證不在本機（例如交給雲端代簽）時會編到 .msix 為止，之後要自行簽章、再用命令列工具接完後半段。圖示必須是正方形的 PNG，留空即沿用上方那張，三個位置的邊長分別至少要 150、44、50 像素。",
                 btn_browse_cert: "選擇 PFX 憑證",
+                label_cert_source_store: "用已經匯入這台電腦的憑證（推薦）",
+                label_cert_source_file: "用憑證檔案（.pfx）",
+                label_cert_thumbprint: "要用哪一張憑證",
+                cert_store_empty: "（這台電腦上沒有可以用來簽章的憑證）",
+                note_cert_store: "私鑰由 Windows 保管，打包時不需要密碼，也不會有任何密碼出現在命令列上。清單只列得出含私鑰、且可以用於程式碼簽章的憑證；要新增的話用 PowerShell 的 Import-PfxCertificate 把 .pfx 匯入「目前使用者」的個人存放區，再回來重新整理。",
+                note_cert_file: "密碼不會存進設定檔，只存放密碼的環境變數名稱。但要知道一件事：打包時那個密碼會以參數的形式出現在 signtool 的命令列上，而同一台機器上任何行程都讀得到別的行程的命令列。在意這一點的話請改用上面那個選項。",
                 label_cert_password_env: "憑證密碼的環境變數名稱",
                 ph_cert_password_env: "例如: MSWI_CERT_PASSWORD",
                 label_timestamp_url: "時間戳記伺服器（選填）",
                 ph_timestamp_url: "http://timestamp.digicert.com",
-                note_signing: "打包時自動幫 Setup.exe/uninstall.exe 跑 signtool 簽章。密碼不會存在設定檔裡，只存放密碼的環境變數名稱，打包當下從這個環境變數讀取；需要事先安裝 Windows SDK 或 Visual Studio 取得 signtool，並自行準備好憑證。",
+                note_signing: "打包時自動幫 Setup.exe/uninstall.exe 跑 signtool 簽章（MSIX 模式連 .msix 一起簽）。憑證要自行準備，本工具不提供也無法生成；signtool 可以用命令列的 fetch-sdk-tools 取得，或用系統上既有的 Windows SDK。兩種憑證來源的差別見上面各自的說明。",
                 label_file_assoc: "需要註冊檔案關聯", ph_file_assoc: "輸入副檔名，以逗號分隔，例如: .xyz, .abc",
                 label_custom_doc_icon: "自訂這個副檔名的文件圖示",
                 note_custom_doc_icon: "不勾選的話，文件圖示會直接沿用應用程式本身的圖示。",
@@ -983,11 +1002,17 @@
                 use_shared_icon: "Using the PNG icon above",
                 note_msix: "The package identity name can never be changed once you have published — change it and the system treats the result as an unrelated application and installs it alongside the old one, with no warning. 3 to 50 characters, letters, digits, periods and hyphens only. The publisher must match the name recorded on your signing certificate exactly; if it does not, the system simply refuses to install. Leave it empty when you have chosen a certificate in the code-signing section above and the tool fills it in for you. When the certificate is on this machine, pressing Build runs all the way through just like the traditional engine; when it is not (cloud signing, for instance) the build stops at the .msix and you sign it yourself, then finish the second half with the command-line tool. Icons must be square PNGs — leave these empty to reuse the icon above; the three positions need edges of at least 150, 44 and 50 pixels respectively.",
                 btn_browse_cert: "Choose PFX certificate",
+                label_cert_source_store: "Use a certificate already installed on this machine (recommended)",
+                label_cert_source_file: "Use a certificate file (.pfx)",
+                label_cert_thumbprint: "Which certificate to use",
+                cert_store_empty: "(no certificate on this machine can be used for signing)",
+                note_cert_store: "Windows keeps the private key, so packaging needs no password and none ever reaches a command line. The list shows only certificates that have a private key and may be used for code signing; to add one, import the .pfx into the current user's personal store with PowerShell's Import-PfxCertificate and come back.",
+                note_cert_file: "The password itself is never stored in the config — only the name of the environment variable holding it. But be aware: at packaging time that password appears as an argument on signtool's command line, and any process on this machine can read another process's command line. If that matters to you, use the option above instead.",
                 label_cert_password_env: "Environment variable holding the cert password",
                 ph_cert_password_env: "e.g. MSWI_CERT_PASSWORD",
                 label_timestamp_url: "Timestamp server (optional)",
                 ph_timestamp_url: "http://timestamp.digicert.com",
-                note_signing: "Automatically runs signtool on Setup.exe/uninstall.exe during packaging. The password itself is never stored in the config — only the name of the environment variable holding it, read at packaging time. Requires signtool (from the Windows SDK or Visual Studio) and a certificate you provide yourself.",
+                note_signing: "Automatically runs signtool on Setup.exe/uninstall.exe during packaging (and on the .msix as well in MSIX mode). You provide the certificate yourself — this tool neither supplies nor generates one; signtool can come from the command line's fetch-sdk-tools or from a Windows SDK already installed. The two certificate sources differ as described above.",
                 label_file_assoc: "Register file associations", ph_file_assoc: "Enter file extensions, comma-separated, e.g. .xyz, .abc",
                 label_custom_doc_icon: "Use a custom icon for this file type",
                 note_custom_doc_icon: "If left unchecked, the file icon falls back to the application's own icon.",
@@ -1485,7 +1510,7 @@
             install_behavior: ['dependencies', 'custom_dependencies',
                                'pre_install_script', 'post_install_script',
                                'local_appdata_files', 'restore_point'],
-            publishing: ['signing', 'cert_path', 'cert_password_env', 'timestamp_url'],
+            publishing: ['signing', 'cert_path', 'cert_password_env', 'cert_thumbprint', 'timestamp_url'],
         };
 
         function setSectionOpen(name, open) {
@@ -1693,6 +1718,56 @@
         // ---------------- 數位簽章自動化 ----------------
         function toggleSigningFields(checked) {
             document.getElementById('signing_section').style.display = checked ? 'block' : 'none';
+            if (checked) refreshCertificateList();
+        }
+
+        // ---------------- 簽章憑證的兩種來源 ----------------
+        // 見 CONTEXT.md「簽章憑證的兩種來源」與 docs/adr/0014。兩者互斥，
+        // 因此是一組二選一而不是兩組各自獨立的欄位——同時填在後端會被擋下。
+        function isCertStoreMode() {
+            return document.getElementById('cert_source_store').checked;
+        }
+
+        function onCertSourceChange() {
+            const store = isCertStoreMode();
+            document.getElementById('cert_store_row').style.display = store ? 'block' : 'none';
+            document.getElementById('cert_file_row').style.display = store ? 'none' : 'block';
+            if (store) refreshCertificateList();
+        }
+
+        // 下拉選單的內容由後端提供（list_signing_certificates()）。前端不自己
+        // 去猜存放區裡有什麼——那件事只有後端問得到 Windows。
+        //
+        // 會用這個畫面的人通常就是不想碰命令列的那一群，要他先去跑一次
+        // list-certs 才拿得到那四十個字元的指紋，等於把安全的那條路留給命令列
+        // 使用者專用（ADR-0014 決定五）。
+        async function refreshCertificateList() {
+            const select = document.getElementById('cert_thumbprint');
+            const previous = select.value;
+            let found = [];
+            try {
+                found = await pywebview.api.list_signing_certificates();
+            } catch (e) {
+                found = [];
+            }
+            select.innerHTML = '';
+            if (!found.length) {
+                // 空的下拉選單分不出「沒有憑證」與「還沒載入完」。
+                const empty = document.createElement('option');
+                empty.value = '';
+                empty.innerText = t('cert_store_empty');
+                select.appendChild(empty);
+                return;
+            }
+            for (const entry of found) {
+                const option = document.createElement('option');
+                option.value = entry.thumbprint;
+                option.innerText = entry.label;
+                select.appendChild(option);
+            }
+            // 重新整理之後盡量保留使用者原本選的那一張——載入設定檔時憑證清單
+            // 還沒抓好，選擇會落空。
+            if (previous) select.value = previous;
         }
 
         // ---------------- 安裝密碼保護 ----------------
@@ -1996,11 +2071,18 @@
                     exe_relative_path: document.getElementById('task_exe_relative_path').value,
                     trigger: document.getElementById('task_trigger').value,
                 } : {},
-                signing: document.getElementById('enable_signing').checked ? {
-                    cert_path: document.getElementById('cert_path_display').innerText === t('no_file_selected') ? '' : document.getElementById('cert_path_display').innerText,
-                    cert_password_env: document.getElementById('cert_password_env').value.trim(),
-                    timestamp_url: document.getElementById('timestamp_url').value.trim(),
-                } : {},
+                // 只送選定的那一種來源。兩邊都送出去的話後端會以「兩種來源
+                // 互斥」擋下建置，而使用者只是先前在另一種模式下填過東西。
+                signing: document.getElementById('enable_signing').checked ? (
+                    isCertStoreMode() ? {
+                        cert_thumbprint: document.getElementById('cert_thumbprint').value,
+                        timestamp_url: document.getElementById('timestamp_url').value.trim(),
+                    } : {
+                        cert_path: document.getElementById('cert_path_display').innerText === t('no_file_selected') ? '' : document.getElementById('cert_path_display').innerText,
+                        cert_password_env: document.getElementById('cert_password_env').value.trim(),
+                        timestamp_url: document.getElementById('timestamp_url').value.trim(),
+                    }
+                ) : {},
                 install_engine: getInstallEngine(),
                 // 傳統引擎時送空的：後端在那個模式下完全不看這一塊，送出一組
                 // 使用者可能只是隨手填過又切回去的值，會讓設定檔留下與這次

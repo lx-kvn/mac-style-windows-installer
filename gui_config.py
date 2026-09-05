@@ -47,6 +47,7 @@ import builder
 import threading
 import lang_detect
 import webview2_runtime
+import cert_store
 import install_engine
 import messages
 import packaging_settings
@@ -162,6 +163,39 @@ class ConfigAPI:
             }
             for field, category in install_engine.field_categories().items()
         }
+
+    def list_signing_certificates(self):
+        """個人存放區裡可以用來簽章的憑證，供前端的下拉選單使用。
+
+        GUI 比命令列多做這一件事（ADR-0014 決定五）：會用配置精靈的人通常
+        就是不想碰命令列的那一群，要他先去跑一次 `list-certs` 才拿得到指紋，
+        等於把安全的那條路留給命令列使用者專用。
+
+        **只送辨識用的欄位。** 送進前端的東西會出現在 webview 裡，私鑰相關的
+        任何內容都不在這裡（`cert_store` 本來就不讀那些，這裡再說一次是因為
+        「往前端送什麼」是每次加欄位都要重新問一次的事）。
+
+        讀不到存放區時回傳空清單而不是拋例外：那不是致命的，使用者仍然可以
+        改用檔案模式；讓它拋例外會讓整個表單停在那裡。
+        """
+        try:
+            found = cert_store.list_signing_certificates()
+        except Exception:
+            return []
+        entries = []
+        for certificate in found:
+            where = ("目前使用者" if certificate.store == cert_store.CURRENT_USER
+                     else "本機電腦")
+            expiry = certificate.not_after or "？"
+            entries.append({
+                "thumbprint": certificate.thumbprint,
+                "subject": certificate.subject,
+                "not_after": certificate.not_after,
+                "store": certificate.store,
+                # 下拉選單顯示的那一行。只有指紋的話沒有人分得出哪一張是自己的。
+                "label": f"{certificate.subject}（有效至 {expiry}，{where}）",
+            })
+        return entries
 
     def open_url(self, url):
         """讓前端可以開啟預設瀏覽器前往下載頁（例如缺 Python 時導去官網）。"""
