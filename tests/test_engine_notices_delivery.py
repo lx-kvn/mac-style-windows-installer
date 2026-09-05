@@ -207,15 +207,21 @@ class PackMsixShowsThemToo(unittest.TestCase):
         return code, out.getvalue() + err.getvalue()
 
     def test_a_moot_setting_is_explained(self):
+        # 明確指定語言，不倚賴執行機器的系統語言：未指定時訊息會隨機器語言
+        # 改變，這條斷言因此只在中文機器上成立。真實抓到的紅燈——同一份
+        # 程式碼在英文的 CI runner 上輸出英文，測試失敗，而失敗的原因與
+        # 受測行為無關。
         self._write_config(folder_name="DemoFolder")
-        code, output = self._run()
+        code, output = self._run(["--lang", "zh-TW"])
         self.assertEqual(code, 0, output)
         self.assertIn("folder_name", output)
         self.assertIn("不會有作用", output)
 
     def test_nothing_is_said_when_there_is_nothing_to_say(self):
+        # 同樣指定語言。這條的斷言是「不包含」，在英文機器上會因為訊息
+        # 本來就不是中文而無條件通過——比失敗更糟，因為它不會被發現。
         self._write_config()
-        code, output = self._run()
+        code, output = self._run(["--lang", "zh-TW"])
         self.assertEqual(code, 0, output)
         self.assertNotIn("不會有作用", output)
 

@@ -24,6 +24,22 @@ import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# vm_lease 由另一個 repo 提供（`pip install -e ...`），只有實際要驅動虛擬機的
+# 機器上才會裝。缺少它時整個模組跳過，不是失敗：這裡測的是本機開發工具，
+# 在裝不了那個相依的環境（例如 CI 的 runner）上本來就無從執行。
+#
+# 真實抓到的紅燈：發布 v0.16.0 時 CI 以 ModuleNotFoundError 中斷整個測試
+# 套件，而錯誤指向的是相依缺失，與這裡任何一項受測行為無關。
+#
+# 只對 vm_lease 這一個名字放行，其餘匯入錯誤照樣讓測試失敗——把整段匯入
+# 都包進去會連同真正的錯字一起吞掉。
+try:
+    import vm_lease  # noqa: F401
+except ImportError as exc:  # pragma: no cover - 取決於執行機器裝了什麼
+    raise unittest.SkipTest(
+        "vm_lease 未安裝，跳過虛擬機驅動的測試（見模組開頭的說明）"
+    ) from exc
+
 from tools import verify_msix_1809 as verify
 
 
