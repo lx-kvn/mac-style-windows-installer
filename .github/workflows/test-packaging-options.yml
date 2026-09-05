@@ -537,6 +537,119 @@ jobs:
           if ($still) { throw "移除之後套件還在：$($still.PackageFullName)" }
           Write-Host "已移除，且系統中不再有這個套件。"
 
+      # --- 憑證存放區模式（docs/adr/0014）-------------------------------
+      #
+      # 上面走的是憑證檔案模式（cert_path + 密碼環境變數）。存放區模式是 S1
+      # 之後建議採用的那一條——私鑰由作業系統保管，命令列上不出現密碼——因此
+      # 它也需要在乾淨機器上被跑過一次。
+      #
+      # 用完整的 pack 而不是 pack-msix：後者按定義一律不簽章（要留給雲端代簽
+      # 的情境），拿它驗簽章等於驗一件不會發生的事。
+      #
+      # 排在最後：build_all() 每次開頭都會清空 dist/，放前面會把上面幾個步驟
+      # 正在斷言的那顆 Setup.exe 刪掉。
+      - name: 把測試憑證匯入個人存放區
+        shell: pwsh
+        run: |
+          $pw = ConvertTo-SecureString -String "$env:MSWI_CI_CERT_PASSWORD" -Force -AsPlainText
+          $imported = Import-PfxCertificate -FilePath ci.pfx `
+            -CertStoreLocation Cert:\CurrentUser\My -Password $pw
+          $imported.Thumbprint | Set-Content -Path thumbprint.txt -Encoding ASCII
+          Write-Host "指紋：$($imported.Thumbprint)"
+
+      # 這個子指令是 cert_thumbprint 那個欄位的值的來源（ADR-0014 決定五）。
+      # 清單依加強金鑰使用方法篩選，剛匯入的這張帶程式碼簽章用途，列得出來。
+      - name: list-certs 找得到剛匯入的那一張
+        shell: pwsh
+        run: |
+          $thumb = (Get-Content thumbprint.txt -Raw).Trim()
+          $output = python builder_cli.py list-certs 2>&1 | Out-String
+          Write-Host $output
+          if ($output -notmatch [regex]::Escape($thumb)) {
+            throw "list-certs 沒有列出剛匯入的憑證（$thumb）"
+          }
+
+      # certificate_subject 一樣留空：存放區模式下自動填入走的是另一條路
+      # （從存放區的憑證讀，不是從 .pfx 讀），那條路也要驗到。
+      - name: 存放區模式一體式打包
+        shell: pwsh
+        run: |
+          $thumb = (Get-Content thumbprint.txt -Raw).Trim()
+          $config = @{
+            install_engine = "msix"
+            app_dir        = (Resolve-Path app_dir).Path
+            png_icon       = (Resolve-Path icon.png).Path
+            ico_icon       = (Resolve-Path icon.ico).Path
+            app_name       = "MSWI CI MSIX Store"
+            version        = "1.2.4"
+            publisher      = "MSWI CI"
+            exe_name       = "Setup_MswiCiMsixStore"
+            main_exe       = "MswiCiMsix.exe"
+            no_admin_install = $true
+            signing = @{
+              cert_thumbprint = $thumb
+              timestamp_url   = "http://timestamp.digicert.com"
+            }
+            msix = @{
+              identity_name       = "MswiCi.MsixStoreModeTest"
+              certificate_subject = ""
+            }
+          }
+          $config | ConvertTo-Json -Depth 6 | Set-Content -Path store_config.json -Encoding UTF8
+          Get-Content store_config.json
+          python builder_cli.py pack --config store_config.json
+
+      - name: 確認兩份產物都由那張憑證簽章
+        shell: pwsh
+        run: |
+          $failures = @()
+          $expectedThumb = (Get-Content thumbprint.txt -Raw).Trim()
+
+          # build_all 在存放區模式下要簽兩樣東西：內嵌的 .msix 與 Setup.exe。
+          # signtool 的 /sha1 若沒有真的生效，這裡會抓到——產物可能完全沒有
+          # 簽章，也可能簽到別張憑證。
+          #
+          # 斷言的是簽章者的指紋，不是 $sig.Status：Status 反映的是「這台機器
+          # 信不信任這條憑證鏈」，那是另一件事（本機實測未匯入信任存放區時
+          # 為 UnknownError，但 SignerCertificate 照樣讀得出來）。拿 Status 當
+          # 判準會讓這一步的成敗取決於信任設定，而不是簽章有沒有簽對。
+          $targets = @()
+          $msix = Get-ChildItem -Recurse -Filter "MswiCi.MsixStoreModeTest*.msix" |
+            Select-Object -First 1
+          if ($msix) { $targets += $msix.FullName } else { $failures += "找不到 .msix" }
+          if (Test-Path "dist\Setup_MswiCiMsixStore.exe") {
+            $targets += (Resolve-Path "dist\Setup_MswiCiMsixStore.exe").Path
+          } else { $failures += "沒有產出 Setup.exe" }
+
+          foreach ($t in $targets) {
+            $sig = Get-AuthenticodeSignature -FilePath $t
+            Write-Host "$([System.IO.Path]::GetFileName($t))：$($sig.Status)"
+            if (-not $sig.SignerCertificate) {
+              $failures += "$t 沒有簽章"
+            } elseif ($sig.SignerCertificate.Thumbprint -ne $expectedThumb) {
+              $failures += "$t 的簽章者是 $($sig.SignerCertificate.Thumbprint)，預期 $expectedThumb"
+            }
+          }
+
+          # 發行者自動填入：存放區模式下讀的是存放區裡的憑證，不是 .pfx。
+          if ($msix) {
+            $expectedPublisher = (Get-Content publisher.txt -Raw).Trim()
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($msix.FullName)
+            try {
+              $entry = $zip.Entries | Where-Object { $_.FullName -eq 'AppxManifest.xml' }
+              $reader = New-Object System.IO.StreamReader($entry.Open())
+              $manifest = $reader.ReadToEnd()
+              $reader.Dispose()
+            } finally { $zip.Dispose() }
+            if ($manifest -notmatch [regex]::Escape($expectedPublisher)) {
+              $failures += "套件清單的發行者不是憑證上的字串（預期 $expectedPublisher）"
+            }
+          }
+
+          if ($failures.Count -gt 0) { throw ($failures -join "`n") }
+          Write-Host "存放區模式：兩份產物皆由指定的憑證簽章，發行者自動填入正確。"
+
       - name: 上傳安裝紀錄（不管成功失敗都上傳，方便事後排查）
         if: always()
         uses: actions/upload-artifact@v4
