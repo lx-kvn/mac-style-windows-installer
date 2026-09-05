@@ -243,6 +243,37 @@ BUILD_GENERATED_UI_ASSETS = frozenset({
 })
 
 
+def make_console_forgiving(stream):
+    """讓一個輸出串流遇到編不出來的字元時退化成替代字元，而不是拋出例外。
+
+    真實抓到的缺陷（2026-09-05，發布 v0.16.0 時撞到）：在繁體中文的
+    Windows 上，主控台的編碼是 cp950，而子行程的輸出以
+    errors="replace" 解碼後可能含有 U+FFFD（不合法位元組的替代字元）。
+    cp950 編不出該字元，因此把那一行印出去會拋 UnicodeEncodeError，
+    整個編譯流程隨之中止、沒有產出任何 exe。
+
+    此處只改變「編不出來時怎麼辦」，不改變編碼本身：主控台的編碼由
+    使用者的系統決定，工具無權替其決定要用哪一種。退化的語意亦成立
+    ——那些字元本來就是讀不出來的位元組的替代品，再退化一次不會失去
+    原本存在的資訊，而該行其餘內容得以保留；那一行往往正是唯一能說明
+    失敗原因的東西。
+
+    輸出被導向不支援重新設定的物件時（例如測試把 stdout 換成
+    io.StringIO），不視為錯誤：本函式的職責是使輸出不致中斷流程，
+    自身成為新的失敗來源與該職責相違。
+
+    回傳是否實際套用。
+    """
+    reconfigure = getattr(stream, "reconfigure", None)
+    if reconfigure is None:
+        return False
+    try:
+        reconfigure(errors="replace")
+    except (ValueError, OSError):
+        return False
+    return True
+
+
 def get_resource_path(relative_path):
     """獲取資源絕對路徑，相容 .py 直接執行與 PyInstaller onefile 打包後的環境。
 

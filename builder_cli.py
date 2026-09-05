@@ -649,6 +649,11 @@ def cmd_pack(args):
 
 
 def main(argv=None):
+    # 同 build_config_tool.main()：這支同樣把子行程的輸出交給 print，
+    # 而那些輸出可能含有主控台編碼編不出來的替代字元。
+    packaging_core.make_console_forgiving(sys.stdout)
+    packaging_core.make_console_forgiving(sys.stderr)
+
     parser = build_arg_parser()
     args = parser.parse_args(argv)
     if args.command == "init":

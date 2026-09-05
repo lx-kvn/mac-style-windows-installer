@@ -596,6 +596,12 @@ def run_cli(version=None, icon_path=None, publisher=""):
 
 
 def main():
+    # 子行程（PyInstaller）的輸出以 errors="replace" 解碼，可能含有 cp950
+    # 編不出來的替代字元；不先放寬這裡，在繁體中文的 Windows 上印那一行就會
+    # 讓整個編譯中止。見 packaging_core.make_console_forgiving()。
+    packaging_core.make_console_forgiving(sys.stdout)
+    packaging_core.make_console_forgiving(sys.stderr)
+
     parser = argparse.ArgumentParser(description="打包工具建置器：編譯 InstallerBuilder 的 GUI/CLI 兩顆 exe。")
     parser.add_argument("--cli", action="store_true", help="非互動模式：依序編譯 GUI/CLI 兩顆 exe，不開視窗")
     parser.add_argument("--version", default=None, help="嵌進輸出檔名的版本號，沒帶就讀取 VERSION 檔案")
