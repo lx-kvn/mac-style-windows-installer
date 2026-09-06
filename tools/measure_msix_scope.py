@@ -58,8 +58,13 @@ def parse_report(text):
     """
     steps = []
     current = {}
+    # 客體端以 Windows PowerShell 建立這個檔案時會寫入位元組順序標記，第一行
+    # 因此是 `﻿step=...`，鍵會變成 `﻿step`。真實抓到的後果是每一輪
+    # 的第一筆紀錄「沒有名字」，判準據此回報「客體沒有回報那一步」——量到了
+    # 卻看起來像沒量到。
+    text = text.lstrip("﻿")
     for line in text.splitlines():
-        line = line.strip()
+        line = line.strip().lstrip("﻿")
         if line == "--":
             if current:
                 steps.append(current)
@@ -166,11 +171,53 @@ function Note($step, $before, $result, $detail) {{
 """
 
 
-def elevated_script(package_v1, package_v2):
-    """提權的部分：佈建、同範圍再佈建、以及提權下的註冊嘗試。"""
-    return _preamble() + f"""
-# 這支由背景執行，行程已提升。
+def registration_round_scripts(package_v1):
+    """第一輪：只做註冊，從乾淨狀態開始。
 
+    **這一輪不能碰佈建。** 真實踩過：第一版把佈建排在提權註冊之前，等到要測
+    註冊時機器上已經有較新的版本，那次失敗回的是 `0x80073D06`（版本較舊）
+    而不是 `0x80070005`（存取被拒）——量到的是另一件事，而且看起來像量到了。
+    """
+    elevated = _preamble() + f"""
+# 提權（背景工作階段）。背景第五項說這裡會失敗。
+$before = State
+try {{
+    Add-AppxPackage -Path '{package_v1}' -ErrorAction Stop
+    Note 'register_elevated' $before 'ok' ''
+}} catch {{
+    Note 'register_elevated' $before 'fail' $_.Exception.Message
+}}
+
+# 系統給的訊息是一句概括的話，原因在部署紀錄裡——待辦要的正是那個原因。
+$before = 'n/a'
+try {{
+    $log = Get-AppxLog -All -ErrorAction Stop |
+        Where-Object {{ $_.Message -match '{IDENTITY}' -or $_.Message -match '0x80070005' }} |
+        Select-Object -Last 8 | ForEach-Object {{ $_.Message }}
+    Note 'appx_log_elevated' $before 'ok' ($log -join ' | ')
+}} catch {{
+    Note 'appx_log_elevated' $before 'fail' $_.Exception.Message
+}}
+"""
+
+    unelevated = _preamble() + f"""
+# 未提權（使用者桌面）。同一份套件、同一個帳號，只有權限不同——這是提權那次
+# 的失敗能否歸因於權限的對照組。
+$before = State
+try {{
+    Add-AppxPackage -Path '{package_v1}' -ErrorAction Stop
+    Note 'register_unelevated' $before 'ok' ''
+}} catch {{
+    Note 'register_unelevated' $before 'fail' $_.Exception.Message
+}}
+"""
+    return [elevated, unelevated]
+
+
+def provision_round_scripts(package_v1, package_v2):
+    """第二輪：佈建與同範圍的版本更替。這一輪會把機器弄髒（佈建紀錄無法從
+    系統介面移除），因此排在註冊那一輪之後，中間還原快照。"""
+    elevated = _preamble() + f"""
 # 乾淨狀態下佈建一次，作為後續各步的基準。
 $before = State
 try {{
@@ -181,6 +228,10 @@ try {{
     Note 'provision_clean' $before 'fail' $_.Exception.Message
 }}
 
+# 佈建之後，執行佈建的那個使用者自己拿到了什麼——ADR-0013 背景第二項說
+# 「佈建不等於替當前使用者安裝」，這一步記錄當下的事實。
+Note 'after_provision_state' (State) 'ok' ''
+
 # 同範圍（皆為佈建）的版本更替：決定六說這裡直接部署即可。
 $before = State
 try {{
@@ -190,43 +241,12 @@ try {{
 }} catch {{
     Note 'provision_update_same_scope' $before 'fail' $_.Exception.Message
 }}
-
-# 提權狀態下替當前使用者註冊——背景第五項說這裡會失敗。
-$before = State
-try {{
-    Add-AppxPackage -Path '{package_v1}' -ErrorAction Stop
-    Note 'register_elevated' $before 'ok' ''
-}} catch {{
-    Note 'register_elevated' $before 'fail' $_.Exception.Message
-}}
-
-# 系統給的訊息是一句概括的話，原因在部署紀錄裡。
-$before = 'n/a'
-try {{
-    $log = Get-AppxLog -All -ErrorAction Stop |
-        Where-Object {{ $_.Message -match '{IDENTITY}' -or $_.Message -match '0x80070005' }} |
-        Select-Object -Last 6 | ForEach-Object {{ $_.Message }}
-    Note 'appx_log_elevated' $before 'ok' ($log -join ' | ')
-}} catch {{
-    Note 'appx_log_elevated' $before 'fail' $_.Exception.Message
-}}
 """
 
-
-def unelevated_script(package_v1, package_v2):
-    """未提權的部分：替當前使用者註冊，以及同範圍的版本更替。"""
-    return _preamble() + f"""
-# 這支由使用者桌面執行，行程未提升。
-
-$before = State
-try {{
-    Add-AppxPackage -Path '{package_v1}' -ErrorAction Stop
-    Note 'register_unelevated' $before 'ok' ''
-}} catch {{
-    Note 'register_unelevated' $before 'fail' $_.Exception.Message
-}}
-
-# 同範圍（皆為當前使用者）的版本更替。
+    unelevated = _preamble() + f"""
+# 同範圍（皆為當前使用者）的版本更替。用較新的那一顆：使用者這一端此時
+# 可能已經有 1.0.0（見 after_provision_state），拿舊的去裝會因版本而被拒，
+# 那不是這一步要量的東西。
 $before = State
 try {{
     Add-AppxPackage -Path '{package_v2}' -ErrorAction Stop
@@ -235,8 +255,8 @@ try {{
     Note 'user_update_same_scope' $before 'fail' $_.Exception.Message
 }}
 
-# 上一輪出現不一致的那個情境：已有使用者註冊時再佈建一次。這一步在未提權
-# 下必然失敗（佈建需要提權），量的是它失敗的形態與提權那次是否不同。
+# 已有使用者註冊時再佈建一次（上一輪出現不一致的那個情境）。未提權下必然
+# 失敗，量的是它失敗的形態與提權那次是否不同。
 $before = State
 try {{
     Add-AppxProvisionedPackage -Online -PackagePath '{package_v1}' -SkipLicense `
@@ -246,42 +266,65 @@ try {{
     Note 'provision_after_user_register_unelevated' $before 'fail' $_.Exception.Message
 }}
 """
+    return [elevated, unelevated]
 
 
 def all_scripts(package_v1, package_v2):
-    return [elevated_script(package_v1, package_v2),
-            unelevated_script(package_v1, package_v2)]
+    return registration_round_scripts(package_v1) \
+        + provision_round_scripts(package_v1, package_v2)
 
 
-def run(vm, package_v1_local, package_v2_local, work_dir):
-    """把兩顆套件送進客體，依序跑提權與未提權兩支腳本，取回報告。"""
-    remote_v1 = GUEST_DIR + "\\" + os.path.basename(package_v1_local)
-    remote_v2 = GUEST_DIR + "\\" + os.path.basename(package_v2_local)
-    vm.copy_in(package_v1_local, remote_v1)
-    vm.copy_in(package_v2_local, remote_v2)
-
-    scripts = [
-        ("elevated", elevated_script(remote_v1, remote_v2), False),
-        ("unelevated", unelevated_script(remote_v1, remote_v2), True),
-    ]
-    for name, source, interactive in scripts:
-        local = os.path.join(work_dir, f"msix_scope_{name}.ps1")
+def _run_round(vm, name, scripts, work_dir, report_suffix):
+    """跑一輪（提權一支、未提權一支），把那一輪的報告取回來。"""
+    for index, (source, interactive) in enumerate(scripts):
+        local = os.path.join(work_dir, f"msix_scope_{name}_{index}.ps1")
         vms.write_guest_script(local, source)
         remote = GUEST_DIR + "\\" + os.path.basename(local)
         vm.copy_in(local, remote)
         vm.run_program(POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass",
                        "-File", remote, interactive=interactive, check=False)
 
-    local_report = os.path.join(work_dir, "msix_scope_report.txt")
-    text = ""
+    local_report = os.path.join(work_dir, f"msix_scope_{report_suffix}.txt")
     try:
         vm.copy_out(REPORT, local_report)
         with open(local_report, encoding="utf-8") as f:
-            text = f.read()
+            return parse_report(f.read())
     except Exception as error:
-        print("取回報告失敗：" + str(error), file=sys.stderr)
+        print(f"取回 {name} 那一輪的報告失敗：{error}", file=sys.stderr)
+        return []
 
-    steps = parse_report(text)
+
+def run(vm, package_v1_local, package_v2_local, work_dir, prepare=None):
+    """兩輪，中間還原快照。
+
+    註冊那一輪必須從乾淨狀態開始（見 `registration_round_scripts()`），而佈建
+    那一輪會把機器弄髒且佈建紀錄無法從系統介面移除，因此兩輪不能共用一次開機。
+    `prepare` 由呼叫端提供：還原快照、開機、重新建立信任等前置。
+    """
+    def stage_packages():
+        remote_v1 = GUEST_DIR + "\\" + os.path.basename(package_v1_local)
+        remote_v2 = GUEST_DIR + "\\" + os.path.basename(package_v2_local)
+        vm.copy_in(package_v1_local, remote_v1)
+        vm.copy_in(package_v2_local, remote_v2)
+        return remote_v1, remote_v2
+
+    remote_v1, remote_v2 = stage_packages()
+    steps = _run_round(
+        vm, "registration",
+        [(registration_round_scripts(remote_v1)[0], False),
+         (registration_round_scripts(remote_v1)[1], True)],
+        work_dir, "registration")
+
+    if prepare:
+        prepare()
+        remote_v1, remote_v2 = stage_packages()
+
+    provision_scripts = provision_round_scripts(remote_v1, remote_v2)
+    steps += _run_round(
+        vm, "provision",
+        [(provision_scripts[0], False), (provision_scripts[1], True)],
+        work_dir, "provision")
+
     return steps, [evaluate_same_scope_update(steps),
                    evaluate_elevated_registration(steps)]
 
@@ -305,12 +348,22 @@ def main(argv=None):
 
     vm = vms.connect(args.machine, profile=args.profile,
                      purpose="量測 MSIX 全機器範圍（ADR-0013 待辦）")
+
+    def prepare():
+        """兩輪之間：還原快照、開機、重新建立信任。
+
+        佈建紀錄無法從系統介面移除，因此兩輪之間一定要還原，不能只是把套件
+        移除了事。
+        """
+        vms.fresh_boot(vm)
+        if args.cer:
+            _trust_certificate(vm, args.cer, work_dir)
+
     try:
         with vms.preserved_tab(vm.machine.vmx):
-            vms.fresh_boot(vm)
-            if args.cer:
-                _trust_certificate(vm, args.cer, work_dir)
-            steps, verdicts = run(vm, args.package_v1, args.package_v2, work_dir)
+            prepare()
+            steps, verdicts = run(vm, args.package_v1, args.package_v2, work_dir,
+                                  prepare=prepare)
             vm.stop()
     finally:
         vms.release(args.machine)

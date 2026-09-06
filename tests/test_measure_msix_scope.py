@@ -51,6 +51,16 @@ class ParseReport(unittest.TestCase):
         self.assertEqual(steps[1]["result"], "fail")
         self.assertIn("0x80073CF9", steps[1]["detail"])
 
+    def test_a_byte_order_mark_does_not_swallow_the_first_key(self):
+        """客體端建立檔案時會寫入 BOM，第一行因此是 `﻿step=...`。
+
+        真實抓到：解析出來的鍵變成 `﻿step`，那一筆紀錄因此「沒有名字」，
+        判準據此回報「客體沒有回報那一步」——量到了卻看起來像沒量到。
+        """
+        steps = measure.parse_report(
+            "﻿step=register_elevated\nresult=fail\n--\n")
+        self.assertEqual(steps[0]["step"], "register_elevated")
+
     def test_a_value_may_contain_an_equals_sign(self):
         steps = measure.parse_report("step=x\ndetail=code=0x1 說明\n--\n")
         self.assertEqual(steps[0]["detail"], "code=0x1 說明")
@@ -145,6 +155,23 @@ class TheGuestScripts(unittest.TestCase):
         """佈建要提權、替當前使用者註冊不能提權，兩者必須分開執行——這正是
         要量的那件事，混在同一支腳本裡就量不到。"""
         self.assertGreaterEqual(len(measure.all_scripts("a.msix", "b.msix")), 2)
+
+    def test_the_registration_round_does_not_provision_first(self):
+        """真實踩過：第一輪把佈建排在提權註冊之前，等到要測註冊時機器上已經
+        有較新的版本，那次失敗的錯誤碼是「版本較舊」而不是「存取被拒」——
+        量到的是另一件事。這一輪要從乾淨狀態開始，且只做註冊。
+        """
+        for script in measure.registration_round_scripts("a.msix"):
+            self.assertNotIn("Add-AppxProvisionedPackage", script)
+
+    def test_the_two_rounds_are_separate_so_the_snapshot_can_be_restored(self):
+        """兩輪之間要能還原快照：註冊那一輪的前置狀態必須是乾淨的，而佈建
+        那一輪會把機器弄髒（且佈建紀錄無法從介面移除）。"""
+        registration = measure.registration_round_scripts("a.msix")
+        provision = measure.provision_round_scripts("a.msix", "b.msix")
+        self.assertTrue(registration)
+        self.assertTrue(provision)
+        self.assertNotEqual(registration, provision)
 
     def test_the_appx_log_is_collected_after_a_failure(self):
         """`Add-AppxPackage` 給的訊息是一句概括的話；原因在部署紀錄裡。"""

@@ -19,8 +19,10 @@
 判準與腳本的性質由 `tests/test_drive_installer_gui.py` 釘住。
 """
 import collections
+import contextlib
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -45,6 +47,25 @@ WINDOW_TITLE = "安裝應用程式"
 # 隨顯示縮放比例改變，寫死像素在 125% 的機器上會點到別的地方。
 ICON_AT = (0.257, 0.429)
 TARGET_AT = (0.745, 0.429)
+
+
+@contextlib.contextmanager
+def stage(name, log=print):
+    """把一個階段的起訖印出來，並報出它花了多久。
+
+    真實踩過：第一版整趟不出聲，跑了十分鐘看不出卡在哪，只能中止。最花時間
+    的是把安裝檔複製進客體那一步，而那一步沒有任何外顯跡象——不報時間的話，
+    連「它是不是卡住了」都判斷不了。
+
+    失敗的階段也要報：否則最後一行永遠停在前一個成功的階段，看起來像卡在
+    那裡。
+    """
+    log(f"→ {name}...")
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        log(f"  {name}：{time.monotonic() - started:.1f} 秒")
 
 
 def drag_path(start, end, steps=24):
@@ -112,6 +133,44 @@ public class Mouse {{
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT {{ public int Left; public int Top; public int Right; public int Bottom; }}
 
+    // 找不到目標視窗時，把桌面上實際有哪些視窗列出來。沒有這份清單就分不出
+    // 「還沒開」與「標題對不上」，而兩者的處置完全不同。
+    public delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
+    [DllImport("user32.dll")]
+    public static extern bool EnumWindows(EnumProc callback, IntPtr lParam);
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetWindowTextW(IntPtr hWnd, System.Text.StringBuilder text, int count);
+
+    // 以列舉方式比對標題，不用 FindWindow。真實抓到：FindWindow 以精確標題
+    // 尋找 `安裝應用程式` 連續 150 秒都回傳 0，而同一時間 EnumWindows 列出的
+    // 清單裡就有那個標題。改用列舉，順便容得下標題前後的空白。
+    public static IntPtr FindByTitle(string wanted) {{
+        IntPtr found = IntPtr.Zero;
+        EnumWindows((hWnd, lParam) => {{
+            if (!IsWindowVisible(hWnd)) return true;
+            var buffer = new System.Text.StringBuilder(300);
+            GetWindowTextW(hWnd, buffer, buffer.Capacity);
+            if (buffer.ToString().Trim() == wanted) {{ found = hWnd; return false; }}
+            return true;
+        }}, IntPtr.Zero);
+        return found;
+    }}
+
+    public static string VisibleTitles() {{
+        var titles = new System.Collections.Generic.List<string>();
+        EnumWindows((hWnd, lParam) => {{
+            if (!IsWindowVisible(hWnd)) return true;
+            var buffer = new System.Text.StringBuilder(300);
+            GetWindowTextW(hWnd, buffer, buffer.Capacity);
+            string title = buffer.ToString().Trim();
+            if (title.Length > 0) titles.Add(title);
+            return true;
+        }}, IntPtr.Zero);
+        return string.Join(" / ", titles.ToArray());
+    }}
+
     static void Send(uint flags, int x, int y) {{
         INPUT[] input = new INPUT[1];
         input[0].type = 0;                       // INPUT_MOUSE
@@ -137,14 +196,27 @@ Start-Process -FilePath '{setup_path}'
 
 # 等視窗出現。視窗還沒出現就開始移動游標並按下，點到的是桌面，而報告上會
 # 看起來像「拖了但沒有反應」。
+#
+# 等待上限給得寬：剛還原快照開機的機器上，這顆安裝檔要先把內嵌內容解壓到
+# 暫存目錄、再啟動 WebView2。實測第一版的 30 秒不夠——回報「沒找到視窗」，
+# 而同時拍的截圖裡視窗好端端地開著。
+$waitSeconds = 90
 $hwnd = [IntPtr]::Zero
-for ($i = 0; $i -lt 60; $i++) {{
-    $hwnd = [Mouse]::FindWindow($null, '{WINDOW_TITLE}')
+$waited = 0
+for ($i = 0; $i -lt ($waitSeconds * 2); $i++) {{
+    $hwnd = [Mouse]::FindByTitle('{WINDOW_TITLE}')
     if ($hwnd -ne [IntPtr]::Zero) {{ break }}
     Start-Sleep -Milliseconds 500
+    $waited = $i / 2
 }}
 Note 'window_found' ($hwnd -ne [IntPtr]::Zero)
-if ($hwnd -eq [IntPtr]::Zero) {{ exit 1 }}
+Note 'window_wait_seconds' $waited
+if ($hwnd -eq [IntPtr]::Zero) {{
+    # 找不到就把桌面上實際有的視窗列出來——「還沒開」與「標題對不上」要
+    # 分得出來。
+    Note 'windows_seen' ([Mouse]::VisibleTitles())
+    exit 1
+}}
 
 Start-Sleep -Seconds 3          # 讓 WebView2 把內容畫完
 
@@ -182,7 +254,7 @@ Start-Sleep -Seconds 12
 $installDir = "{install_dir}"
 Note 'install_dir_exists' (Test-Path $installDir)
 Note 'main_exe_exists' (Test-Path (Join-Path $installDir '{main_exe}'))
-Note 'result_screen' ([Mouse]::FindWindow($null, '{WINDOW_TITLE}') -ne [IntPtr]::Zero)
+Note 'result_screen' ([Mouse]::FindByTitle('{WINDOW_TITLE}') -ne [IntPtr]::Zero)
 Note 'done' 'True'
 """
 
@@ -216,8 +288,12 @@ def evaluate(report):
 
 def parse_report(text):
     found = {}
+    # 客體端建立檔案時會寫入位元組順序標記。這裡第一行剛好是註解、會被跳過，
+    # 但那是巧合而不是保護——`tools/measure_msix_scope.py` 就因為第一行是資料
+    # 而踩到，第一筆紀錄的鍵變成 `﻿step`。
+    text = text.lstrip("﻿")
     for line in text.splitlines():
-        line = line.strip()
+        line = line.strip().lstrip("﻿")
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
@@ -226,39 +302,46 @@ def parse_report(text):
 
 
 def run(vm, setup_path, app_name, work_dir, main_exe="app.exe",
-        screenshot=None):
+        screenshot=None, log=print):
     """把安裝檔送進客體、在桌面上實際拖一次、取回結果。
 
     腳本必須以 `interactive=True` 執行：拖曳要發生在使用者看得到的桌面工作
     階段上，工作階段 0 沒有可以操作的桌面。
     """
     remote_setup = GUEST_DIR + "\\" + os.path.basename(setup_path)
-    vm.copy_in(setup_path, remote_setup)
+    size_mb = os.path.getsize(setup_path) / (1024 * 1024)
+    with stage(f"把安裝檔送進客體（{size_mb:.0f} MB）", log=log):
+        # 這一步最花時間，而且沒有任何外顯跡象——不報出來就看不出是不是卡住。
+        vm.copy_in(setup_path, remote_setup)
 
     local_script = os.path.join(work_dir, "drive_installer.ps1")
     vms.write_guest_script(local_script,
                            guest_script(remote_setup, app_name, main_exe=main_exe))
     remote_script = GUEST_DIR + "\\" + os.path.basename(local_script)
-    vm.copy_in(local_script, remote_script)
+    with stage("送入腳本", log=log):
+        vm.copy_in(local_script, remote_script)
 
-    vm.run_program(POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass",
-                   "-File", remote_script, interactive=True, check=False)
+    with stage("在桌面上實際拖一次（含等視窗、等安裝）", log=log):
+        vm.run_program(POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass",
+                       "-File", remote_script, interactive=True, check=False)
 
     if screenshot:
         # 給人看的附件，不列入判準。
-        try:
-            vm.capture_screen(screenshot)
-        except Exception as error:
-            print("截圖失敗：" + str(error), file=sys.stderr)
+        with stage("截圖", log=log):
+            try:
+                vm.capture_screen(screenshot)
+            except Exception as error:
+                print("截圖失敗：" + str(error), file=sys.stderr)
 
     local_report = os.path.join(work_dir, "drag_report.txt")
     text = ""
-    try:
-        vm.copy_out(REPORT, local_report)
-        with open(local_report, encoding="utf-8") as f:
-            text = f.read()
-    except Exception as error:
-        print("取回報告失敗：" + str(error), file=sys.stderr)
+    with stage("取回報告", log=log):
+        try:
+            vm.copy_out(REPORT, local_report)
+            with open(local_report, encoding="utf-8") as f:
+                text = f.read()
+        except Exception as error:
+            print("取回報告失敗：" + str(error), file=sys.stderr)
 
     report = parse_report(text)
     return report, evaluate(report)
@@ -275,6 +358,8 @@ def main(argv=None):
     parser.add_argument("--machine", default="win11")
     parser.add_argument("--profile", default="default")
     parser.add_argument("--work-dir", default=None)
+    parser.add_argument("--gui", action="store_true",
+                        help="開著虛擬機的畫面跑（預設無畫面；截圖兩種模式都拍得到）")
     args = parser.parse_args(argv)
 
     work_dir = args.work_dir or os.path.dirname(os.path.abspath(args.setup))
@@ -285,7 +370,10 @@ def main(argv=None):
                      purpose="拖曳手勢實測：" + os.path.basename(args.setup))
     try:
         with vms.preserved_tab(vm.machine.vmx):
-            vms.fresh_boot(vm, gui=True)   # 拖曳要有桌面，畫面開著
+            # 拖曳需要的是客體端的桌面工作階段，不是主機這邊看不看得到它，
+            # 因此預設無畫面。截圖兩種模式都拍得到。
+            with stage("還原快照並開機", log=print):
+                vms.fresh_boot(vm, gui=args.gui)
             report, result = run(vm, args.setup, args.app_name, work_dir,
                                  main_exe=args.main_exe, screenshot=shot)
             vm.stop()

@@ -80,6 +80,23 @@ class TheGuestScript(unittest.TestCase):
         self.assertLess(script.index("[Mouse]::GetWindowRect("),
                         script.index("[Mouse]::Down()"))
 
+    def test_it_lists_the_windows_it_saw_when_it_cannot_find_the_right_one(self):
+        """找不到視窗時要說出桌面上實際有什麼。
+
+        真實踩過：第一版只回報 window_found=False，而截圖顯示視窗其實開著
+        ——只是比等待上限晚出現。沒有這份清單就分不出「還沒開」與「標題對
+        不上」，兩者的處置完全不同。
+        """
+        script = drive.guest_script(r"C:\Users\Tester\Setup.exe", "TestApp")
+        self.assertIn("windows_seen", script)
+        self.assertIn("EnumWindows", script)
+
+    def test_the_wait_is_long_enough_for_a_cold_machine(self):
+        """剛還原快照開機的機器上，安裝檔要先解壓再起 WebView2；實測超過
+        30 秒才畫出視窗。等待上限必須容得下那段時間。"""
+        script = drive.guest_script(r"C:\Users\Tester\Setup.exe", "TestApp")
+        self.assertIn("$waitSeconds = 90", script)
+
     def test_it_writes_the_report_line_by_line(self):
         script = drive.guest_script(r"C:\Users\Tester\Setup.exe", "TestApp")
         self.assertIn("Add-Content", script)
@@ -87,6 +104,47 @@ class TheGuestScript(unittest.TestCase):
     def test_the_installer_path_is_quoted(self):
         script = drive.guest_script(r"C:\Users\Tester\Setup My App.exe", "My App")
         self.assertIn("'C:\\Users\\Tester\\Setup My App.exe'", script)
+
+
+class ItSaysWhatItIsDoing(unittest.TestCase):
+    """跑一輪要好幾分鐘，過程中必須看得出正在做哪一步。
+
+    真實踩過：第一版整趟不出聲，跑了十分鐘看不出卡在哪，使用者只能中止它。
+    最花時間的那一步（把安裝檔複製進客體）尤其需要，因為它沒有任何外顯跡象。
+    """
+
+    class Recorder:
+        def __init__(self):
+            self.lines = []
+
+        def __call__(self, message):
+            self.lines.append(message)
+
+    def test_each_stage_is_announced_with_its_duration(self):
+        recorder = self.Recorder()
+        with measure_stage(recorder):
+            pass
+        self.assertTrue(recorder.lines)
+        self.assertRegex(recorder.lines[-1], r"\d+(\.\d+)?\s*秒")
+
+    def test_the_stage_name_is_in_the_line(self):
+        recorder = self.Recorder()
+        with drive.stage("複製安裝檔", log=recorder):
+            pass
+        self.assertIn("複製安裝檔", " ".join(recorder.lines))
+
+    def test_a_stage_that_raises_still_reports(self):
+        """失敗的那一步也要留下紀錄，否則最後一行永遠是前一個成功的階段，
+        看起來像卡在那裡。"""
+        recorder = self.Recorder()
+        with self.assertRaises(ValueError):
+            with drive.stage("會壞掉的一步", log=recorder):
+                raise ValueError("boom")
+        self.assertIn("會壞掉的一步", " ".join(recorder.lines))
+
+
+def measure_stage(recorder):
+    return drive.stage("測試階段", log=recorder)
 
 
 class TheVerdict(unittest.TestCase):
