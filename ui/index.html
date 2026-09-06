@@ -1161,7 +1161,17 @@
                 // 使用者可能在成功畫面出現之前就已經抓著圖示了。彈窗蓋不住
                 // 那種拖曳（見 cancelDragInProgress() 的說明），要主動終結。
                 cancelDragInProgress();
-                showModal(t('install_success_title'), '', false, true);
+                // 訊息帶上後端回傳的 result.message：MSIX 模式沒有
+                // uninstall.exe（ADR-0006），那段話是使用者唯一被告知「要去
+                // 哪裡解除安裝」的機會。原本這裡寫死空字串，等於後端寫了那
+                // 段話卻沒有任何人看得到（傳統模式的 message 是空的，因此
+                // 畫面與原本相同）。
+                //
+                // 「立即執行程式」只在傳統模式提供：launch_app() 把 main_exe
+                // 接在傳統的安裝目錄底下，MSIX 沒有那個目錄，勾了按下去不會
+                // 有任何事、也不會有任何訊息。
+                showModal(t('install_success_title'), result.message || '',
+                          false, installEngine !== 'msix');
                 renderInstallWarnings(result.warnings);
                 pathPreview.innerText = t('install_complete_path');
                 document.getElementById('installProgressWrap').style.display = 'none';

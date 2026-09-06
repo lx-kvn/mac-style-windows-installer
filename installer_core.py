@@ -1025,6 +1025,9 @@ class InstallerAPI:
             # 要的形狀。靜默安裝一律為真（ADR-0015 決定三）。
             confirm_downgrade=lambda info: bool(allow_downgrade),
             remove_installed_package=msix_deploy.remove,
+            # 介面語言已經在 __init__ 依系統語言算過一次，這裡沿用同一個值：
+            # 兩邊各自偵測會讓同一個畫面上出現兩種語言的文字。
+            lang=self.ui_language,
         )
 
     def _trigger_installation_impl_inner(self, create_desktop_shortcut, skip_process_check,

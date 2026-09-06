@@ -30,15 +30,128 @@ ADR-0006：MSIX 模式不提供自訂解除安裝介面，解除安裝由系統�
 """
 import os
 
-# 這個模式沒有自訂的解除安裝介面（ADR-0006），成功訊息要告訴使用者去哪裡
-# 解除安裝，否則他會去安裝目錄找一個不存在的 uninstall.exe。
-SUCCESS_MESSAGE = (
-    "安裝成功。這個應用程式由 Windows 的套件引擎管理，"
-    "需要移除時請到「設定 → 應用程式」，或在開始功能表的項目上按右鍵解除安裝。"
-)
+import messages
+
+# 這個模組的訊息全部會被使用者看到，因此都走翻譯表。原本是 Python 裡的字面
+# 中文字串，英文環境的使用者會收到中文——包含降版確認那一則，而那一則要
+# 使用者決定是否讓系統清除應用程式的資料（2026-09-06 修正）。
+MESSAGES = {
+    "zh-TW": {
+        # 這個模式沒有自訂的解除安裝介面（ADR-0006），成功訊息要告訴使用者
+        # 去哪裡解除安裝，否則他會去安裝目錄找一個不存在的 uninstall.exe。
+        "success":
+            "安裝成功。這個應用程式由 Windows 的套件引擎管理，"
+            "需要移除時請到「設定 → 應用程式」，或在開始功能表的項目上按右鍵解除安裝。",
+        "installed_package_note":
+            "\n這台電腦上已經安裝了同一個應用程式的套件（{full_name}）。"
+            "版本較新或相同的套件系統都會自行處理（前者就地更新，後者重新註冊），"
+            "因此這個失敗通常代表這次要裝的版本比它舊。要改裝比較舊的版本，"
+            "請先到「設定 → 應用程式」把它解除安裝，再執行一次這個安裝程式。",
+        "downgrade_question":
+            "這台電腦上已經安裝了比較新的版本（{installed}），"
+            "而這次要安裝的是 {new}。\n"
+            "要繼續的話必須先請系統移除已安裝的那一份，而系統移除套件時"
+            "會連同這個應用程式的資料一起清除，那些資料無法復原。\n"
+            "確定要改裝比較舊的版本嗎？",
+        "downgrade_declined":
+            "安裝已取消：這台電腦上的版本（{installed}）比這次要安裝的"
+            "（{new}）新，而你選擇不移除它。",
+        "downgrade_notice":
+            "要安裝的版本（{new}）比已安裝的（{installed}）舊，"
+            "因此會先請系統移除 {full_name}——"
+            "系統移除套件時會連同這個應用程式的資料一起清除。",
+        "different_publisher":
+            "注意：這台電腦上有一份同名但簽章者不同的套件（{full_name}）。"
+            "系統會把它與這次要安裝的視為兩個不相關的應用程式，兩者將並存。"
+            "工具不會自動移除它——那份套件有可能屬於另一個開發者。",
+        "found_installed": "偵測到同一個應用程式的套件已安裝（{full_name}{version}）。",
+        "found_installed_version": "，版本 {version}",
+        "removal_failed": "安裝中止：舊版本移除失敗——{error}",
+        "old_version_removed": "舊版本已移除",
+        "legacy_found":
+            "偵測到已安裝的舊版本（傳統安裝模式），會先把它移除再安裝新版：{path}",
+        "legacy_removal_unknown": "舊版本移除失敗，原因不明。",
+        "legacy_removal_failed":
+            "安裝中止：{message}\n新舊版本並存會造成兩筆重複的應用程式項目與"
+            "檔案關聯衝突，因此不繼續安裝。",
+        "package_missing": "安裝失敗：找不到內建的套件檔案（{path}）。",
+        "deploying": "正在交由 Windows 的套件引擎安裝...",
+        "deploy_failed": "安裝失敗：{error}",
+        "done": "安裝完成",
+    },
+    "en": {
+        "success":
+            "Installed. This application is managed by the Windows packaging "
+            "engine; to remove it, go to Settings > Apps, or right-click its "
+            "entry in the Start menu and uninstall it.",
+        "installed_package_note":
+            "\nA package for this same application is already installed on this "
+            "machine ({full_name}). Windows handles a newer or identical version "
+            "on its own (updating in place, or re-registering), so this failure "
+            "usually means the version being installed is older. To install the "
+            "older version, uninstall the existing one from Settings > Apps "
+            "first, then run this installer again.",
+        "downgrade_question":
+            "A newer version ({installed}) is already installed on this machine, "
+            "and this installer carries {new}.\n"
+            "Continuing means asking Windows to remove the installed package "
+            "first, and Windows removes an application's data along with it. "
+            "That data cannot be recovered.\n"
+            "Install the older version anyway?",
+        "downgrade_declined":
+            "Installation cancelled: the version on this machine ({installed}) is "
+            "newer than the one being installed ({new}), and you chose to keep it.",
+        "downgrade_notice":
+            "The version being installed ({new}) is older than the installed one "
+            "({installed}), so Windows will be asked to remove {full_name} first "
+            "— removing a package also erases that application's data.",
+        "different_publisher":
+            "Note: a package with the same name but a different signer "
+            "({full_name}) is installed on this machine. Windows treats the two "
+            "as unrelated applications and they will coexist. This installer "
+            "does not remove it — that package may belong to another developer.",
+        "found_installed":
+            "A package for this application is already installed ({full_name}{version}).",
+        "found_installed_version": ", version {version}",
+        "removal_failed":
+            "Installation stopped: removing the old version failed — {error}",
+        "old_version_removed": "Old version removed",
+        "legacy_found":
+            "An older version installed the traditional way was found; it will be "
+            "removed before the new one is installed: {path}",
+        "legacy_removal_unknown": "Removing the old version failed for an unknown reason.",
+        "legacy_removal_failed":
+            "Installation stopped: {message}\nLeaving both versions in place would "
+            "produce two duplicate application entries and conflicting file "
+            "associations, so the installation does not continue.",
+        "package_missing":
+            "Installation failed: the bundled package file was not found ({path}).",
+        "deploying": "Handing the package to the Windows packaging engine...",
+        "deploy_failed": "Installation failed: {error}",
+        "done": "Installation complete",
+    },
+}
 
 
-def _installed_package_note(full_name):
+def _t(key, lang=messages.DEFAULT_LANGUAGE, /, **params):
+    return messages.translate(MESSAGES, key, lang, **params)
+
+
+def success_message(lang=messages.DEFAULT_LANGUAGE):
+    """安裝成功後要顯示給使用者的那一則。
+
+    是這個模式底下使用者唯一被告知「去哪裡解除安裝」的機會，因此它必須真的
+    走到畫面上——`ui/index.html` 曾經把這個訊息丟掉（見
+    `tests/test_msix_success_guidance.py`）。
+    """
+    return _t("success", lang)
+
+
+# 既有呼叫端與文件仍以這個名字引用預設語言的那一則。
+SUCCESS_MESSAGE = MESSAGES["zh-TW"]["success"]
+
+
+def _installed_package_note(full_name, lang=messages.DEFAULT_LANGUAGE):
     """部署失敗且同名套件已安裝時，附在系統訊息後面的那一段。
 
     附加而不取代：系統給的 `error_text` 是完整且已在地化的說明，自己另編
@@ -50,12 +163,7 @@ def _installed_package_note(full_name):
     也會失敗」不成立，訊息不再那樣寫——照著那個說法，使用者會去移除一個其實
     不需要移除的東西。
     """
-    return (
-        f"\n這台電腦上已經安裝了同一個應用程式的套件（{full_name}）。"
-        "版本較新或相同的套件系統都會自行處理（前者就地更新，後者重新註冊），"
-        "因此這個失敗通常代表這次要裝的版本比它舊。要改裝比較舊的版本，"
-        "請先到「設定 → 應用程式」把它解除安裝，再執行一次這個安裝程式。"
-    )
+    return _t("installed_package_note", lang, full_name=full_name)
 
 
 def _compare_versions(left, right):
@@ -80,7 +188,7 @@ def _compare_versions(left, right):
     return (a > b) - (a < b)
 
 
-def _downgrade_question(existing, new_version):
+def _downgrade_question(existing, new_version, lang=messages.DEFAULT_LANGUAGE):
     """降版時要問使用者的那一則，以及附帶的資料。
 
     訊息要說出資料會被清掉——那是傳統引擎的降版沒有的後果，也是使用者答這個
@@ -90,19 +198,14 @@ def _downgrade_question(existing, new_version):
         "installed_version": existing.version,
         "new_version": new_version,
         "package_full_name": existing.full_name,
-        "message": (
-            f"這台電腦上已經安裝了比較新的版本（{existing.version}），"
-            f"而這次要安裝的是 {new_version}。\n"
-            "要繼續的話必須先請系統移除已安裝的那一份，而系統移除套件時"
-            "會連同這個應用程式的資料一起清除，那些資料無法復原。\n"
-            "確定要改裝比較舊的版本嗎？"
-        ),
+        "message": _t("downgrade_question", lang,
+                      installed=existing.version, new=new_version),
     }
 
 
 def _handle_existing_package(existing, package_version, package_publisher,
                              confirm_downgrade, remove_installed_package, report,
-                             warnings):
+                             warnings, lang=messages.DEFAULT_LANGUAGE):
     """已安裝的同名套件要怎麼處置，回傳 `(可以繼續嗎, 中止時的訊息)`。
 
     三種情形（ADR-0015）：
@@ -116,11 +219,7 @@ def _handle_existing_package(existing, package_version, package_publisher,
     """
     if package_publisher and existing.publisher and \
             existing.publisher != package_publisher:
-        report(
-            f"注意：這台電腦上有一份同名但簽章者不同的套件（{existing.full_name}）。"
-            "系統會把它與這次要安裝的視為兩個不相關的應用程式，兩者將並存。"
-            "工具不會自動移除它——那份套件有可能屬於另一個開發者。"
-        )
+        report(_t("different_publisher", lang, full_name=existing.full_name))
         return True, None
 
     if not package_version or not existing.version:
@@ -128,18 +227,13 @@ def _handle_existing_package(existing, package_version, package_publisher,
     if _compare_versions(package_version, existing.version) >= 0:
         return True, None
 
-    question = _downgrade_question(existing, package_version)
+    question = _downgrade_question(existing, package_version, lang)
     if confirm_downgrade is not None and not confirm_downgrade(question):
-        return False, (
-            f"安裝已取消：這台電腦上的版本（{existing.version}）比這次要安裝的"
-            f"（{package_version}）新，而你選擇不移除它。"
-        )
+        return False, _t("downgrade_declined", lang,
+                         installed=existing.version, new=package_version)
 
-    notice = (
-        f"要安裝的版本（{package_version}）比已安裝的（{existing.version}）舊，"
-        f"因此會先請系統移除 {existing.full_name}——"
-        "系統移除套件時會連同這個應用程式的資料一起清除。"
-    )
+    notice = _t("downgrade_notice", lang, new=package_version,
+                installed=existing.version, full_name=existing.full_name)
     report(notice)
     # 也放進回傳值：`log` 收到的那些進的是安裝檔內部的 install_log.txt，而
     # 靜默安裝 `/LOG=` 指定的那一份由 run_silent_install() 自己維護，兩者互不
@@ -149,12 +243,12 @@ def _handle_existing_package(existing, package_version, package_publisher,
     outcome = (remove_installed_package(existing.full_name)
                if remove_installed_package else None)
     if outcome is not None and not outcome.ok:
-        return False, f"安裝中止：舊版本移除失敗——{outcome.error_text}"
-    report("舊版本已移除")
+        return False, _t("removal_failed", lang, error=outcome.error_text)
+    report(_t("old_version_removed", lang))
     return True, None
 
 
-def _find_installed(find_installed_package, log):
+def _find_installed(find_installed_package, log, lang=messages.DEFAULT_LANGUAGE):
     """查同名套件，查不到或查詢本身出錯都回傳 None。
 
     查詢失敗不該讓一次本來會成功的安裝失敗：這個結果只用來把訊息講清楚，
@@ -167,15 +261,17 @@ def _find_installed(find_installed_package, log):
     except Exception:
         return None
     if existing and log:
-        version = f"，版本 {existing.version}" if existing.version else ""
-        log(f"偵測到同一個應用程式的套件已安裝（{existing.full_name}{version}）。")
+        version = (_t("found_installed_version", lang, version=existing.version)
+                   if existing.version else "")
+        log(_t("found_installed", lang, full_name=existing.full_name, version=version))
     return existing
 
 
 def run(package_path, check_existing=None, remove_existing=None, deploy=None,
         progress=None, log=None, package_must_exist=False,
         find_installed_package=None, package_version="", package_publisher="",
-        confirm_downgrade=None, remove_installed_package=None):
+        confirm_downgrade=None, remove_installed_package=None,
+        lang=messages.DEFAULT_LANGUAGE):
     """執行 MSIX 模式的安裝，回傳與傳統流程相同形狀的結果字典。
 
     `package_must_exist`：呼叫端已經確認過檔案存在時可以省略這道檢查。預設
@@ -187,6 +283,9 @@ def run(package_path, check_existing=None, remove_existing=None, deploy=None,
 
     `confirm_downgrade` 為 None 表示不詢問、直接做：靜默安裝走這一條
     （ADR-0015 決定三）。
+
+    `lang` 決定所有回傳與回報的訊息用哪一種語言。安裝端傳的是它自己依系統
+    語言算出來的那一個值，兩邊不會分岔。
     """
     def report(message):
         if log:
@@ -195,7 +294,7 @@ def run(package_path, check_existing=None, remove_existing=None, deploy=None,
     if package_must_exist and not os.path.isfile(package_path):
         return {
             "status": "error",
-            "message": f"安裝失敗：找不到內建的套件檔案（{package_path}）。",
+            "message": _t("package_missing", lang, path=package_path),
         }
 
     if check_existing:
@@ -203,42 +302,39 @@ def run(package_path, check_existing=None, remove_existing=None, deploy=None,
         if existing.get("exists"):
             # 決議第九項要求明確告知——使用者看到安裝程式在動舊版本的東西時，
             # 應該已經知道那是預期中的步驟。
-            report(
-                "偵測到已安裝的舊版本（傳統安裝模式），會先把它移除再安裝新版："
-                f"{existing.get('install_path', '')}"
-            )
+            report(_t("legacy_found", lang, path=existing.get("install_path", "")))
             result = (remove_existing(existing) if remove_existing else None) or {}
             if result.get("status") != "success":
                 # 移除失敗還繼續部署，結果就是新舊並存——那正是這一步要避免的。
-                message = result.get("message") or "舊版本移除失敗，原因不明。"
+                message = result.get("message") or _t("legacy_removal_unknown", lang)
                 return {
                     "status": "error",
-                    "message": f"安裝中止：{message}\n新舊版本並存會造成兩筆重複的應用程式項目與檔案關聯衝突，"
-                               "因此不繼續安裝。",
+                    "message": _t("legacy_removal_failed", lang, message=message),
                 }
-            report("舊版本已移除")
+            report(_t("old_version_removed", lang))
 
     # 同名的 MSIX 套件是否已安裝——查一次，供版本比較與失敗訊息使用。
     # 查在部署**之前**：「要不要降版」這個決定放在失敗之後的話，使用者此時
     # 看到的是系統的錯誤訊息，不是一個他可以回答的問題（ADR-0015 決定一）。
     warnings = []
-    installed_package = _find_installed(find_installed_package, log)
+    installed_package = _find_installed(find_installed_package, log, lang)
     if installed_package is not None:
         proceed, refusal = _handle_existing_package(
             installed_package, package_version, package_publisher,
-            confirm_downgrade, remove_installed_package, report, warnings)
+            confirm_downgrade, remove_installed_package, report, warnings, lang)
         if not proceed:
             return {"status": "error", "message": refusal}
 
-    report("正在交由 Windows 的套件引擎安裝...")
+    report(_t("deploying", lang))
     outcome = deploy(package_path, progress=progress)
     if not outcome.ok:
         # error_text 是系統給的完整且已在地化的說明文字，直接轉呈——自己另編
         # 一則訊息只會失去資訊（第三輪 spike 結果第七項）。
-        message = f"安裝失敗：{outcome.error_text}"
+        message = _t("deploy_failed", lang, error=outcome.error_text)
         if installed_package:
-            message += _installed_package_note(installed_package.full_name)
+            message += _installed_package_note(installed_package.full_name, lang)
         return {"status": "error", "message": message}
 
-    report("安裝完成")
-    return {"status": "success", "message": SUCCESS_MESSAGE, "warnings": warnings}
+    report(_t("done", lang))
+    return {"status": "success", "message": success_message(lang),
+            "warnings": warnings}
