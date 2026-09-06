@@ -141,6 +141,27 @@ class TheSuccessScreenShowsIt(unittest.TestCase):
         self.assertIn("result.message", argument,
                       "訊息參數沒有讀後端回傳的 message，那段說明不會被顯示")
 
+    def test_it_does_not_repeat_the_title_as_the_message(self):
+        """傳統引擎的後端訊息就是「安裝成功」，與彈窗標題一字不差。
+
+        真實抓到（2026-09-07，虛擬機實測的截圖）：把 `result.message` 接上去
+        之後，傳統模式的成功畫面出現兩行「安裝成功」——標題一次、訊息一次。
+        修正這一層的當下我判斷「傳統模式的 message 是空的，畫面不會變」，那個
+        判斷是錯的，而單元測試看不出來，只有把畫面叫出來看才會發現。
+
+        後端不改：那句話在靜默安裝的紀錄檔裡是有用的（`[成功] 安裝成功`）。
+        由前端決定要不要顯示。
+        """
+        source = _index()
+        # 用計數而不是 assertIn：失敗訊息會把整份兩千多行的 HTML 印出來，
+        # 真正的訊息會被推到畫面外。
+        self.assertGreater(source.count("messageBeyondTitle"), 0,
+                           "ui/index.html 沒有那個過濾用的輔助函式")
+        call = re.search(
+            r"showModal\(\s*t\('install_success_title'\)\s*,\s*([^,]+),", source)
+        self.assertIsNotNone(call)
+        self.assertIn("messageBeyondTitle", call.group(1))
+
     def test_the_launch_option_is_hidden_under_msix(self):
         """MSIX 沒有傳統的安裝目錄，launch_app() 接不到那支執行檔。留著一個
         按了不會有任何事、也不會有任何訊息的勾選框，比不給更糟。"""

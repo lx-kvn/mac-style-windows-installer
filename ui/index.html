@@ -608,6 +608,19 @@
             });
         })();
 
+        // 後端的訊息與標題重複時就不要再顯示一次。
+        //
+        // 傳統引擎成功時回的 message 正是「安裝成功」，與彈窗標題一字不差；
+        // MSIX 引擎回的是「要去哪裡解除安裝」那一段，兩者都有用，但只有後者
+        // 需要顯示在標題底下。真實抓到（2026-09-07 虛擬機實測的截圖）：接上
+        // result.message 之後，傳統模式的成功畫面出現兩行「安裝成功」。
+        //
+        // 不改後端：那句話在靜默安裝的紀錄檔裡是有用的（`[成功] 安裝成功`）。
+        function messageBeyondTitle(message, title) {
+            const text = (message || '').trim();
+            return text === (title || '').trim() ? '' : text;
+        }
+
         function showModal(title, message, isError = false, showLaunchOption = false) {
             const modal = document.getElementById('custom-modal');
             const icon = document.getElementById('modal-icon');
@@ -1170,7 +1183,8 @@
                 // 「立即執行程式」只在傳統模式提供：launch_app() 把 main_exe
                 // 接在傳統的安裝目錄底下，MSIX 沒有那個目錄，勾了按下去不會
                 // 有任何事、也不會有任何訊息。
-                showModal(t('install_success_title'), result.message || '',
+                showModal(t('install_success_title'),
+                          messageBeyondTitle(result.message, t('install_success_title')),
                           false, installEngine !== 'msix');
                 renderInstallWarnings(result.warnings);
                 pathPreview.innerText = t('install_complete_path');
