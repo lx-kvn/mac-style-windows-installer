@@ -1,0 +1,131 @@
+mac-style-windows-installer End User Licence Agreement
+Version 1.0 | 2026-09-06
+
+Please read this agreement before installing or using the Software. By clicking "Agree and continue", or by installing, copying or using the Software in any manner, you agree to be bound by this agreement. If you do not agree, do not install or use the Software.
+
+Where this English text differs from the Traditional Chinese text of the same agreement, the Chinese text prevails.
+
+
+1. Definitions
+
+1.1 "Software" means the mac-style-windows-installer executables, bundled resources and documentation, including its builder tool (graphical and command-line editions) and the installer templates it produces.
+1.2 "Licensor" means lx-kvn, the copyright holder of the Software.
+1.3 "You" means the individual or legal entity installing or using the Software.
+1.4 "Output" means the installers, MSIX packages and accompanying files you produce with the Software.
+1.5 "End user" means a third party who runs your Output.
+
+
+2. Grant of licence
+
+2.1 The Licensor grants you a non-exclusive, transferable, royalty-free licence to install and use the Software on any number of devices, including for commercial purposes.
+2.2 You may copy and redistribute the Software to third parties, provided this agreement and the copyright notice accompany it.
+2.3 This licence transfers no intellectual property rights in the Software.
+2.4 Copyright in your Output belongs to you or your licensors. The Licensor claims no rights in your Output and acquires no interest in it through your use of the Software.
+
+
+3. Relationship to the open-source licence
+
+3.1 The source code of the Software is released under the MIT Licence (see the accompanying LICENSE).
+3.2 This agreement governs the installation and use of the compiled executables. Its purpose is to disclose the risks of what this particular Software does - producing installers, changing system settings and applying digital signatures - and to allocate responsibility for them.
+3.3 Where this agreement conflicts with the MIT Licence in respect of copying, modifying or redistributing the source code, the MIT Licence prevails. The prohibited uses in clause 10 are a statement of acceptable use and do not restrict the rights granted by the MIT Licence.
+
+
+4. Responsibility for your Output
+
+4.1 You are the publisher of your Output. You are solely responsible for its content, its behaviour, how it is distributed, and any consequence it has for end users.
+4.2 You must hold the necessary rights or licences for everything you package into your Output, including the application itself, icons, licence texts and dependencies.
+4.3 The Software does not review, validate or warrant the content of your Output. The Licensor bears no responsibility of any kind for it, including but not limited to data loss, system damage, security incidents or legal liability it may cause.
+4.4 The licence terms your Output presents on an end user's machine are supplied by you at packaging time. The Licensor does not become a party to those terms by providing this feature.
+
+
+5. Digital signatures and certificates
+
+5.1 The Software can invoke the signing tool supplied by Microsoft (signtool) to apply a digital signature to your Output using a certificate you specify. You obtain and hold that certificate yourself.
+5.2 You represent and warrant that you hold lawful rights to the certificate and its private key, and that your use of it complies with the terms of the issuing authority. Signing with another party's certificate, or misrepresenting identity through a signature, is prohibited.
+5.3 The Software does not transmit, upload or store your private key. Note, however, that in file mode (a .pfx file together with a password) the password is passed to signtool as a command-line argument and may therefore be readable by other processes on the same machine. Certificate store mode (identifying the certificate by thumbprint) avoids this.
+5.4 The signature status of your Output, the validity of timestamps, and whether an end user's machine trusts your certificate are outside the Licensor's control, and the Licensor gives no warranty in respect of them.
+
+
+6. Changes to computer systems
+
+6.1 Depending on your packaging configuration, installers produced by the Software may make the following changes to an end user's machine: copy files to a chosen directory, create and delete registry entries, create shortcuts, modify the PATH environment variable, register file associations, create Windows services, create scheduled tasks, create a system restore point, run the pre-install and post-install scripts you specify, and request administrator privileges.
+6.2 The scope and consequences of those changes are determined by your packaging configuration. You must test your Output in representative environments before distributing it.
+6.3 The Licensor is not responsible for system instability, software conflicts, data loss or other damage resulting from those changes.
+6.4 Scripts you specify run with the privileges the installer holds at that moment. Their content and consequences are solely your responsibility.
+
+
+7. Third-party components and external downloads
+
+7.1 The Software and its Output may download and install the following components from Microsoft or from sources you specify: the Microsoft Edge WebView2 Runtime, Windows SDK tools (makeappx, signtool and others), the Visual C++ Redistributable, the .NET Desktop Runtime, and any custom dependencies you configure.
+7.2 Each of those components is governed by its own licence terms and is not the subject of this agreement. You are responsible for confirming that you may obtain, use and, where applicable, redistribute them in your circumstances.
+7.3 The Software does not inspect the content served by the custom dependency addresses you configure. The origin, integrity and safety of files served from those addresses are your responsibility.
+7.4 The Software itself includes third-party libraries distributed under open-source licences, whose terms accompany its distribution.
+
+
+8. Nature of install password protection
+
+8.1 The "install password protection" feature is an access control: it exists to stop an installer being sent to the wrong person, misused, or installed without authorisation.
+8.2 It is not a security mechanism designed to resist a skilled attacker with time and access. Anyone holding the installer may, with sufficient technical ability, still recover its contents.
+8.3 Do not rely on it as the sole or principal protection for confidential material. The Licensor is not liable for any damage arising from reliance on it.
+
+
+9. Removal and loss of data
+
+9.1 The uninstaller in your Output deletes the files recorded at install time. Files an end user created inside the install directory are handled according to the rules described in the Software's documentation.
+9.2 A risk specific to MSIX mode: when an end user installs an older version over a newer one, the operating system requires the installed package to be removed first, and Windows erases that application's data along with it. That data cannot be recovered. The Software warns and obtains consent during interactive installation; during silent installation (/S) it proceeds and records the fact in the log file.
+9.3 If you use silent install or uninstall in deployment scripts, you must assess that consequence yourself. The Licensor is not liable for data loss.
+
+
+10. Prohibited uses
+
+You may not use the Software to:
+
+10.1 create or distribute malware, spyware, ransomware, or any program intended to damage, gain unauthorised access to, or surveil another party's computer or data;
+10.2 create installers that conceal their true behaviour or obtain consent misleadingly, including hidden additional software, pre-ticked non-essential components, or misleading interface copy;
+10.3 impersonate another person or organisation, including false statements in the publisher field, icon, name or digital signature of your Output;
+10.4 circumvent technical protection measures in another party's software, or distribute unauthorised copies of protected works; or
+10.5 violate the laws applicable to you or to your end users, including export control and data protection law.
+
+
+11. No warranty
+
+The Software is provided "as is" and "as available", without warranty of any kind, express or implied, including but not limited to merchantability, fitness for a particular purpose, non-infringement, and uninterrupted or error-free operation. The Licensor does not warrant that the Software meets your requirements, nor that its Output will function correctly on any particular version, configuration or security-software environment of Windows.
+
+
+12. Limitation of liability
+
+12.1 To the maximum extent permitted by law, the Licensor shall not be liable for any direct, indirect, incidental, special, punitive or consequential damages - including but not limited to lost business, lost data, system unavailability, damage to reputation, or third-party claims - whether in contract, tort or any other theory, and whether or not the Licensor was advised of the possibility of such damages.
+12.2 If the exclusion in 12.1 is ineffective under applicable law, the Licensor's total aggregate liability is limited to the amount you actually paid for the Software, which, where it is supplied free of charge, is zero.
+
+
+13. Indemnity
+
+Where a third party brings a claim, action or demand against the Licensor arising from your use of the Software or from Output you distribute, you will compensate the Licensor for the resulting loss and hold the Licensor harmless.
+
+
+14. Data collection
+
+14.1 The Software collects and transmits no personal data and contains no tracking or usage-statistics mechanism.
+14.2 The Software connects to external networks when it performs the following: downloading Windows SDK tools at your instruction, downloading the dependencies you have configured, and downloading the WebView2 Runtime installer when an end user's machine is found to lack it. Those connections are made to Microsoft or to addresses you specify, whose privacy policies are set by their respective providers.
+
+
+15. Termination
+
+15.1 This licence terminates automatically if you breach any term of this agreement.
+15.2 On termination you must stop using the Software and delete all copies of it.
+15.3 Clauses 4, 11 to 13 and 16 survive termination.
+15.4 Termination does not affect Output you produced before it.
+
+
+16. Governing law and jurisdiction
+
+16.1 This agreement is governed by the laws in force in the free area of the Republic of China (Taiwan). The parties agree that the Taiwan Taichung District Court shall be the court of first instance for disputes arising from it.
+16.2 Where mandatory provisions of the law where you are located do not permit 16.1, those provisions apply to the extent required.
+
+
+17. General
+
+17.1 This agreement is the entire agreement between the parties concerning the Software and supersedes any prior oral or written understanding.
+17.2 If any provision is held invalid or unenforceable, the remainder stays in effect, and that provision is to be read narrowly, as close to its original intent as possible.
+17.3 A failure or delay by the Licensor in exercising any right under this agreement is not a waiver of that right.
+17.4 Amendments take effect only when made by the Licensor in writing, including documentation distributed with a new version. They apply to versions obtained after the amendment and not retroactively to versions you already hold.

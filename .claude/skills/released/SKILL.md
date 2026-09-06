@@ -108,10 +108,34 @@ cp dist/mac-style-windows-installer_GUI_v<版本號>.exe <暫存資料夾>/mswi-
 cp dist/mac-style-windows-installer_CLI_v<版本號>.exe <暫存資料夾>/mswi-cli.exe
 ```
 
-接著呼叫：
+接著先產一份只帶授權條款的設定檔（`eula_texts` 是巢狀結構，沒有對應的
+命令列旗標）。把下面這段存成腳本再執行，**不要用 shell 的 heredoc**——這個
+環境的 heredoc 會把路徑裡的反斜線吃掉（見 `CLAUDE.md`）：
+
+```python
+import json, os
+repo = os.getcwd()
+config = {
+    "eula_texts": {
+        lang: open(os.path.join(repo, "docs", "eula", f"EULA.{lang}.txt"),
+                   encoding="utf-8").read()
+        for lang in ("zh-TW", "en")
+    },
+    # 系統語言兩種都不是時的回退語言。安裝端的取用順序是「系統語言 →
+    # 這個欄位 → 字典裡第一筆」（見 installer_core.get_eula_text()）。
+    "eula_default_lang": "en",
+}
+out = os.path.join(r"<暫存資料夾路徑>", "eula_config.json")
+with open(out, "w", encoding="utf-8") as f:
+    json.dump(config, f, ensure_ascii=False, indent=2)
+print(out)
+```
+
+接著呼叫（`--config` 是底，命令列參數覆蓋其上）：
 
 ```
 python builder_cli.py pack \
+  --config <暫存資料夾路徑>/eula_config.json \
   --app-dir <暫存資料夾路徑> \
   --png-icon <拖拽介面用 PNG，沒有的話跟使用者確認要用哪個> \
   --ico-icon <安裝檔封面用 ICO，沒有的話跟使用者確認要用哪個，跟步驟 5 用同一張> \
@@ -124,6 +148,12 @@ python builder_cli.py pack \
   --path-target-exe "mswi-cli.exe" \
   --no-admin-install
 ```
+
+
+**授權條款一定要帶**：這個工具自己的安裝檔從 v0.16.0 之前都沒有顯示過授權
+條款，因為那份合約當時還不存在。合約寫好之後若忘了帶 `--config`，安裝檔會
+安靜地跳過 EULA 那一頁——`eula_texts` 為空時的行為就是「不顯示」，不會報錯。
+打包完成後在虛擬機跑一次（步驟 8）即可確認那一頁真的出現。
 
 **真實踩過的坑（v0.11.0 發布後使用者實測發現）**：一開始這裡用的是
 `--local-appdata-files "mswi-cli.exe"`（只把 CLI 版改裝到
