@@ -161,6 +161,54 @@ class ThePlainTextIsActuallyPlain(unittest.TestCase):
             self.assertGreater(longest, 120, lang)
 
 
+class TheInterfaceSpellsItTheSameWay(unittest.TestCase):
+    """介面的英文字串與合約內文用同一種拼法。
+
+    使用者實際看出來的問題：安裝畫面的標題是 "End User License Agreement"
+    （美式），而框裡的合約全文通篇用 "Licence"（英式）——同一個畫面兩種拼法。
+    兩者哪一種都可以，但必須是同一種。
+    """
+
+    UI_FILES = {
+        "installer": os.path.join(REPO_ROOT, "ui", "index.html"),
+        "config wizard": os.path.join(REPO_ROOT, "ui", "config.html"),
+    }
+
+    def test_the_agreement_uses_the_british_spelling(self):
+        """先確認合約這一邊是哪一種，介面才有對齊的對象。"""
+        self.assertIn("Licence Agreement", _read(PLAIN["en"]))
+
+    def test_no_interface_string_says_license_agreement(self):
+        # 只回報有幾處，不把整份 HTML 塞進失敗訊息裡——那份檔案兩千多行，
+        # 印出來只會把真正的訊息推出畫面外。
+        for name, path in self.UI_FILES.items():
+            found = _read(path).count("License Agreement")
+            self.assertEqual(found, 0,
+                             f"{os.path.basename(path)}（{name}）有 {found} 處"
+                             "用了美式拼法，與合約內文的 Licence 不一致")
+
+    def test_the_mit_licence_keeps_its_own_spelling(self):
+        """MIT License 是專有名稱，不隨這個決定改。"""
+        self.assertIn("MIT License", _read(LICENSE))
+
+    def test_the_agreement_quotes_the_button_that_actually_exists(self):
+        """合約以「點選某個按鈕即表示同意」為成立要件，引用的字要與畫面上的
+        按鈕一字不差。英文版原本寫 "Agree and continue"，而按鈕是
+        "Agree & Continue"——那句話指向一個不存在的按鈕。
+        """
+        source = _read(self.UI_FILES["installer"])
+        for lang, pattern in (("zh-TW", r'btn_accept:\s*"([^"]+)"'),
+                              ("en", r'btn_accept:\s*"([^"]+)"')):
+            labels = re.findall(pattern, source)
+            self.assertTrue(labels, "找不到 btn_accept 的字串")
+        # 兩種語言的翻譯表各有一個 btn_accept，依出現順序對應 zh-TW、en
+        # （i18n 表的排列順序，見 ui/index.html）。
+        self.assertEqual(len(labels), 2, "btn_accept 的數量與預期不符")
+        for label, lang in zip(labels, ("zh-TW", "en")):
+            self.assertIn(label, _read(PLAIN[lang]),
+                          f"{lang} 的合約沒有引用畫面上那個按鈕：{label}")
+
+
 class ThePackagingFlowCanTakeTheAgreementFromAConfigFile(unittest.TestCase):
     """`/released` 的打包步驟靠「設定檔帶條款、旗標帶其餘」這個組合。
 

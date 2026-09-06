@@ -237,7 +237,7 @@
 
 **End User Licence Agreement**
 
-Please read this agreement before installing or using the Software. By clicking "Agree and continue", or by installing, copying or using the Software in any manner, you agree to be bound by this agreement. If you do not agree, do not install or use the Software.
+Please read this agreement before installing or using the Software. By clicking "Agree & Continue", or by installing, copying or using the Software in any manner, you agree to be bound by this agreement. If you do not agree, do not install or use the Software.
 
 Where this English text differs from the Traditional Chinese text of the same agreement, the Chinese text prevails.
 
