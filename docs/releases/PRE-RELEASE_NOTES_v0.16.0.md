@@ -79,7 +79,7 @@ Also fixed: the disk-space message showing `0 MB` for sub-gigabyte amounts; the 
 
 User-facing messages across `install_engine`, `msix_settings`, `png_size`, `cert_subject` and `packaging_core` moved to translatable keys behind a shared mechanism, and the CLI gained `--lang`. The project icon was replaced. Documentation was reorganised into `docs/adr/`, `docs/proposals/` and `docs/investigations/` by what each kind of document is for.
 
-Development tooling gained a VM driver covering Windows 10 1809 LTSC and a Traditional Chinese Windows 11, with lease-based coordination so two sessions cannot restore each other's snapshots mid-run.
+Development tooling gained a VM driver covering Windows 10 1809 LTSC and a Traditional Chinese Windows 11, with lease-based coordination so two sessions cannot restore each other's snapshots mid-run, and a smoke test that runs a finished installer through one of those machines end to end. The release procedure now requires both that smoke test and a green CI run before a tag is pushed — previously CI only ran *after* the tag was public, and the test suite now runs on every push rather than only on tags.
 
 ### Documentation
 
@@ -87,7 +87,16 @@ Eleven ADRs (0005–0015). Four investigation records covering the MSIX audit, t
 
 ### Testing
 
-1654 tests, all passing (852 at `v0.15.0`).
+1679 tests, all passing (852 at `v0.15.0`).
+
+The built artifacts were additionally smoke-tested on two local virtual
+machines — Windows 11 25H2 (Traditional Chinese, running as a genuine standard
+user outside the Administrators group) and Windows 10 1809 LTSC (English).
+Each run installs silently, checks that both executables, the uninstall entry
+and the PATH change are in place, **actually runs the installed CLI**, then
+uninstalls silently and checks nothing is left behind. All three checks passed
+on both machines. The CI runner cannot answer any of this: it is English, its
+processes are already elevated, and it installs every dependency explicitly.
 
 ### Known limitations
 
@@ -168,7 +177,7 @@ MSIX 模式下把舊版蓋到新版上會失敗（`0x80073D06`），唯一的走
 
 `install_engine`、`msix_settings`、`png_size`、`cert_subject`、`packaging_core` 的對外訊息全部改成可翻譯的 key，共用同一套機制，CLI 加上 `--lang`。更換專案圖示。文件依用途重新整理成 `docs/adr/`、`docs/proposals/`、`docs/investigations/` 三類。
 
-開發工具方面新增虛擬機驅動，涵蓋 Windows 10 1809 LTSC 與繁體中文的 Windows 11，並以租約機制協調占用，避免兩個同時在跑的 session 互相還原掉對方的快照。
+開發工具方面新增虛擬機驅動，涵蓋 Windows 10 1809 LTSC 與繁體中文的 Windows 11，並以租約機制協調占用，避免兩個同時在跑的 session 互相還原掉對方的快照；另外新增一支把編好的安裝檔送進那些機器上跑完整一輪的煙霧測試。發布流程現在要求那道煙霧測試與 CI 都綠了才能打 tag——在此之前 CI 只會在 tag 已經公開之後才跑；測試套件也改成每次 push 都跑，不再只有打 tag 時才跑。
 
 ### 文件
 
@@ -176,7 +185,14 @@ MSIX 模式下把舊版蓋到新版上會失敗（`0x80073D06`），唯一的走
 
 ### 測試
 
-1654 個測試，全數通過（`v0.15.0` 當時是 852 個）。
+1679 個測試，全數通過（`v0.15.0` 當時是 852 個）。
+
+編出來的產物另外在兩台本機虛擬機上做過煙霧測試——Windows 11 25H2（繁體
+中文，以真正的標準使用者身分執行，帳號不在 Administrators 群組）與
+Windows 10 1809 LTSC（英文環境）。每一輪靜默安裝、確認兩顆 exe 與解除安裝
+登錄表項目與 PATH 都到位、**實際執行裝好的 CLI**、再靜默移除並確認沒有殘留。
+兩台機器三項皆通過。這些 CI 都回答不了：runner 是英文的、行程本來就已提升、
+而且每次都明確裝好所有相依套件。
 
 ### 已知限制
 
@@ -194,6 +210,9 @@ MSIX 模式下把舊版蓋到新版上會失敗（`0x80073D06`），唯一的走
 ## Full commit list / 完整變更（commit）
 
 ```
+ae04c97 ci: 測試套件改成每次 push 都跑，並把「推完要等 CI」寫進 CLAUDE.md
+67690be feat(tools): 發布前對真實產物做煙霧測試，並把這道關卡寫進 /released
+3f620ed test: 三個測試綁到執行機器的環境，在 CI 上是紅的
 7817dd6 fix(cli): 主控台編不出的字元不再讓整個編譯中止
 83f6c39 docs: 清掉一輪過時資訊
 5c2c135 fix(cli): init 範本的 signing 列出兩種憑證來源，留空即等於沒啟用
