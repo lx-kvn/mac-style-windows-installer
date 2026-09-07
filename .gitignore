@@ -16,6 +16,9 @@ release_output/
 # 版本號形式（用日期），版本欄位固定是「目前版本-dev」，不編造不存在的版本號。
 test_output/
 
+# 截圖樣板檔（之後要做新截圖時當範本用），不進版控
+docs/screenshots/*.af
+
 # Claude Code 本機設定/skill，不進版控
 
 # .claude 只收這個專案自己的 skill。

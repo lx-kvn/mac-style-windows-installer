@@ -31,17 +31,17 @@ Both halves — the Builder Tool and every installer it produces — are standal
 
 | Drag to install | Licence agreement |
 |---|---|
-| ![Drag to install](docs/screenshots/installer-drag-en.png) | ![Licence agreement](docs/screenshots/installer-eula-en.png) |
+| <img src="docs/screenshots/installer-drag-en.png" alt="Drag to install" width="340"> | <img src="docs/screenshots/installer-eula-en.png" alt="Licence agreement" width="340"> |
 
 | Installed | Uninstaller — drag to the bin |
 |---|---|
-| ![Install complete](docs/screenshots/installer-done-en.png) | ![Uninstaller](docs/screenshots/uninstaller-en.png) |
+| <img src="docs/screenshots/installer-done-en.png" alt="Install complete" width="340"> | <img src="docs/screenshots/uninstaller-en.png" alt="Uninstaller" width="340"> |
 
 **What you see while building the installer**
 
 | Builder tool — main screen | Build progress |
 |---|---|
-| ![Builder main screen](docs/screenshots/builder-main-en.png) | ![Build progress](docs/screenshots/build-progress-en.png) |
+| <img src="docs/screenshots/builder-main-en.png" alt="Builder main screen" width="340"> | <img src="docs/screenshots/build-progress-en.png" alt="Build progress" width="340"> |
 
 #### Traditional engine vs MSIX engine
 
@@ -50,11 +50,11 @@ and you actually look at — the install destination, and the form itself:
 
 | Traditional engine | MSIX engine |
 |---|---|
-| ![Traditional destination](docs/screenshots/installer-drag-en.png) | ![MSIX destination](docs/screenshots/installer-drag-msix-en.png) |
+| <img src="docs/screenshots/installer-drag-en.png" alt="Traditional destination" width="340"> | <img src="docs/screenshots/installer-drag-msix-en.png" alt="MSIX destination" width="340"> |
 | The destination is a folder the user picks; `Setup.exe` copies the files, writes the registry entries and ships an `uninstall.exe`. | The destination is Windows itself — there is no path to pick. The system owns the package, and removing it removes everything it wrote. |
-| ![Installed, traditional](docs/screenshots/installer-done-en.png) | ![Installed, MSIX](docs/screenshots/installer-done-msix-en.png) |
+| <img src="docs/screenshots/installer-done-en.png" alt="Installed, traditional" width="340"> | <img src="docs/screenshots/installer-done-msix-en.png" alt="Installed, MSIX" width="340"> |
 | The app can be launched straight from the installer, and an `uninstall.exe` sits in the install folder. | There is no `uninstall.exe` to ship, so the screen says where to remove it instead. The launch option is not offered — the files live inside the package, not in a folder the installer can reach. |
-| ![Builder, traditional](docs/screenshots/builder-main-en.png) | ![Builder, MSIX](docs/screenshots/builder-msix-en.png) |
+| <img src="docs/screenshots/builder-main-en.png" alt="Builder, traditional" width="340"> | <img src="docs/screenshots/builder-msix-en.png" alt="Builder, MSIX" width="340"> |
 | Every packaging option is available. | Picking MSIX swaps in the fields it needs (package identity, publisher, minimum Windows version) and greys out what the system decides for you. |
 
 ### Features
@@ -155,17 +155,17 @@ MIT — see [`LICENSE`](LICENSE).
 
 | 拖曳安裝 | 授權條款同意頁 |
 |---|---|
-| ![拖曳安裝](docs/screenshots/installer-drag-zh.png) | ![授權條款](docs/screenshots/installer-eula-zh.png) |
+| <img src="docs/screenshots/installer-drag-zh.png" alt="拖曳安裝" width="340"> | <img src="docs/screenshots/installer-eula-zh.png" alt="授權條款" width="340"> |
 
 | 安裝完成 | 解除安裝——把圖示拖進垃圾桶 |
 |---|---|
-| ![安裝完成](docs/screenshots/installer-done-zh.png) | ![解除安裝](docs/screenshots/uninstaller-zh.png) |
+| <img src="docs/screenshots/installer-done-zh.png" alt="安裝完成" width="340"> | <img src="docs/screenshots/uninstaller-zh.png" alt="解除安裝" width="340"> |
 
 **你打包安裝檔時會看到的畫面**
 
 | 打包工具主畫面 | 編譯進度 |
 |---|---|
-| ![打包工具主畫面](docs/screenshots/builder-main-zh.png) | ![編譯進度](docs/screenshots/build-progress-zh.png) |
+| <img src="docs/screenshots/builder-main-zh.png" alt="打包工具主畫面" width="340"> | <img src="docs/screenshots/build-progress-zh.png" alt="編譯進度" width="340"> |
 
 #### 傳統引擎與 MSIX 引擎的差別
 
@@ -174,11 +174,11 @@ MIT — see [`LICENSE`](LICENSE).
 
 | 傳統引擎 | MSIX 引擎 |
 |---|---|
-| ![傳統的安裝目的地](docs/screenshots/installer-drag-zh.png) | ![MSIX 的安裝目的地](docs/screenshots/installer-drag-msix-zh.png) |
+| <img src="docs/screenshots/installer-drag-zh.png" alt="傳統的安裝目的地" width="340"> | <img src="docs/screenshots/installer-drag-msix-zh.png" alt="MSIX 的安裝目的地" width="340"> |
 | 目的地是使用者自己選的資料夾；`Setup.exe` 自己複製檔案、寫登錄表，並附一支 `uninstall.exe`。 | 目的地是 Windows 本身，沒有路徑可以選。套件由系統保管，移除時它寫過的東西一併清掉。 |
-| ![安裝完成，傳統引擎](docs/screenshots/installer-done-zh.png) | ![安裝完成，MSIX 引擎](docs/screenshots/installer-done-msix-zh.png) |
+| <img src="docs/screenshots/installer-done-zh.png" alt="安裝完成，傳統引擎" width="340"> | <img src="docs/screenshots/installer-done-msix-zh.png" alt="安裝完成，MSIX 引擎" width="340"> |
 | 可以直接從安裝程式啟動應用程式，安裝目錄裡也有一支 `uninstall.exe`。 | 這個模式沒有 `uninstall.exe` 可以附，因此畫面改成告訴使用者去哪裡移除。也不提供「立即執行」——檔案在套件裡面，不在安裝程式碰得到的資料夾。 |
-| ![設定表單，傳統引擎](docs/screenshots/builder-main-zh.png) | ![設定表單，MSIX 引擎](docs/screenshots/builder-msix-zh.png) |
+| <img src="docs/screenshots/builder-main-zh.png" alt="設定表單，傳統引擎" width="340"> | <img src="docs/screenshots/builder-msix-zh.png" alt="設定表單，MSIX 引擎" width="340"> |
 | 所有打包選項都可以用。 | 選了 MSIX 之後，表單就地換上它需要的欄位（套件身分、發行者、最低 Windows 版本），並把由系統決定的那些收起來。 |
 
 ### 功能
