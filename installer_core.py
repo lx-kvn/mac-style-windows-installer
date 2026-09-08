@@ -49,6 +49,11 @@ import progress_report
 import dependency_install
 import version_compare
 import upgrade
+# 這兩個在最上層匯入，因為「這一趟是不是來佈建的」要在開任何視窗、搶單一
+# 實例鎖之前就問完（見 run_provision_child()）。兩者都是純 Python，winrt
+# 那條相依仍然只在真的要部署時才被碰到。
+import msix_all_users
+import msix_provision
 from install_scope import InstallScope, local_appdata_root
 
 # 目前介面 chrome（ui/index.html 裡固定的標籤、按鈕、提示文字）支援的語言，
@@ -181,6 +186,13 @@ class InstallerAPI:
         # （降版要問過使用者，見 docs/adr/0015）。兩者都只有打包端知道。
         self.msix_package_version = ""
         self.msix_publisher = ""
+        # MSIX 引擎才有：要不要登記給這台電腦上的所有使用者（ADR-0013）。
+        # 預設為假——沒有這個欄位的既有安裝檔行為完全不變。
+        self.msix_all_users = False
+        # 這一趟是不是靜默安裝。靜默模式下不主動跳 UAC（ADR-0013 第六題）：
+        # 那個視窗會讓無人值守的部署卡在那裡直到逾時。由 run_silent_install()
+        # 設定，而不是從 allow_downgrade 反推——那個參數談的是別件事。
+        self.silent_mode = False
         self.no_admin_install = False
         self.custom_install_dir = ""
         self.pre_install_script = ""
@@ -289,6 +301,7 @@ class InstallerAPI:
                     self.msix_identity_name = config.get("msix_identity_name", "")
                     self.msix_package_version = config.get("msix_package_version", "")
                     self.msix_publisher = config.get("msix_publisher", "")
+                    self.msix_all_users = bool(config.get("msix_all_users", False))
                     self.no_admin_install = bool(config.get("no_admin_install", False))
                     self.custom_install_dir = config.get("custom_install_dir", "")
                     self.pre_install_script = config.get("pre_install_script", "")
@@ -986,8 +999,11 @@ class InstallerAPI:
         流程的順序與理由在 msix_install.run()；這裡只負責把這個安裝檔手上
         的東西（內嵌套件的路徑、既有安裝的偵測與移除、進度回報）接上去。
         """
+        import elevate
+        import msix_all_users
         import msix_deploy
         import msix_install
+        import msix_provision
 
         package_path = get_resource_path(self.msix_package or "app.msix")
 
@@ -1008,6 +1024,28 @@ class InstallerAPI:
             def find_installed_package():
                 return msix_deploy.find_installed(self.msix_identity_name)
 
+        # 全機器使用者範圍（ADR-0013）。沒有啟用時完全不接這條線——安裝檔
+        # 的行為與這個功能出現之前相同。
+        provision_all_users = None
+        if self.msix_all_users:
+            def provision_all_users():
+                return msix_all_users.provision_all_users(
+                    package_path,
+                    # 子行程就是這顆 exe 自己帶一個內部旗標再跑一次
+                    # （ADR-0013 決定三、第一題）：它本來就在使用者手上、
+                    # 本來就會解析參數，佈建要用的東西也已經打包在裡面。
+                    setup_exe=sys.executable,
+                    identity_name=self.msix_identity_name,
+                    publisher=self.msix_publisher,
+                    # 那個旗標任何人都能打，而它會以提權身分佈建參數指定的
+                    # 那一份套件。帶上雜湊之後，它只能用來佈建這一次安裝
+                    # 自己解壓出來的那一份（第十二題）。
+                    digest=msix_provision.file_digest(package_path),
+                    elevated=elevate.is_elevated(),
+                    silent=self.silent_mode,
+                    lang=self.ui_language,
+                    log=log)
+
         return msix_install.run(
             package_path,
             check_existing=self.check_existing_install,
@@ -1025,6 +1063,7 @@ class InstallerAPI:
             # 要的形狀。靜默安裝一律為真（ADR-0015 決定三）。
             confirm_downgrade=lambda info: bool(allow_downgrade),
             remove_installed_package=msix_deploy.remove,
+            provision_all_users=provision_all_users,
             # 介面語言已經在 __init__ 依系統語言算過一次，這裡沿用同一個值：
             # 兩邊各自偵測會讓同一個畫面上出現兩種語言的文字。
             lang=self.ui_language,
@@ -1569,6 +1608,36 @@ def _show_starting_cursor():
         pass
 
 
+def parse_provision_args(argv):
+    """這一趟是不是「以提權身分來佈建」的那一趟；不是就回傳 None。
+
+    這幾個旗標不列在 `_parse_cli_args()` 的說明裡，也不寫進使用說明書：它們
+    是安裝檔內部用來對自己說話的東西，不是給使用者的介面（ADR-0013 第一題
+    的代價——那個旗標對外看得到，雖然沒人會用它）。
+    """
+    return msix_all_users.parse_arguments(argv)
+
+
+def run_provision_child(parsed):
+    """提權的子行程那一趟：佈建，然後結束。回傳這支 exe 的結束碼。
+
+    這裡不開視窗、不搶單一實例鎖——主行程此時正握著那把鎖，子行程去搶會
+    拿不到，然後照現有的處置跳出「安裝程式已經在執行中」，一個提權的、
+    沒有人在看的視窗。
+
+    身分與發行者從自己的設定檔讀：子行程是同一顆 exe，設定就在它身上，
+    不必從命令列帶進來，因此也沒有一個可以從外面指定的身分。
+    """
+    try:
+        api = InstallerAPI()
+        return msix_all_users.run_as_child(parsed, api.msix_identity_name,
+                                           api.msix_publisher)
+    except Exception as e:
+        msix_provision.write_report(parsed.get("report_path") or "",
+                                    f"佈建的子行程無法啟動：{e}")
+        return msix_provision.EXIT_BAD_REQUEST
+
+
 def _parse_cli_args():
     """解析命令列參數，給企業批次部署用的靜默安裝模式。
 
@@ -1653,6 +1722,9 @@ def run_silent_install(install_dir=None, create_desktop_shortcut=True, log_path=
         return exit_code
 
     api = InstallerAPI()
+    # 靜默模式不主動跳 UAC（ADR-0013 第六題）。這個旗標是安裝流程判斷的
+    # 依據，不從 allow_downgrade 反推——那個參數談的是別件事。
+    api.silent_mode = True
     if install_dir:
         api.selected_path = install_dir
 
@@ -1708,6 +1780,12 @@ def run_silent_install(install_dir=None, create_desktop_shortcut=True, log_path=
 
 
 if __name__ == '__main__':
+    # 提權的子行程那一趟排在最前面：它不開視窗、不搶單一實例鎖（主行程此時
+    # 正握著那把鎖），也不需要 WebView2 Runtime。做完就結束。
+    _provision = parse_provision_args(sys.argv[1:])
+    if _provision is not None:
+        sys.exit(run_provision_child(_provision))
+
     _silent, _cli_install_dir, _cli_desktop_shortcut, _cli_log_path, _cli_password = _parse_cli_args()
 
     if _silent:

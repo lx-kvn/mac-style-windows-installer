@@ -21,6 +21,7 @@ import installer_core as ic
 import install_journal
 import install_encryption
 import dependency_install
+import msix_all_users
 from _fakes import FakeWinReg, make_installer_api
 
 
@@ -1158,6 +1159,150 @@ class TestMsixInstallWiring(unittest.TestCase):
         with mock.patch("msix_install.run") as run:
             api._install_msix(log=lambda _m: None)
         self.assertIsNone(run.call_args.kwargs.get("find_installed_package"))
+
+
+class TestMsixAllUsersWiring(unittest.TestCase):
+    """全機器使用者範圍在安裝端的接線（ADR-0013 決定三、四）。
+
+    打包端那一段（`msix.all_users` 欄位、建置提示）已經在前一輪完成，這裡
+    釘住的是「那個值真的改變了安裝時的行為」——欄位存在卻沒有人讀它，正是
+    這個專案出過的事故形態。
+    """
+
+    def _api(self, **overrides):
+        settings = dict(install_engine="msix", msix_package="app.msix",
+                        msix_identity_name="MyCompany.MyApp",
+                        msix_publisher="CN=Demo", ui_language="zh-TW")
+        settings.update(overrides)
+        return _fakes.make_installer_api(**settings)
+
+    def test_the_default_is_current_user_scope(self):
+        """既有的安裝檔沒有這個欄位，它們的行為必須完全不變。"""
+        api = _fakes.make_installer_api()
+        self.assertFalse(api.msix_all_users)
+
+    def test_no_hook_is_passed_when_the_field_is_off(self):
+        api = self._api(msix_all_users=False)
+        with mock.patch("msix_install.run") as run:
+            api._install_msix(log=lambda _m: None)
+        self.assertIsNone(run.call_args.kwargs.get("provision_all_users"))
+
+    def test_a_hook_is_passed_when_the_field_is_on(self):
+        api = self._api(msix_all_users=True)
+        with mock.patch("msix_install.run") as run:
+            api._install_msix(log=lambda _m: None)
+        self.assertIsNotNone(run.call_args.kwargs.get("provision_all_users"))
+
+    def test_the_hook_hands_over_the_identity_and_the_package(self):
+        api = self._api(msix_all_users=True)
+        seen = {}
+
+        def fake(package_path, setup_exe, identity_name, **kwargs):
+            seen.update(package_path=package_path, setup_exe=setup_exe,
+                        identity_name=identity_name, **kwargs)
+            return msix_all_users.Result(True, None)
+
+        with mock.patch("msix_install.run") as run, \
+             mock.patch("msix_all_users.provision_all_users", side_effect=fake), \
+             mock.patch("msix_provision.file_digest", return_value="f" * 64):
+            api._install_msix(log=lambda _m: None)
+            run.call_args.kwargs["provision_all_users"]()
+        self.assertEqual(seen["identity_name"], "MyCompany.MyApp")
+        self.assertEqual(seen["publisher"], "CN=Demo")
+        self.assertEqual(seen["digest"], "f" * 64)
+        self.assertTrue(seen["package_path"].endswith("app.msix"))
+
+    def test_the_child_is_this_very_executable(self):
+        """第一題：子行程就是 `Setup.exe` 自己帶一個內部旗標再跑一次。"""
+        api = self._api(msix_all_users=True)
+        seen = {}
+
+        def fake(package_path, setup_exe, identity_name, **kwargs):
+            seen["setup_exe"] = setup_exe
+            return msix_all_users.Result(True, None)
+
+        with mock.patch("msix_install.run") as run, \
+             mock.patch("msix_all_users.provision_all_users", side_effect=fake), \
+             mock.patch("msix_provision.file_digest", return_value="f" * 64):
+            api._install_msix(log=lambda _m: None)
+            run.call_args.kwargs["provision_all_users"]()
+        self.assertEqual(seen["setup_exe"], sys.executable)
+
+    def test_silent_mode_is_passed_through(self):
+        """第六題：靜默安裝不主動跳 UAC。這一層只負責把「這是靜默安裝」這件
+        事送過去——判斷本身在 `msix_all_users`。"""
+        api = self._api(msix_all_users=True, silent_mode=True)
+        seen = {}
+
+        def fake(package_path, setup_exe, identity_name, **kwargs):
+            seen.update(kwargs)
+            return msix_all_users.Result(True, None)
+
+        with mock.patch("msix_install.run") as run, \
+             mock.patch("msix_all_users.provision_all_users", side_effect=fake), \
+             mock.patch("msix_provision.file_digest", return_value="f" * 64):
+            api._install_msix(log=lambda _m: None)
+            run.call_args.kwargs["provision_all_users"]()
+        self.assertIs(seen["silent"], True)
+
+    def test_the_interface_language_is_the_one_already_computed(self):
+        """兩邊各自偵測會讓同一個畫面上出現兩種語言的文字。"""
+        api = self._api(msix_all_users=True, ui_language="en")
+        seen = {}
+
+        def fake(package_path, setup_exe, identity_name, **kwargs):
+            seen.update(kwargs)
+            return msix_all_users.Result(True, None)
+
+        with mock.patch("msix_install.run") as run, \
+             mock.patch("msix_all_users.provision_all_users", side_effect=fake), \
+             mock.patch("msix_provision.file_digest", return_value="f" * 64):
+            api._install_msix(log=lambda _m: None)
+            run.call_args.kwargs["provision_all_users"]()
+        self.assertEqual(seen["lang"], "en")
+
+
+class TestProvisioningChildEntryPoint(unittest.TestCase):
+    """帶著內部旗標啟動的那一趟：不開視窗、不搶單一實例鎖，做完就結束。
+
+    主行程此時正握著那把鎖。子行程去搶的話會拿不到，然後照現有的處置跳出
+    「安裝程式已經在執行中」——一個提權的、沒有人在看的視窗。
+    """
+
+    def test_a_normal_command_line_is_not_provisioning(self):
+        self.assertIsNone(ic.parse_provision_args(["/S"]))
+
+    def test_the_flag_is_recognised(self):
+        parsed = ic.parse_provision_args(
+            ["/PROVISION=C:\\a\\app.msix", "/PROVISION-HASH=" + "d" * 64])
+        self.assertEqual(parsed["package_path"], "C:\\a\\app.msix")
+
+    def test_it_provisions_with_the_identity_from_its_own_config(self):
+        """子行程是同一顆 exe，設定就在它自己身上——不必從命令列帶進來，
+        也就沒有一個可以從外面指定的身分。"""
+        seen = {}
+
+        def fake(parsed, identity_name, publisher=""):
+            seen.update(parsed=parsed, identity_name=identity_name,
+                        publisher=publisher)
+            return 0
+
+        with mock.patch.object(ic, "InstallerAPI",
+                               return_value=_fakes.make_installer_api(
+                                   msix_identity_name="MyCompany.MyApp",
+                                   msix_publisher="CN=Demo")), \
+             mock.patch("msix_all_users.run_as_child", side_effect=fake):
+            code = ic.run_provision_child({"package_path": "C:\\a.msix",
+                                           "digest": "d" * 64, "report_path": ""})
+        self.assertEqual(code, 0)
+        self.assertEqual(seen["identity_name"], "MyCompany.MyApp")
+        self.assertEqual(seen["publisher"], "CN=Demo")
+
+    def test_a_crash_while_reading_the_config_still_returns_an_exit_code(self):
+        with mock.patch.object(ic, "InstallerAPI", side_effect=RuntimeError("壞了")):
+            code = ic.run_provision_child({"package_path": "C:\\a.msix",
+                                           "digest": "d" * 64, "report_path": ""})
+        self.assertNotEqual(code, 0)
 
 
 class TestGetUiLanguage(unittest.TestCase):

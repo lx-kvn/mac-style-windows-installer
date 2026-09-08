@@ -24,6 +24,7 @@ import subprocess
 import tempfile
 import time
 
+import elevate
 import version_compare
 
 
@@ -214,6 +215,11 @@ class UpgradeCoordinator:
         受保護的位置時默默失敗，卻不會拋出任何例外，看起來像是「正常
         執行完了」，實際上舊版本根本沒清乾淨。
 
+        ctypes 那一段自 2026-09-08 起住在 `elevate.py`：MSIX 的全機器佈建
+        需要同一件事（ADR-0013 決定三），而同一段 ctypes 有兩份的話，其中
+        一份被修好的時候另一份不會跟著好。這個方法保留下來的是它與更新
+        覆蓋流程之間的介面——四種情形各自對應一種例外，呼叫端不變。
+
         `shell32`/`kernel32` 選填注入點：預設用真正的
         `ctypes.windll.shell32`/`ctypes.windll.kernel32`，跟
         file_assoc.py/system_entries.py 的 `registry=` 是同一種 seam
@@ -223,67 +229,20 @@ class UpgradeCoordinator:
         仍然沒辦法在開發環境重現，這個 seam 只讓「成功／逾時／非 0
         回傳」這幾條分支變得可測。
         """
-        shell32 = shell32 if shell32 is not None else ctypes.windll.shell32
-        kernel32 = kernel32 if kernel32 is not None else ctypes.windll.kernel32
-
-        class SHELLEXECUTEINFOW(ctypes.Structure):
-            _fields_ = [
-                ("cbSize", ctypes.c_ulong),
-                ("fMask", ctypes.c_ulong),
-                ("hwnd", ctypes.c_void_p),
-                ("lpVerb", ctypes.c_wchar_p),
-                ("lpFile", ctypes.c_wchar_p),
-                ("lpParameters", ctypes.c_wchar_p),
-                ("lpDirectory", ctypes.c_wchar_p),
-                ("nShow", ctypes.c_int),
-                ("hInstApp", ctypes.c_void_p),
-                ("lpIDList", ctypes.c_void_p),
-                ("lpClass", ctypes.c_wchar_p),
-                ("hKeyClass", ctypes.c_void_p),
-                ("dwHotKey", ctypes.c_ulong),
-                ("hIcon", ctypes.c_void_p),
-                ("hProcess", ctypes.c_void_p),
-            ]
-
-        SEE_MASK_NOCLOSEPROCESS = 0x00000040
-        SW_HIDE = 0
-        WAIT_TIMEOUT = 0x00000102
-
-        params = " ".join(f'"{a}"' if " " in a else a for a in args)
-        sei = SHELLEXECUTEINFOW()
-        sei.cbSize = ctypes.sizeof(sei)
-        sei.fMask = SEE_MASK_NOCLOSEPROCESS
-        sei.hwnd = None
-        sei.lpVerb = "runas"
-        sei.lpFile = uninstall_exe
-        sei.lpParameters = params
-        sei.lpDirectory = None
-        sei.nShow = SW_HIDE
-
-        ok = shell32.ShellExecuteExW(ctypes.pointer(sei))
-        if not ok:
-            raise OSError("無法以系統管理員權限啟動舊版解除安裝程式（使用者可能取消了 UAC 提示）。")
-
-        # 真實抓到的問題：SEE_MASK_NOCLOSEPROCESS 模式下，如果沒有真的
-        # 產生一個行程（hProcess 是 NULL），WaitForSingleObject(NULL, ...)
-        # 實際上會回傳 WAIT_FAILED，不是這裡原本唯一判斷的 WAIT_TIMEOUT，
-        # 會被誤判成「等待成功」繼續往下跑，而不是明確的錯誤。
-        if not sei.hProcess:
-            raise OSError("啟動舊版解除安裝程式失敗：沒有取得有效的行程控制代碼。")
-
-        try:
-            wait_result = kernel32.WaitForSingleObject(sei.hProcess, timeout_ms)
-            if wait_result == WAIT_TIMEOUT:
-                raise TimeoutError("舊版解除安裝程式執行逾時。")
-            # 真實抓到的問題（B6）：結束碼原本完全沒有被檢查——等到行程
-            # 結束就直接視為成功，不管它實際上是不是真的執行成功。跟
-            # uninstall.py 自己的慣例一致：0=成功、非 0=失敗。
-            exit_code = ctypes.c_ulong(0)
-            kernel32.GetExitCodeProcess(sei.hProcess, ctypes.pointer(exit_code))
-            if exit_code.value != 0:
-                raise RuntimeError(f"舊版解除安裝程式回報失敗（結束碼 {exit_code.value}）。")
-        finally:
-            kernel32.CloseHandle(sei.hProcess)
+        result = elevate.run_elevated_and_wait(
+            uninstall_exe, args, timeout_ms=timeout_ms,
+            shell32=shell32, kernel32=kernel32)
+        if result.status == elevate.DECLINED:
+            raise OSError("無法以系統管理員權限啟動舊版解除安裝程式（使用者取消了 UAC 提示）。")
+        if result.status == elevate.FAILED:
+            raise OSError("無法以系統管理員權限啟動舊版解除安裝程式：" + result.detail)
+        if result.status == elevate.TIMEOUT:
+            raise TimeoutError("舊版解除安裝程式執行逾時。")
+        # 真實抓到的問題（B6）：結束碼原本完全沒有被檢查——等到行程結束就
+        # 直接視為成功，不管它實際上是不是真的執行成功。跟 uninstall.py
+        # 自己的慣例一致：0=成功、非 0=失敗。
+        if result.exit_code != 0:
+            raise RuntimeError(f"舊版解除安裝程式回報失敗（結束碼 {result.exit_code}）。")
 
     def run(self, app_name, version, scope, selected_path, restart_explorer_on_update,
             existing_info=None):

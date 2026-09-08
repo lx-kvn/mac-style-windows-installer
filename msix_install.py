@@ -75,6 +75,10 @@ MESSAGES = {
             "安裝中止：{message}\n新舊版本並存會造成兩筆重複的應用程式項目與"
             "檔案關聯衝突，因此不繼續安裝。",
         "package_missing": "安裝失敗：找不到內建的套件檔案（{path}）。",
+        "provisioning": "正在登記給這台電腦上的所有使用者...",
+        "provision_crashed":
+            "登記給所有使用者的步驟發生未預期的錯誤：{error}\n"
+            "這個應用程式只安裝給目前這位使用者，其他使用者不會取得它。",
         "deploying": "正在交由 Windows 的套件引擎安裝...",
         "deploy_failed": "安裝失敗：{error}",
         "done": "安裝完成",
@@ -126,6 +130,12 @@ MESSAGES = {
             "associations, so the installation does not continue.",
         "package_missing":
             "Installation failed: the bundled package file was not found ({path}).",
+        "provisioning": "Registering the application for every user on this machine...",
+        "provision_crashed":
+            "The step that registers the application for every user hit an "
+            "unexpected error: {error}\n"
+            "The application was installed for the current user only; other users "
+            "will not get it.",
         "deploying": "Handing the package to the Windows packaging engine...",
         "deploy_failed": "Installation failed: {error}",
         "done": "Installation complete",
@@ -271,7 +281,7 @@ def run(package_path, check_existing=None, remove_existing=None, deploy=None,
         progress=None, log=None, package_must_exist=False,
         find_installed_package=None, package_version="", package_publisher="",
         confirm_downgrade=None, remove_installed_package=None,
-        lang=messages.DEFAULT_LANGUAGE):
+        provision_all_users=None, lang=messages.DEFAULT_LANGUAGE):
     """執行 MSIX 模式的安裝，回傳與傳統流程相同形狀的結果字典。
 
     `package_must_exist`：呼叫端已經確認過檔案存在時可以省略這道檢查。預設
@@ -283,6 +293,9 @@ def run(package_path, check_existing=None, remove_existing=None, deploy=None,
 
     `confirm_downgrade` 為 None 表示不詢問、直接做：靜默安裝走這一條
     （ADR-0015 決定三）。
+
+    `provision_all_users` 為 None 時完全不走全機器範圍那條路——沒有啟用該
+    設定的安裝檔行為與這個參數出現之前相同。
 
     `lang` 決定所有回傳與回報的訊息用哪一種語言。安裝端傳的是它自己依系統
     語言算出來的那一個值，兩邊不會分岔。
@@ -324,6 +337,22 @@ def run(package_path, check_existing=None, remove_existing=None, deploy=None,
             confirm_downgrade, remove_installed_package, report, warnings, lang)
         if not proceed:
             return {"status": "error", "message": refusal}
+
+    # 佈建排在註冊之前（ADR-0013 決定三）。順序不是偏好而是系統的限制：
+    # 佈建需要提權、註冊不能提權，兩者必須發生在不同的權限下。
+    #
+    # 這一段的任何失敗都不中止安裝：套件本身沒問題，接下來的註冊會照常
+    # 進行，而使用者要的東西正是那一步給的。降級的說明走 warnings（第九
+    # 題），與降版警示在畫面上長得一樣。
+    if provision_all_users is not None:
+        report(_t("provisioning", lang))
+        try:
+            provisioned = provision_all_users()
+        except Exception as e:
+            warnings.append(_t("provision_crashed", lang, error=e))
+        else:
+            if not provisioned.ok and provisioned.warning:
+                warnings.append(provisioned.warning)
 
     report(_t("deploying", lang))
     outcome = deploy(package_path, progress=progress)

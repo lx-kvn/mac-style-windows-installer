@@ -436,5 +436,82 @@ class NoUninstallerTest(unittest.TestCase):
         self.assertIn("設定", result["message"])
 
 
+class ProvisioningForAllUsersTest(unittest.TestCase):
+    """全機器範圍：佈建排在替當前使用者註冊之前（ADR-0013 決定三）。
+
+    順序不是偏好而是系統的限制——佈建需要提權、註冊不能提權，兩者發生在
+    不同的權限下（同一份 ADR 的背景第五項）。這一層看得到的只有先後。
+    """
+
+    def _hook(self, ok_=True, warning=None):
+        calls = []
+
+        def provision():
+            calls.append("provision")
+            return type("R", (), {"ok": ok_, "warning": warning})()
+
+        provision.calls = calls
+        return provision
+
+    def test_it_runs_before_the_deployment(self):
+        recorder = Recorder()
+        hook = self._hook()
+        run(recorder, provision_all_users=self._ordered(recorder, hook))
+        self.assertEqual(recorder.order, ["check", "provision", "deploy"])
+
+    def _ordered(self, recorder, hook):
+        def provision():
+            recorder.order.append("provision")
+            return hook()
+        return provision
+
+    def test_it_runs_after_the_old_version_is_removed(self):
+        """舊版還在的時候佈建，登記的是一個馬上要被移除的狀態。"""
+        recorder = Recorder(existing={"exists": True, "install_path": "C:\\Old"})
+        run(recorder, provision_all_users=self._ordered(recorder, self._hook()))
+        self.assertEqual(recorder.order, ["check", "remove", "provision", "deploy"])
+
+    def test_nothing_happens_when_no_hook_is_given(self):
+        """沒有啟用全機器範圍的安裝檔完全不走這條路，行為與修正前相同。"""
+        recorder = Recorder()
+        result = run(recorder)
+        self.assertEqual(recorder.order, ["check", "deploy"])
+        self.assertEqual(result["warnings"], [])
+
+    def test_a_downgrade_becomes_a_warning(self):
+        recorder = Recorder()
+        result = run(recorder, provision_all_users=self._hook(
+            ok_=False, warning="沒有取得系統管理員權限，只安裝給目前這位使用者。"))
+        self.assertEqual(result["status"], "success")
+        self.assertIn("沒有取得系統管理員權限，只安裝給目前這位使用者。",
+                      result["warnings"])
+
+    def test_the_installation_still_succeeds_after_a_downgrade(self):
+        """降級不是安裝失敗（第三題）：套件本身沒問題，使用者要的東西拿得到，
+        中止的話他手上什麼都沒有。"""
+        recorder = Recorder()
+        result = run(recorder, provision_all_users=self._hook(
+            ok_=False, warning="佈建失敗"))
+        self.assertEqual(result["status"], "success")
+        self.assertIn("deploy", recorder.order)
+
+    def test_success_adds_no_warning(self):
+        recorder = Recorder()
+        result = run(recorder, provision_all_users=self._hook())
+        self.assertEqual(result["warnings"], [])
+
+    def test_a_failing_hook_does_not_take_the_installation_down(self):
+        """這條路上的例外沒有一個值得讓安裝停下來——接下來的註冊會照常
+        進行，而使用者要的東西正是那一步給的。"""
+        def boom():
+            raise RuntimeError("提權那一段爆了")
+
+        recorder = Recorder()
+        result = run(recorder, provision_all_users=boom)
+        self.assertEqual(result["status"], "success")
+        self.assertTrue(result["warnings"])
+        self.assertIn("提權那一段爆了", result["warnings"][0])
+
+
 if __name__ == "__main__":
     unittest.main()

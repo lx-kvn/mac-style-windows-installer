@@ -199,6 +199,11 @@ SHARED_DEEP_MODULES = [
     # msix_deploy 對 winrt 的匯入是延遲的，因此不會讓傳統引擎的安裝檔綁上
     # 那個相依（見該模組的 _default_manager()）。
     "msix_deploy.py", "msix_install.py",
+    # 全機器使用者範圍（ADR-0013）。`msix_all_users` 與 `msix_provision` 是
+    # 同一件事的兩半（決定要不要提權／提權之後做什麼），`elevate` 是那個
+    # 跨 UAC 啟動子行程的動作本身，`upgrade.py` 也用它。少帶其中任何一支，
+    # 安裝檔會在使用者按下 UAC 的「是」之後才以匯入錯誤收場。
+    "msix_all_users.py", "msix_provision.py", "elevate.py",
     # 兩種引擎都要：安裝介面本身依賴 WebView2 Runtime，缺少它時視窗開得起來
     # 但畫面永遠停在載入中（見該模組的說明）。偵測必須在建立視窗之前完成，
     # 因此這支不能只存在於打包端。messages.py 是它的相依——那幾則對話框在
