@@ -37,6 +37,11 @@ BROKEN = "broken"                # 待驗的敘述不成立
 NOT_REPRODUCED = "not-reproduced"  # 現象沒有重現
 INCONCLUSIVE = "inconclusive"    # 量不到，與「量到失敗」不同
 
+# 跨範圍的兩種可能結局。這兩者決定「先移除」那道步驟該不該做，而那道步驟
+# 走的是會清掉使用者資料的系統動作（ADR-0015），因此必須量準，不能推論。
+COEXISTS = "coexists"                    # 新舊各自存在——決定六的「先移除」有必要
+SYSTEM_HANDLES_IT = "system-handles-it"  # 系統自己收斂——那道移除是白清資料
+
 Verdict = collections.namedtuple("Verdict", "name verdict detail")
 
 POWERSHELL = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
@@ -171,6 +176,97 @@ function Note($step, $before, $result, $detail) {{
 """
 
 
+def evaluate_cross_scope(steps):
+    """跨範圍：使用者自己裝過之後，管理員再佈建同一個套件會怎樣。
+
+    決定六以「不先移除就會新舊並存」為前提，而那道移除會清掉使用者的資料
+    （ADR-0015）。因此這裡要分辨的是：佈建之後，使用者那一份是停在舊版本
+    （並存，移除有必要），還是被系統帶到新版本（系統自己收斂，移除是白清）。
+    """
+    name = "跨範圍：使用者範圍已安裝時再佈建"
+    found = _by_name(steps)
+    required = ("user_registered_before", "provision_over_user_scope",
+                "state_after_cross_scope")
+    missing = [key for key in required if key not in found]
+    if missing:
+        return Verdict(name, INCONCLUSIVE, "客體沒有回報：" + "、".join(missing))
+
+    if found["provision_over_user_scope"].get("result") != "ok":
+        return Verdict(name, INCONCLUSIVE,
+                       "佈建本身失敗，並存與否沒有被測到："
+                       + found["provision_over_user_scope"].get("detail", ""))
+
+    before = found["user_registered_before"].get("detail", "")
+    after = found["state_after_cross_scope"].get("detail", "")
+    before_user = _user_version(before)
+    after_user = _user_version(after)
+
+    if not after_user:
+        return Verdict(name, SYSTEM_HANDLES_IT,
+                       "佈建之後使用者那一份已不存在（" + after + "），沒有並存。")
+    if before_user and after_user != before_user:
+        return Verdict(name, SYSTEM_HANDLES_IT,
+                       f"佈建把使用者那一份從 {before_user} 帶到 {after_user}，"
+                       "沒有並存——此時先移除等於白清一次資料。")
+    return Verdict(name, COEXISTS,
+                   f"佈建之後使用者那一份仍是 {after_user}（{after}），"
+                   "新舊各自存在。")
+
+
+def _user_version(state):
+    """從 `user:1.0.0.0:Ok+provisioned:1.1.0.0` 這種狀態字串取出使用者那一份的版本。"""
+    for part in (state or "").split("+"):
+        if part.startswith("user:"):
+            pieces = part.split(":")
+            return pieces[1] if len(pieces) > 1 else ""
+    return ""
+
+
+def cross_scope_round_scripts(package_v1, package_v2):
+    """第三輪：使用者自己裝 1.0.0，管理員再佈建 1.1.0。
+
+    順序不可對調：要量的是「使用者已經有一份」這個前置狀態下佈建的結果。
+    """
+    unelevated_first = _preamble() + f"""
+# 使用者自己裝一份（未提權，這是終端使用者實際會做的事）。
+$before = State
+try {{
+    Add-AppxPackage -Path '{package_v1}' -ErrorAction Stop
+    Note 'user_installs_first' $before 'ok' ''
+}} catch {{
+    Note 'user_installs_first' $before 'fail' $_.Exception.Message
+}}
+Note 'user_registered_before' 'n/a' 'ok' (State)
+"""
+
+    elevated = _preamble() + f"""
+# 管理員佈建同一個套件的較新版本（跨範圍）。
+$before = State
+try {{
+    Add-AppxProvisionedPackage -Online -PackagePath '{package_v2}' -SkipLicense `
+        -ErrorAction Stop | Out-Null
+    Note 'provision_over_user_scope' $before 'ok' ''
+}} catch {{
+    Note 'provision_over_user_scope' $before 'fail' $_.Exception.Message
+}}
+
+# 第三段的驗收要以另一個帳號登入，前提是那個帳號存在於這張快照裡。
+try {{
+    $names = (Get-LocalUser | Where-Object {{ $_.Enabled }} |
+        ForEach-Object {{ $_.Name }}) -join ','
+    Note 'local_users' 'n/a' 'ok' $names
+}} catch {{
+    Note 'local_users' 'n/a' 'fail' $_.Exception.Message
+}}
+"""
+
+    unelevated_after = _preamble() + """
+# 佈建之後，使用者那一份還在不在、是哪一個版本。
+Note 'state_after_cross_scope' 'n/a' 'ok' (State)
+"""
+    return [unelevated_first, elevated, unelevated_after]
+
+
 def registration_round_scripts(package_v1):
     """第一輪：只做註冊，從乾淨狀態開始。
 
@@ -271,7 +367,8 @@ try {{
 
 def all_scripts(package_v1, package_v2):
     return registration_round_scripts(package_v1) \
-        + provision_round_scripts(package_v1, package_v2)
+        + provision_round_scripts(package_v1, package_v2) \
+        + cross_scope_round_scripts(package_v1, package_v2)
 
 
 def _run_round(vm, name, scripts, work_dir, report_suffix):
@@ -325,8 +422,21 @@ def run(vm, package_v1_local, package_v2_local, work_dir, prepare=None):
         [(provision_scripts[0], False), (provision_scripts[1], True)],
         work_dir, "provision")
 
+    if prepare:
+        prepare()
+        remote_v1, remote_v2 = stage_packages()
+
+    # 第三輪同樣從乾淨狀態開始：前兩輪都留下了佈建紀錄，而那個紀錄無法從
+    # 系統介面移除，帶著它量「使用者已裝過時再佈建」會量到另一件事。
+    cross_scripts = cross_scope_round_scripts(remote_v1, remote_v2)
+    steps += _run_round(
+        vm, "cross_scope",
+        [(cross_scripts[0], True), (cross_scripts[1], False), (cross_scripts[2], True)],
+        work_dir, "cross_scope")
+
     return steps, [evaluate_same_scope_update(steps),
-                   evaluate_elevated_registration(steps)]
+                   evaluate_elevated_registration(steps),
+                   evaluate_cross_scope(steps)]
 
 
 def main(argv=None):

@@ -138,6 +138,59 @@ class TheElevatedRegistrationVerdict(unittest.TestCase):
         self.assertEqual(verdict.verdict, measure.INCONCLUSIVE)
 
 
+class TheCrossScopeVerdict(unittest.TestCase):
+    """跨範圍：使用者自己裝過之後，管理員再佈建同一個套件會怎樣。
+
+    決定六說跨範圍不先移除會「新舊並存」，但那是推論；ADR-0013 那一輪量到的
+    是同範圍。這件事必須量準，因為「先移除」走的是會**清掉使用者資料**的那個
+    系統動作（ADR-0015），為一個不存在的問題清資料是最壞的結果。
+    """
+
+    def _steps(self, **results):
+        return [{"step": name, "before": "n/a", "result": "ok", "detail": value}
+                for name, value in results.items()]
+
+    def test_coexistence_means_the_removal_step_is_needed(self):
+        """佈建之後，使用者那一份仍停在舊版本——兩者各自存在，就是決定六
+        所說的並存。"""
+        verdict = measure.evaluate_cross_scope(self._steps(
+            user_registered_before="user:1.0.0.0:Ok",
+            provision_over_user_scope="ok",
+            state_after_cross_scope="user:1.0.0.0:Ok+provisioned:1.1.0.0"))
+        self.assertEqual(verdict.verdict, measure.COEXISTS)
+
+    def test_the_system_handling_it_means_removal_would_destroy_data_for_nothing(self):
+        """使用者那一份被系統更新到新版本——沒有並存，那道移除就不該做。"""
+        verdict = measure.evaluate_cross_scope(self._steps(
+            user_registered_before="user:1.0.0.0:Ok",
+            provision_over_user_scope="ok",
+            state_after_cross_scope="user:1.1.0.0:Ok+provisioned:1.1.0.0"))
+        self.assertEqual(verdict.verdict, measure.SYSTEM_HANDLES_IT)
+
+    def test_a_missing_step_is_inconclusive(self):
+        verdict = measure.evaluate_cross_scope(self._steps(
+            user_registered_before="user:1.0.0.0:Ok"))
+        self.assertEqual(verdict.verdict, measure.INCONCLUSIVE)
+
+    def test_a_failed_provision_is_inconclusive_not_an_answer(self):
+        """佈建本身失敗時，並存與否根本沒有被測到。"""
+        steps = self._steps(user_registered_before="user:1.0.0.0:Ok",
+                            state_after_cross_scope="user:1.0.0.0:Ok")
+        steps.append({"step": "provision_over_user_scope", "before": "n/a",
+                      "result": "fail", "detail": "0x80070005"})
+        self.assertEqual(measure.evaluate_cross_scope(steps).verdict,
+                         measure.INCONCLUSIVE)
+
+
+class TheAccountCheck(unittest.TestCase):
+    """第三段的驗收要用另一個帳號登入，前提是那個帳號存在於這張快照裡。"""
+
+    def test_it_reports_which_accounts_exist(self):
+        script = "\n".join(measure.all_scripts("a.msix", "b.msix"))
+        self.assertIn("Get-LocalUser", script)
+        self.assertIn("local_users", script)
+
+
 class TheGuestScripts(unittest.TestCase):
     def test_every_step_records_the_state_it_started_from(self):
         """每個階段都要記錄前置狀態。上一輪拿到互相矛盾的結果卻無從解釋，
