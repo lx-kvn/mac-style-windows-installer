@@ -19,6 +19,31 @@ IDENTITY = "MswiProbe.ScopeProbe"
 VERSION = "1.2.0.0"
 
 
+class TheseTestsHaveToRunOnACleanMachine(unittest.TestCase):
+    """真實踩到（2026-09-08 的 CI 紅燈）：這支工具原本在最上層 `from tools
+    import vms`，而 `tools/vms.py` 要求 `vm_lease`——那個套件由另一個 repo
+    提供，只裝在開發機上。於是本檔在 CI 上連匯入都失敗，整份 31 項一項都沒
+    跑到，而那些正是「拿到客體回報之後怎麼判定」的全部保障。
+
+    判準寫錯的後果是拿到一個看起來有結論、實際上不成立的答案，因此它必須在
+    一台乾淨的機器上被驗過。驅動虛擬機的那幾個函式仍然只在開發機上跑得起來，
+    它們把 `vms` 留在函式內部匯入。
+
+    以靜態方式確認：同一個行程裡沒辦法真的重現「模組尚未被匯入過」的狀態。
+    """
+
+    def test_the_tool_does_not_import_vms_at_module_level(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "tools", "verify_msix_all_users.py"),
+                  encoding="utf-8") as f:
+            source = f.read()
+        top_level = [line for line in source.splitlines()
+                     if line.startswith("from tools import vms")
+                     or line.startswith("import tools.vms")]
+        self.assertEqual(top_level, [],
+                         "vms 回到了最上層，這份測試在 CI 上會整份跳不起來")
+
+
 class ParsingWhatTheGuestWroteBack(unittest.TestCase):
     def test_it_reads_key_value_lines(self):
         report = verify.parse_report("child_exit=0\nstate_after=provisioned:1.2.0.0\n")

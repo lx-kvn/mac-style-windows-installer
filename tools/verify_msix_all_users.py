@@ -39,7 +39,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import packaging_core
 
-from tools import vms
+# `tools.vms` 不在最上層匯入：它要求 `vm_lease`，而那個套件由另一個 repo
+# 提供、只裝在開發機上。放在最上層的話，這個模組在 CI 上連匯入都會失敗，
+# 判準與客體腳本那幾十項測試因此一項都跑不到——而那些正是「拿到客體回報之後
+# 怎麼判定」的全部保障，在乾淨機器上驗過才有意義。
+#
+# 這一點與 `measure_msix_scope.py` 等幾支不同：那幾支的測試以
+# `unittest.SkipTest` 在 CI 上整份跳過。此處改為延後匯入，讓判準真的被 CI
+# 驗到；驅動虛擬機的那幾個函式仍然只在開發機上跑得起來。
 
 PASS = "pass"
 FAIL = "fail"
@@ -279,6 +286,8 @@ Note ("elevated_log=" + (Flatten '%(log)s'))
 
 
 def _push(vm, work_dir, name, source):
+    from tools import vms
+
     local = os.path.join(work_dir, name)
     vms.write_guest_script(local, source)
     remote = GUEST_DIR + "\\" + name
@@ -364,6 +373,8 @@ Import-Certificate -FilePath '%(cer)s' -CertStoreLocation Cert:\\LocalMachine\\R
 def main(argv=None):
     import argparse
     import hashlib
+
+    from tools import vms
 
     # 客體寫回來的文字不受這支工具控制，其中可能含有主控台編不出來的
     # 字元（實際踩過：客體讀錯編碼寫回一段亂碼）。少了這一行，一輪已經
