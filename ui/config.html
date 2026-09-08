@@ -211,6 +211,8 @@
                 <input type="text" id="msix_certificate_subject" placeholder="留空即從憑證自動填入" data-i18n-placeholder="ph_msix_certificate_subject">
                 <label style="margin-top: 8px;" data-i18n="label_msix_min_windows_version">最低支援的 Windows 版本（選填）</label>
                 <input type="text" id="msix_min_windows_version" placeholder="10.0.17763.0" data-i18n-placeholder="ph_msix_min_windows_version">
+                <div class="checkbox-row" style="margin-top: 12px;"><input type="checkbox" id="msix_all_users"><label for="msix_all_users" data-i18n="label_msix_all_users">安裝給這台電腦上的所有使用者</label></div>
+                <div class="note" data-i18n="note_msix_all_users">預設只安裝給執行安裝的那一位使用者。勾選之後：安裝途中會要求系統管理員權限，拿不到（使用者拒絕、或帳號無法提權）就自動改為只裝給他自己並在完成畫面說明；其他使用者要在自己登入後啟動一次應用程式才算完成安裝，在那之前他們的檔案關聯不會生效；日後要完整移除，系統的「設定 → 應用程式」只移除得掉操作者自己那一份，機器層級的登記要由系統管理員以指令移除。</div>
                 <label style="margin-top: 8px;" data-i18n="label_msix_icons">圖示個別覆蓋（選填）</label>
                 <div class="file-selector" style="margin-top: 4px;">
                     <button class="btn-browse" onclick="browseMsixIcon('tile')" data-i18n="btn_browse_msix_tile">磚塊 150px</button>
@@ -826,6 +828,8 @@
                 ph_msix_certificate_subject: "留空即從憑證自動填入",
                 label_msix_min_windows_version: "最低支援的 Windows 版本（選填）",
                 ph_msix_min_windows_version: "10.0.17763.0",
+                label_msix_all_users: "安裝給這台電腦上的所有使用者",
+                note_msix_all_users: "預設只安裝給執行安裝的那一位使用者。勾選之後：安裝途中會要求系統管理員權限，拿不到（使用者拒絕、或帳號無法提權）就自動改為只裝給他自己並在完成畫面說明；其他使用者要在自己登入後啟動一次應用程式才算完成安裝，在那之前他們的檔案關聯不會生效；日後要完整移除，系統的「設定 → 應用程式」只移除得掉操作者自己那一份，機器層級的登記要由系統管理員以指令移除。",
                 label_msix_icons: "圖示個別覆蓋（選填）",
                 btn_browse_msix_tile: "磚塊 150px",
                 btn_browse_msix_taskbar: "工作列 44px",
@@ -995,6 +999,8 @@
                 ph_msix_certificate_subject: "Leave empty to fill in from the certificate",
                 label_msix_min_windows_version: "Minimum supported Windows version (optional)",
                 ph_msix_min_windows_version: "10.0.17763.0",
+                label_msix_all_users: "Install for every user on this machine",
+                note_msix_all_users: "By default only the user running the installer gets the application. With this on: the installer asks for administrator rights partway through, and if it cannot get them (the user declines, or the account cannot elevate) it installs for that user alone and says so on the final screen; every other user must sign in and start the application once before their own installation completes, and until then their file associations do not take effect; removing it completely later is beyond what the system's Settings > Apps can do — that only removes the operator's own copy, and the machine-level registration has to be removed by an administrator from the command line.",
                 label_msix_icons: "Per-position icon overrides (optional)",
                 btn_browse_msix_tile: "Tile 150px",
                 btn_browse_msix_taskbar: "Taskbar 44px",
@@ -2092,6 +2098,9 @@
                     certificate_subject: document.getElementById('msix_certificate_subject').value.trim(),
                     min_windows_version: document.getElementById('msix_min_windows_version').value.trim(),
                     icons: collectMsixIcons(),
+                    // 送出真假值而不是字串：後端不做真假值轉換，字串會被
+                    // 直接拒絕（見 msix_settings 的 all_users.not_bool）。
+                    all_users: document.getElementById('msix_all_users').checked,
                 } : {},
             };
             // 密碼以第二個參數送出，不是 data 的一個欄位——data 的欄位集合

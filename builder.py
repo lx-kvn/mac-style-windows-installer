@@ -357,7 +357,7 @@ def build_all(
     create_restore_point_before_install=False, install_password_env="", install_password="",
     workspace_dir=".", sdk_tools_settings=None, install_engine="traditional",
     signed_msix="", msix_identity_name="", msix_package_version="",
-    msix_publisher="", engine_notices=None,
+    msix_publisher="", msix_all_users=False, engine_notices=None,
     progress_callback=None,
 ):
     """流水線：產生配置 -> 編譯反安裝檔 -> 編譯主安裝檔
@@ -524,6 +524,10 @@ def build_all(
         # 兩者都只有打包端知道：版本是補成四段的形式，發行者是憑證上的字串。
         "msix_package_version": msix_package_version if install_engine == "msix" else "",
         "msix_publisher": msix_publisher if install_engine == "msix" else "",
+        # 使用者範圍（ADR-0013 決定一）。只在 MSIX 模式帶出去：傳統引擎的
+        # 使用者範圍由安裝路徑決定，留一個永遠為假的欄位只會讓讀設定檔的人
+        # 以為它有作用。
+        "msix_all_users": bool(msix_all_users) if install_engine == "msix" else False,
     }
     config_path = os.path.join(workspace_dir, CONFIG_FILE_NAME)
     with open(config_path, "w", encoding="utf-8") as f:
@@ -640,7 +644,11 @@ def build_all(
     ]
     if built_uninstall:
         cmd.append(f"--add-data={built_uninstall};.")
-    if not no_admin_install:
+    if not no_admin_install and install_engine != "msix":
+        # MSIX 模式的安裝檔本體維持未提權（ADR-0013 決定三）：提權那一段由
+        # 子行程負責，主行程必須留在未提權狀態才能替當前使用者完成註冊——
+        # 提升後的行程做不到那件事。整顆 exe 提權的後果是使用者看到「安裝
+        # 成功」之後開始功能表卻是空的，要登出再登入才會出現。
         cmd.append("--uac-admin")
     # 真實抓到的問題（F19）：這裡建立的暫存產物（doc_icon.ico、內嵌的
     # 前後置腳本、下載下來要內嵌的相依元件安裝檔）原本只有順利跑到最後

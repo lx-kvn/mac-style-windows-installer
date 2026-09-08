@@ -89,6 +89,7 @@ MESSAGES = {
         "icons.not_object": "msix.icons 必須是一個物件（字典），例如 {{\"tile\": \"tile.png\"}}。",
         "icons.unknown_keys": "msix.icons 只認得 {known} 這三個位置，收到的還有：{unknown}。",
         "block.not_object": "msix 必須是一個物件（字典），例如 {{\"identity_name\": \"...\"}}。",
+        "all_users.not_bool": "msix.all_users 只能是 true 或 false（真假值），收到的是 {value}。這個欄位決定要不要把應用程式裝給這台電腦的每一位使用者，因此不接受字串或數字——寫成 \"false\" 這種字串會被當成真，與你的意思相反，而且打包時不會有任何徵兆。",
         "subject.required": "msix.certificate_subject 是必填的：它會寫進套件清單的發行者欄位，而該值必須與簽章憑證上記載的名稱完全一致（例如 CN=某某, O=某某, C=TW），不一致時系統直接拒絕安裝，且錯誤訊息不會指向這個原因。",
         "subject.mismatch": "msix.certificate_subject 與簽章憑證上記載的名稱不一致，這樣簽出來的套件系統會直接拒絕安裝，而且它的錯誤訊息不會指向這個原因。\n    設定裡寫的：{configured}\n    憑證上實際是：{actual}\n    （把設定改成憑證上那一個，或清空這個欄位讓工具自動填入。）",
         "list.separator": "、",
@@ -108,6 +109,7 @@ MESSAGES = {
         "icons.not_object": "msix.icons must be an object (a dictionary), for instance {{\"tile\": \"tile.png\"}}.",
         "icons.unknown_keys": "msix.icons only recognises the three positions {known}; it also received: {unknown}.",
         "block.not_object": "msix must be an object (a dictionary), for instance {{\"identity_name\": \"...\"}}.",
+        "all_users.not_bool": "msix.all_users must be true or false; received {value}. This field decides whether the application is installed for every user on the machine, so strings and numbers are not accepted — a string such as \"false\" would be read as true, the opposite of what you meant, and packaging would give no sign of it.",
         "subject.required": "msix.certificate_subject is required: it goes into the package manifest's publisher field, and it must match the name recorded on your signing certificate exactly (CN=Something, O=Something, C=TW, for instance). If it does not match, the system simply refuses to install, and its error message does not point at this cause.",
         "subject.mismatch": "msix.certificate_subject does not match the name recorded on the signing certificate. A package signed this way is refused outright by the system, and its error message does not point at this cause.\n    In the config: {configured}\n    On the certificate: {actual}\n    (Set the config to the certificate's value, or clear this field and let the tool fill it in.)",
         "list.separator": ", ",
@@ -263,6 +265,18 @@ def validate(block, cert_subject=None, lang=messages.DEFAULT_LANGUAGE):
     if min_version_error:
         problems.append(min_version_error)
 
+    # 使用者範圍（ADR-0013 決定一）。沒填即為當前使用者——既有的設定檔沒有
+    # 這個欄位，它們的行為必須完全不變。
+    #
+    # 不做真假值轉換：JSON 裡寫 "false" 這種字串是可能發生的手誤，而轉換的
+    # 結果是真，與作者的意思完全相反且打包不會有任何徵兆。這個欄位決定的是
+    # 要不要動整台機器，猜錯的代價太大。
+    all_users = block.get("all_users", False)
+    if all_users is None:
+        all_users = False
+    if not isinstance(all_users, bool):
+        problems.append(_t("all_users.not_bool", lang, value=repr(all_users)))
+
     if problems:
         return None, "\n".join(problems)
     return {
@@ -270,4 +284,5 @@ def validate(block, cert_subject=None, lang=messages.DEFAULT_LANGUAGE):
         "certificate_subject": certificate_subject,
         "min_windows_version": min_version,
         "icons": icons,
+        "all_users": all_users,
     }, None

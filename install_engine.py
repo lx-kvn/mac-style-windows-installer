@@ -157,10 +157,6 @@ _FIELD_CATEGORIES = {
     "dependencies_min_version": UNSUPPORTED,
     "windows_service": UNSUPPORTED,
     "scheduled_task": UNSUPPORTED,
-    # 使用者範圍。這一項與其他欄位相反，是「沒有填」才構成違規——預設的
-    # Program Files 即 no_admin_install 為假，而第一版只提供當前使用者範圍
-    # （見 docs/adr/0009）。判斷邏輯在 _user_scope_finding()。
-    "no_admin_install": UNSUPPORTED,
     # 安裝密碼保護。這一項的「有沒有填」要看三個欄位（見 _PASSWORD_FIELDS），
     # 因此不走下方的一般迴圈，判斷在 check_settings() 內另外做。
     "install_password": UNSUPPORTED,
@@ -173,6 +169,11 @@ _FIELD_CATEGORIES = {
     # local_appdata_files 的目的地路徑正是由 folder_name 組成（第七輪第二項）。
     "folder_name": MOOT,
     "local_appdata_files": MOOT,
+    # 使用者範圍原本由這個欄位表達，因此它曾是第二類、擋建置（ADR-0009）。
+    # 有了 msix.all_users 之後它在這個模式下不再表達任何東西，改列第四類
+    # （ADR-0013 決定二）。判斷邏輯在 check_settings()：只在填了「假」時
+    # 說明，填真代表要的就是當前使用者範圍，與這個模式的預設一致。
+    "no_admin_install": MOOT,
 }
 
 # 在兩種引擎下行為相同的設定。列出來不是為了給程式讀——沒有任何產品程式碼
@@ -219,7 +220,7 @@ ENGINE_PLUMBING_FIELDS = frozenset({
     # 打包能力」，而是這個機制自己的參數——後三個都是從 msix 區塊推導出來、
     # 要讓安裝端知道的事實（套件身分、版本、發行者），不是使用者另外填的欄位。
     "install_engine", "signed_msix", "msix_identity_name",
-    "msix_package_version", "msix_publisher",
+    "msix_package_version", "msix_publisher", "msix_all_users",
     # check_settings() 的第四類結果，由 packaging_core 組好後傳進來印進建置
     # 紀錄。它是這個機制的輸出，不是使用者填的東西。
     "engine_notices",
@@ -269,7 +270,8 @@ MESSAGES = {
         "field.dependencies_min_version": "dependencies_min_version：相依元件的最低版本判定，隨相依元件一併未支援。",
         "field.windows_service": "windows_service：安裝為 Windows 服務。MSIX 有對應機制但限制較多，需另行設計。",
         "field.scheduled_task": "scheduled_task：排程工作。MSIX 的對應機制只涵蓋登入時觸發，其他觸發時機無對應。",
-        "field.no_admin_install": "安裝給這台電腦上的所有使用者：MSIX 引擎目前只安裝給執行安裝的那一位使用者，其他使用者登入後不會有這個應用程式。若現在就需要所有使用者共用，請改用傳統引擎（install_engine 設為 traditional）。",
+        "notice.no_admin_install": "no_admin_install 在 MSIX 引擎下不會有作用：它原本同時決定安裝路徑與使用者範圍，而在這個模式下兩者各有歸屬——安裝路徑由系統決定，使用者範圍改由 msix.all_users 表達（預設為當前使用者）。",
+        "notice.all_users": "msix.all_users 已啟用，這次會安裝給這台電腦上的所有使用者。有四件事要先知道：(1) 這需要系統管理員權限，安裝途中會跳出權限要求；使用者拒絕、或該帳號無法提權時，會自動改為只安裝給他自己，並在完成畫面說明。(2) 其他使用者要在自己登入後啟動一次這個應用程式才算完成安裝。(3) 在那之前，那位使用者的檔案關聯不會生效。(4) 之後若要完整移除，系統的「設定 → 應用程式」只移除得掉操作者自己那一份，機器層級的登記要由系統管理員以指令移除。",
         "field.install_password": "安裝密碼保護：MSIX 引擎目前尚未支援。這個功能的做法是把應用程式檔案整包加密內嵌，而 MSIX 模式內嵌的是一份已簽章的套件、由系統負責落地，兩者需要另行接合。目前若同時設定兩者，編出來的安裝檔會在密碼關卡失敗且無法安裝。現在就需要密碼保護請改用傳統引擎（install_engine 設為 traditional）。",
         "field.custom_install_dir": "custom_install_dir：指定安裝路徑。MSIX 套件的位置由系統決定，無法指定。",
         "field.pre_install_script": "pre_install_script：安裝前執行腳本。MSIX 的容器模型不允許在部署過程中執行任意外部程式。",
@@ -293,7 +295,8 @@ MESSAGES = {
         "field.dependencies_min_version": "dependencies_min_version: minimum version checks for prerequisites, unsupported along with the prerequisites themselves.",
         "field.windows_service": "windows_service: installing as a Windows service. MSIX has an equivalent mechanism but with tighter limits, so this needs a different design.",
         "field.scheduled_task": "scheduled_task: scheduled tasks. The MSIX equivalent only covers logon triggers; other trigger types have no counterpart.",
-        "field.no_admin_install": "Installing for every user on this machine: the MSIX engine currently installs only for the user running the installer, so other users will not have the application after signing in. If you need it shared across users today, use the traditional engine (set install_engine to traditional).",
+        "notice.no_admin_install": "no_admin_install has no effect under the MSIX engine. It used to decide both the install path and the user scope; here the two are separate — the system decides the path, and the user scope is expressed by msix.all_users (current user by default).",
+        "notice.all_users": "msix.all_users is on, so this installer will install for every user on the machine. Four things to know first: (1) it needs administrator rights, and the installer will ask for them partway through; if the user declines, or the account cannot elevate, it installs for that user alone and says so on the final screen. (2) Every other user must sign in and start the application once before their own installation completes. (3) Until then, that user's file associations do not take effect. (4) Removing it completely later is not something the system's Settings > Apps can do — that only removes the operator's own copy; the machine-level registration has to be removed by an administrator from the command line.",
         "field.install_password": "Install password protection: not supported by MSIX mode yet. The feature works by encrypting the application files and embedding them; MSIX mode instead embeds a signed package that the system unpacks, and the two need to be joined up. Setting both today produces an installer that fails at the password gate and cannot install at all. If you need password protection now, use the traditional engine (set install_engine to traditional).",
         "field.custom_install_dir": "custom_install_dir: choosing the install path. The location of an MSIX package is decided by the system and cannot be specified.",
         "field.pre_install_script": "pre_install_script: running a script before installation. The MSIX container model does not allow arbitrary external programs to run during deployment.",
@@ -377,11 +380,6 @@ def check_settings(engine, settings):
         return Report([], [])
 
     blocking = []
-    # 使用者範圍與其他欄位相反：是「沒有填」才構成違規。預設的 Program Files
-    # 即 no_admin_install 為假，而第一版只提供當前使用者範圍（docs/adr/0009）。
-    if not settings.get("no_admin_install"):
-        blocking.append(Finding("no_admin_install", UNSUPPORTED,
-                                "field.no_admin_install"))
     # 安裝密碼保護：三個欄位描述同一個功能，任一有值即成立，且只產生一則
     # 違規項——逐項列出會讓使用者以為要修三件事。
     if any(_has_value(settings.get(field)) for field in _PASSWORD_FIELDS):
@@ -398,4 +396,20 @@ def check_settings(engine, settings):
     moot = [f for f in _MOOT_PATH_FIELDS if _has_value(settings.get(f))]
     if moot:
         notices.append(Finding(",".join(moot), MOOT, "notice.moot_paths"))
+
+    # no_admin_install（ADR-0013 決定二）。它原本是第二類、擋建置，理由是
+    # 「Program Files 即全機器範圍，而第一版只做當前使用者範圍」；使用者範圍
+    # 改由 msix.all_users 表達之後，那個理由不存在了，改列第四類。
+    #
+    # 只在填了「假」時說明：填真代表使用者要的就是當前使用者範圍，與這個模式
+    # 的預設一致，沒有落差可說。
+    if not settings.get("no_admin_install"):
+        notices.append(Finding("no_admin_install", MOOT,
+                               "notice.no_admin_install"))
+
+    # 全機器範圍的附帶條件（決定七）。不擋建置——設定有效、建置會成功，落差
+    # 只在行為。
+    msix_block = settings.get("msix")
+    if isinstance(msix_block, dict) and msix_block.get("all_users") is True:
+        notices.append(Finding("msix.all_users", MOOT, "notice.all_users"))
     return Report(blocking, notices)

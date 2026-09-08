@@ -938,6 +938,15 @@ class TestMsixEngineBuild(BuildAllTestBase):
         self.signed_msix = os.path.join(self.app_dir, "MyCompany.MyApp.msix")
         with open(self.signed_msix, "wb") as f:
             f.write(b"PK fake msix")
+        self.captured_config = {}
+
+    def _capture_config(self):
+        """編最終安裝檔之前，installer_config.json 已經寫好——趁那個時點讀，
+        編完之後它會被清掉。手法比照這個檔案裡既有的幾處。"""
+        path = os.path.join(self.workspace_dir, "installer_config.json")
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                self.captured_config.update(json.load(f))
 
     def _msix_build(self, **overrides):
         commands = []
@@ -948,6 +957,8 @@ class TestMsixEngineBuild(BuildAllTestBase):
                 os.makedirs(self.dist_dir, exist_ok=True)
                 with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
                     f.write(b"FAKE")
+            else:
+                self._capture_config()
             return mock.Mock(returncode=0, stdout="", stderr="")
 
         kwargs = {"install_engine": "msix", "signed_msix": self.signed_msix}
@@ -958,6 +969,48 @@ class TestMsixEngineBuild(BuildAllTestBase):
     def _config_written(self, commands):
         """設定檔在編譯完成後會被清掉，因此從 --add-data 之外另外攔。"""
         return self.captured_config
+
+    def test_the_installer_itself_never_asks_for_elevation(self):
+        """ADR-0013 決定三：安裝檔本體維持未提權。
+
+        提權那一段由子行程負責，主行程必須留在未提權狀態才能替當前使用者
+        完成註冊——提升後的行程做不到那件事（該 ADR 的補記）。整顆 exe 提權
+        的後果是使用者看到「安裝成功」之後開始功能表卻是空的。
+
+        `no_admin_install` 為假在傳統引擎下正是「要提權」的意思，因此這裡
+        特地用那個值：MSIX 模式必須為它開例外。
+        """
+        commands = self._msix_build(no_admin_install=False)
+        main_cmd = [cmd for cmd in commands if "installer_core.py" in cmd]
+        self.assertTrue(main_cmd, "沒有攔到主安裝檔的編譯指令")
+        self.assertNotIn("--uac-admin", main_cmd[-1])
+
+    def test_the_user_scope_reaches_the_installer(self):
+        """安裝端要知道這次是不是全機器範圍，那個值只有打包端知道。"""
+        self._msix_build(msix_all_users=True)
+        self.assertIs(self.captured_config["msix_all_users"], True)
+
+    def test_it_defaults_to_current_user(self):
+        self._msix_build()
+        self.assertIs(self.captured_config["msix_all_users"], False)
+
+    def test_the_traditional_engine_never_carries_it(self):
+        """傳統引擎沒有這個概念——它的使用者範圍由安裝路徑決定。留著一個
+        永遠為假的欄位只會讓讀設定檔的人以為它有作用。"""
+        commands = []
+
+        def fake_run(cmd, cwd=None, creationflags=0, **kwargs):
+            commands.append(cmd)
+            if "uninstall.py" in cmd:
+                os.makedirs(self.dist_dir, exist_ok=True)
+                with open(os.path.join(self.dist_dir, "uninstall.exe"), "wb") as f:
+                    f.write(b"FAKE")
+            else:
+                self._capture_config()
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        self._call_build_all(run_side_effect=fake_run, msix_all_users=True)
+        self.assertIs(self.captured_config["msix_all_users"], False)
 
     def test_the_uninstaller_is_not_built(self):
         commands = self._msix_build()

@@ -504,6 +504,7 @@ class ConfigAPI:
                 msix_identity_name=(data.get("msix") or {}).get("identity_name", ""),
                 msix_package_version=(data.get("msix") or {}).get("package_version", ""),
                 msix_publisher=(data.get("msix") or {}).get("certificate_subject", ""),
+                msix_all_users=(data.get("msix") or {}).get("all_users", False),
                 engine_notices=data.get("engine_notices"),
                 sdk_tools_settings=sdk_settings,
                 progress_callback=progress_handler,

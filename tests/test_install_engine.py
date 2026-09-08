@@ -92,40 +92,40 @@ class MsixCleanConfigTest(unittest.TestCase):
 
 
 class UserScopeTest(unittest.TestCase):
-    """ADR-0009：第一版只提供當前使用者範圍。
+    """使用者範圍改由 `msix.all_users` 表達（ADR-0013 決定一、二）。
 
-    「安裝位置三選一」的三支各自的下場，見第八輪定案決議第二項的表格。
+    在此之前，MSIX 模式以 `no_admin_install` 為假即擋下建置——理由是「預設的
+    Program Files 即全機器範圍，而第一版只做當前使用者範圍」（ADR-0009）。
+    使用者範圍有了自己的欄位之後那個理由不存在了，該欄位改列第四類：不擋
+    建置，只說明它在這個模式下沒有作用。
+
+    這一組測試原本守住的那件事仍然成立，只是換到提示訊息上：真正的損失要講成
+    「其他使用者不會有這個應用程式」，不是「裝不到 Program Files」——後者對
+    使用者不具意義（第八輪決議第一項）。
     """
 
     def test_current_user_scope_passes(self):
         report = install_engine.check_settings(install_engine.MSIX, settings(no_admin_install=True))
         self.assertEqual(report.blocking, [])
 
-    def test_all_users_scope_is_blocked(self):
+    def test_all_users_scope_no_longer_blocks_the_build(self):
         report = install_engine.check_settings(install_engine.MSIX, settings(no_admin_install=False))
-        self.assertTrue(report.has_blocking)
+        self.assertFalse(report.has_blocking)
 
-    def test_all_users_message_uses_the_deferred_wording_not_the_format_limit_one(self):
-        """第八項：第二類是「尚未支援」（等本工具補），不是「格式限制」。
-
-        ADR-0009 決定二：講成格式限制不誠實——MSIX 做得到全機器，只是第一版
-        不做，寫成格式限制會讓後續維護者認定此路不通。
-        """
+    def test_it_is_explained_instead_of_blocked(self):
         report = install_engine.check_settings(install_engine.MSIX, settings(no_admin_install=False))
-        text = report.error_message()
-        self.assertIn("尚未支援", text)
-        self.assertNotIn("格式本身的限制", text)
+        self.assertIn("no_admin_install", " ".join(report.notice_messages()))
 
-    def test_all_users_message_points_at_the_traditional_engine(self):
-        """ADR-0009 決定二：附一句替代方案，讓對方知道等待期間有路可走。"""
+    def test_the_explanation_says_where_the_user_scope_lives_now(self):
+        """看到「這個欄位沒有作用」的人，下一個問題必然是「那要改哪裡」。"""
         report = install_engine.check_settings(install_engine.MSIX, settings(no_admin_install=False))
-        self.assertIn("傳統引擎", report.error_message())
+        self.assertIn("msix.all_users", " ".join(report.notice_messages()))
 
     def test_the_loss_is_described_as_other_users_not_as_program_files(self):
-        """第八輪決議第一項：真正的損失是「其他使用者不會有這個應用程式」，
-        不是「裝不到 Program Files」——後者對使用者不具意義。"""
-        report = install_engine.check_settings(install_engine.MSIX, settings(no_admin_install=False))
-        text = report.error_message()
+        """全機器範圍啟用時的提示，講的仍是使用者而不是安裝路徑。"""
+        report = install_engine.check_settings(install_engine.MSIX, dict(
+            settings(no_admin_install=True), msix={"all_users": True}))
+        text = " ".join(report.notice_messages())
         self.assertIn("使用者", text)
         self.assertNotIn("Program Files", text)
 
@@ -221,11 +221,15 @@ class MootCategoryTest(unittest.TestCase):
 class ListsEveryViolationTest(unittest.TestCase):
     """ADR-0009 決定四：一次列出全部，不沿用「第一個錯誤即回傳」。"""
 
-    def test_two_violations_from_the_same_choice_are_both_listed(self):
-        """自訂路徑 + 需要管理員權限：路徑是第三類、使用者範圍是第二類。"""
+    def test_two_violations_from_two_categories_are_both_listed(self):
+        """自訂路徑是第三類、相依元件是第二類，兩個小標都要出現。
+
+        第二類的例子原本用 no_admin_install，該欄位已改列第四類
+        （ADR-0013 決定二），改用相依元件。
+        """
         report = install_engine.check_settings(
             install_engine.MSIX,
-            settings(no_admin_install=False, custom_install_dir=r"C:\MyApp"),
+            settings(dependencies=["vcredist_x64"], custom_install_dir=r"C:\MyApp"),
         )
         self.assertEqual(len(report.blocking), 2)
         text = report.error_message()

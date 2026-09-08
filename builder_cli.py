@@ -58,6 +58,10 @@ TEMPLATE = {
         # icons：三個位置的圖示個別覆蓋，留空即沿用 png_icon 同一張
         # （第五輪決議第一項）。都必須是正方形的 PNG。
         "icons": {"tile": "", "taskbar": "", "store": ""},
+        # all_users：安裝給這台電腦上的所有使用者（見 docs/adr/0013）。
+        # 預設為假＝只安裝給執行安裝的那一位。啟用時安裝途中會要求系統管理員
+        # 權限，拿不到就自動改為只裝給他自己並於完成畫面說明。
+        "all_users": False,
     },
     "app_dir": "C:\\path\\to\\your\\app\\folder",
     "png_icon": "C:\\path\\to\\drag_icon.png",
@@ -635,6 +639,7 @@ def cmd_pack(args):
             msix_identity_name=(pack_data.get("msix") or {}).get("identity_name", ""),
             msix_package_version=(pack_data.get("msix") or {}).get("package_version", ""),
             msix_publisher=(pack_data.get("msix") or {}).get("certificate_subject", ""),
+            msix_all_users=(pack_data.get("msix") or {}).get("all_users", False),
             engine_notices=pack_data.get("engine_notices"),
             sdk_tools_settings=sdk_settings,
             progress_callback=progress_handler,

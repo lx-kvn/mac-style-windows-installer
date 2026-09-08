@@ -1488,7 +1488,9 @@ class TestInstallEngineSelection(PackDataValidationTestBase):
             f.write("@echo off")
         pack_data, error = self._validate(self._base_data(
             install_engine="msix",
-            no_admin_install=False,
+            # 第二類的例子原本是 no_admin_install，該欄位已改列第四類
+            # （ADR-0013 決定二），改用仍屬第二類的相依元件。
+            dependencies=["vcredist_x64"],
             custom_install_dir=r"C:\MyApp",
             pre_install_script="before.bat",
         ))
@@ -1517,7 +1519,7 @@ class TestInstallEngineSelection(PackDataValidationTestBase):
         """相容性結果比「引擎還沒做好」有用：下游專案要先知道自己的設定
         能不能用，才決定要不要等這個引擎。"""
         _, error = self._validate(self._base_data(
-            install_engine="msix", no_admin_install=False,
+            install_engine="msix", dependencies=["vcredist_x64"],
         ))
         self.assertIn("尚未支援", error)
 
@@ -1584,7 +1586,7 @@ class TestMsixSettingsBlock(PackDataValidationTestBase):
         """先問「這個引擎適不適合你」，再問「請把必填欄位補齊」——對方可能
         看完相容性結果就決定不用這個引擎了，此時要求他補欄位是白費工。"""
         _, error = self._validate(self._base_data(
-            install_engine="msix", no_admin_install=False,
+            install_engine="msix", dependencies=["vcredist_x64"],
         ))
         self.assertIn("尚未支援", error)
         self.assertNotIn("identity_name", error)
