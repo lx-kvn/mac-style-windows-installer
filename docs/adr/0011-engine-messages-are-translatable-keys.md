@@ -3,7 +3,7 @@
 - 狀態：已定案
 - 日期：2026-09-01
 - 相關：[ADR-0009](0009-msix-engine-first-version-is-per-user-scope-only.md)、
-  `docs/proposals/MSIX輸出規劃.md` 第十四輪定案決議第七至九項
+  `docs/investigations/MSIX輸出規劃.md` 第十四輪定案決議第七至九項
 
 ## 背景
 
@@ -100,7 +100,7 @@ MSIX 部分為英文、欄位驗證部分為中文的混雜。此代價為已知
 - ~~英文介面下的錯誤彈窗可能中英混雜~~ 已於 2026-09-02 解除，見上方「決定五的後續」。
 - `check_settings()` 回傳的 `notices` 目前沒有接收端，因此第四類的說明實際上
   不會出現在任何地方。此為既有問題，非本次造成，已列入
-  `docs/proposals/MSIX輸出規劃.md` 的待辦。
+  `docs/investigations/MSIX輸出規劃.md` 的待辦。
 
 ## 已完成之待辦
 

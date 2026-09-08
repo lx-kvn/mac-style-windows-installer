@@ -1,6 +1,6 @@
 """msix_manifest.py 的測試：產生 AppxManifest.xml。
 
-對應 docs/proposals/MSIX輸出規劃.md 第五輪決議（欄位來源）、第六輪查證
+對應 docs/investigations/MSIX輸出規劃.md 第五輪決議（欄位來源）、第六輪查證
 （最低版本與應用程式項目數量）、第九輪（欄位命名）、第十二輪定案決議
 （宣告形式），以及 docs/adr/0007（套件身分名稱）與 docs/adr/0010
 （關聯圖示與一副檔名一群組）。

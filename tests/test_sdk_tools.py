@@ -1,7 +1,7 @@
 """sdk_tools.py 的測試：SDK 工具（makeappx／signtool）的定位與取得。
 
 對應 docs/adr/0008-sdk-build-tools-are-fetched-on-explicit-request-only.md
-的五項決定，以及 docs/proposals/MSIX輸出規劃.md 第二輪決議第十三項
+的五項決定，以及 docs/investigations/MSIX輸出規劃.md 第二輪決議第十三項
 （既有的 signtool 檢索邏輯改用同一套）。
 
 這份測試不進行任何真實網路存取，也不依賴這台機器上是否安裝 Windows SDK：

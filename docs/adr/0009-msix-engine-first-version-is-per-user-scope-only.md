@@ -8,7 +8,7 @@
 
 決定二與決定四的欄位分類已實作於 `install_engine.py`（見「已完成之待辦」），
 決定一與決定三未進入實作即被取代。決定範圍屬於 MSIX 輸出功能，規劃見
-[`docs/proposals/MSIX輸出規劃.md`](../proposals/MSIX輸出規劃.md)。
+[`docs/investigations/MSIX輸出規劃.md`](../investigations/MSIX輸出規劃.md)。
 
 ## 背景
 

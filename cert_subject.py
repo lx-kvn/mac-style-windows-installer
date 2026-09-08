@@ -4,7 +4,7 @@ cert_subject.py
 從簽章憑證讀出 MSIX 套件清單的發行者（`Identity/@Publisher`）該填的字串。
 
 該值必須與簽章憑證上記載的名稱**完全一致**，不一致時系統直接拒絕安裝，
-而且錯誤訊息不指向這個原因（見 `docs/proposals/MSIX輸出規劃.md` 第二輪
+而且錯誤訊息不指向這個原因（見 `docs/investigations/MSIX輸出規劃.md` 第二輪
 決議第十一項）。因此這個字串的形式不能猜。
 
 ## 為什麼是呼叫 Windows，而不是自己組字串

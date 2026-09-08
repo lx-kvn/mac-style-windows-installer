@@ -1,6 +1,6 @@
 """驅動本機的驗證用虛擬機。
 
-`docs/proposals/MSIX輸出規劃.md` 待辦清單上有幾項無法在 CI 上驗證：
+`docs/investigations/MSIX輸出規劃.md` 待辦清單上有幾項無法在 CI 上驗證：
 GitHub Actions 只提供 `windows-latest`，沒有 1809 的 runner，也不是繁體
 中文環境。這支模組把「要對哪台虛擬機做什麼」翻譯成 vmrun 的指令列，讓那些
 項目能以腳本重複執行。

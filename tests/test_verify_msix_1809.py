@@ -1,6 +1,6 @@
 """tools/verify_msix_1809.py 的測試：兩項只有官方文件、沒有實機確認的敘述。
 
-要驗的兩件事（`docs/proposals/MSIX輸出規劃.md` 待辦第 1 項）：
+要驗的兩件事（`docs/investigations/MSIX輸出規劃.md` 待辦第 1 項）：
 
 - A：`MinVersion=10.0.17763.0` 真的能在組建 17763 完成部署。這連帶驗證
   「避開 `uap10:RuntimeBehavior`、改用

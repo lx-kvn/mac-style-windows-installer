@@ -5,7 +5,7 @@
 修正基準：`main` 分支，工作區乾淨，
 `python -m unittest discover -s tests -p "test_*.py"` 全數通過。
 
-相關文件：[`docs/proposals/MSIX輸出規劃.md`](../proposals/MSIX輸出規劃.md)、
+相關文件：[`docs/investigations/MSIX輸出規劃.md`](MSIX輸出規劃.md)、
 [`docs/investigations/CI與本機虛擬機的能力對比.md`](CI與本機虛擬機的能力對比.md)、
 規格文件 §8.37。
 

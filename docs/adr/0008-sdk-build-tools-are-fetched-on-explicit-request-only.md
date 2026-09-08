@@ -4,7 +4,7 @@
 
 已接受（2026-08-31 決定），已實作（2026-08-31，`sdk_tools.py`）。決定
 所屬的 MSIX 輸出功能其餘部分仍未實作，規劃見
-[`docs/proposals/MSIX輸出規劃.md`](../proposals/MSIX輸出規劃.md)。
+[`docs/investigations/MSIX輸出規劃.md`](../investigations/MSIX輸出規劃.md)。
 
 ## 背景
 

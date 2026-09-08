@@ -80,7 +80,7 @@ MSIX 套件必須經過數位簽章才能部署，且簽章憑證必須鏈結至
 
 - 本 ADR 不涵蓋憑證取得方式的選擇（公開 CA 憑證、Microsoft Store 上架、
   企業內部 CA），該決定屬於各下游專案自行處理的範圍，見
-  [`docs/proposals/MSIX輸出規劃.md`](../proposals/MSIX輸出規劃.md)
+  [`docs/investigations/MSIX輸出規劃.md`](../investigations/MSIX輸出規劃.md)
   「簽章要求」一節。
 - 決定二的輔助指令實作細節（指令名稱、是否需要提權、失敗時的行為）尚未
   設計。

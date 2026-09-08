@@ -2,7 +2,7 @@
 msix_settings.py
 -----------------
 打包設定裡 `msix` 這個巢狀區塊的驗證與正規化。欄位命名見
-`docs/proposals/MSIX輸出規劃.md`「第九輪定案決議」：
+`docs/investigations/MSIX輸出規劃.md`「第九輪定案決議」：
 
 ```json
 "msix": {

@@ -11,7 +11,7 @@ MSIX 引擎」與「安裝路徑與使用者範圍」兩節。
 ## 四類分類
 
 現有功能在 MSIX 下分為四類，出處為
-`docs/proposals/MSIX輸出規劃.md` 第二輪決議第七項，第五輪補上第四類，
+`docs/investigations/MSIX輸出規劃.md` 第二輪決議第七項，第五輪補上第四類，
 第七輪逐項重新檢查後修正歸屬：
 
 - **第一類（無阻礙）**——MSIX 原生支援，通過。不列在下面的表裡。
@@ -201,7 +201,7 @@ ENGINE_AGNOSTIC_FIELDS = frozenset({
     "create_restore_point_before_install",
     # 偵測並結束鎖定安裝檔案的程式。MSIX 模式下仍有作用範圍——第二輪決議
     # 第九項的「先移除傳統模式的既有安裝」會呼叫舊版的 uninstall.exe 並帶
-    # --restart-explorer（見 docs/proposals/MSIX輸出規劃.md）。
+    # --restart-explorer（見 docs/investigations/MSIX輸出規劃.md）。
     "restart_explorer_on_update",
 })
 

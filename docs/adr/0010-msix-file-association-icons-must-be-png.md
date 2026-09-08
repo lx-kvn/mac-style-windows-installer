@@ -17,7 +17,7 @@ MSIX 的檔案關聯宣告中，圖示由 `<uap:Logo>` 承載，而該元素接�
 資源系統認得的影像格式，不含 `.ico`。另有一個明確支援 `.ico` 的變體
 `<desktop7:Logo>`（官方描述為「Adds support for .ico, .dll, and .exe
 files」），**但它要求 Windows 10 build 19645**，遠高於
-[第六輪查證](../proposals/MSIX輸出規劃.md)所定的最低版本預設值
+[第六輪查證](../investigations/MSIX輸出規劃.md)所定的最低版本預設值
 `10.0.17763.0`（Windows 10 1809）。宣告一個高於套件最低版本的元素，會使
 套件在該版本以下的系統上行為不完整。
 
