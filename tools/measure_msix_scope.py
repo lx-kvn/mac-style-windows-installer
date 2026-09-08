@@ -29,6 +29,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import packaging_core
+
 from tools import vms
 
 
@@ -441,6 +443,12 @@ def run(vm, package_v1_local, package_v2_local, work_dir, prepare=None):
 
 def main(argv=None):
     import argparse
+
+    # 客體寫回來的文字不受這支工具控制，其中可能含有主控台編不出來的
+    # 字元（實際踩過：客體讀錯編碼寫回一段亂碼）。少了這一行，一輪已經
+    # 跑完的量測會在印出報告的那一步崩潰，結果完全拿不到。
+    packaging_core.make_console_forgiving(sys.stdout)
+    packaging_core.make_console_forgiving(sys.stderr)
 
     parser = argparse.ArgumentParser(
         description="量測 ADR-0013 待辦的兩項行為（全機器範圍）。")

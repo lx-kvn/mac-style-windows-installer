@@ -8,6 +8,11 @@ build/
 dist/
 *.spec
 
+# MSIX 的中繼產物。`builder_cli.py pack` 把組好的套件放在工作目錄底下（不放
+# 進 dist/，那個資料夾會在編 Setup.exe 之前被清空），而工作目錄常常就是
+# repo 根目錄——於是每次 MSIX 打包都會在這裡留下一顆 <套件身分>.msix。
+*.msix
+
 # /released skill 打包成品的暫存輸出資料夾（GUI/CLI exe + 安裝檔），發布產物不進版控
 release_output/
 

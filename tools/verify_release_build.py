@@ -26,6 +26,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import packaging_core
+
 from tools import vms
 
 
@@ -274,6 +276,12 @@ def run(vm, setup_path, app_name, work_dir, main_exe="mswi-gui.exe",
 
 def main(argv=None):
     import argparse
+
+    # 客體寫回來的文字不受這支工具控制，其中可能含有主控台編不出來的
+    # 字元（實際踩過：客體讀錯編碼寫回一段亂碼）。少了這一行，一輪已經
+    # 跑完的量測會在印出報告的那一步崩潰，結果完全拿不到。
+    packaging_core.make_console_forgiving(sys.stdout)
+    packaging_core.make_console_forgiving(sys.stderr)
 
     parser = argparse.ArgumentParser(
         description="把發布產物送進虛擬機做一輪煙霧測試（裝、跑、移）。")

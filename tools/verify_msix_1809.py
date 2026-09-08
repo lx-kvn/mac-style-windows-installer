@@ -1,6 +1,6 @@
 """驗證兩項只有官方文件、沒有實機確認的敘述（1809／組建 17763）。
 
-對應 `docs/proposals/MSIX輸出規劃.md` 待辦第 1 項：
+對應 `docs/investigations/MSIX輸出規劃.md` 待辦第 1 項：
 
 - **A：`MinVersion=10.0.17763.0` 真的能在組建 17763 完成部署。** 這連帶
   驗證「避開 `uap10:RuntimeBehavior`、改用
@@ -37,6 +37,8 @@ import zipfile
 from xml.etree import ElementTree
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import packaging_core
 
 from tools import vms
 
@@ -321,6 +323,12 @@ def export_signing_certificate(source_path, out_path, run=None, environ=None):
 
 
 def main(argv=None):
+    # 客體寫回來的文字不受這支工具控制，其中可能含有主控台編不出來的
+    # 字元（實際踩過：客體讀錯編碼寫回一段亂碼）。少了這一行，一輪已經
+    # 跑完的量測會在印出報告的那一步崩潰，結果完全拿不到。
+    packaging_core.make_console_forgiving(sys.stdout)
+    packaging_core.make_console_forgiving(sys.stderr)
+
     argv = list(sys.argv[1:] if argv is None else argv)
     if len(argv) != 2:
         print(__doc__)

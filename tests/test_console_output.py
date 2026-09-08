@@ -102,5 +102,30 @@ class BothCommandLineEntryPointsUseIt(unittest.TestCase):
             self.assertIn("sys.stderr", source, name)
 
 
+class TheVirtualMachineToolsUseItToo(unittest.TestCase):
+    """這幾支把**客體寫回來的文字**印到主控台，而那些文字不受它們控制。
+
+    2026-09-08 實際踩到：客體以錯誤的編碼讀了安裝紀錄，寫回一段亂碼，其中
+    含有 cp950 編不出來的字元——工具在印出報告的那一行崩潰，一輪已經跑完的
+    量測因此完全沒有結果。真正的問題（客體那邊的編碼）反而被這個崩潰蓋住。
+
+    這幾支跑的時機正是「一輪要好幾分鐘」的時候，崩在最後一步的代價最高。
+    """
+
+    def _source(self, name):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "tools", name), encoding="utf-8") as f:
+            return f.read()
+
+    def test_every_tool_that_prints_guest_text_makes_its_console_forgiving(self):
+        for name in ("verify_msix_all_users.py", "measure_msix_scope.py",
+                     "verify_release_build.py", "verify_msix_1809.py",
+                     "drive_installer_gui.py"):
+            # assertTrue 而不是 assertIn：後者失敗時會把整份原始碼印進
+            # 錯誤訊息，真正的重點反而找不到。
+            self.assertTrue("make_console_forgiving" in self._source(name),
+                            f"{name} 沒有呼叫 make_console_forgiving")
+
+
 if __name__ == "__main__":
     unittest.main()
