@@ -863,3 +863,169 @@ jobs:
           name: install-password-logs
           path: pw_silent_install.log
           if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # 安裝失敗時的回滾，以及捷徑。
+  #
+  # 捷徑在此之前任何地方都沒有被斷言過，而它是使用者裝完之後第一個會去找的
+  # 東西；產品裡捷徑建立失敗是「吞掉例外、記一則警告」，安裝照樣回報成功。
+  #
+  # 回滾要驗的是「失敗之後那些東西都不見了」，而「不見了」與「我根本找錯
+  # 地方」在結果上長得一樣。因此先跑一次正常安裝當對照組——那一輪同時就是
+  # 捷徑的涵蓋——再跑一次刻意失敗的，驗同樣那幾條全部落空。
+  test-rollback-and-shortcuts:
+    runs-on: windows-latest
+
+    env:
+      PYTHONUTF8: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 準備測試用的 app_dir
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path rb_app | Out-Null
+          Copy-Item "$env:WINDIR\System32\notepad.exe" "rb_app\app.exe"
+          Set-Content -Path "rb_app\data.txt" -Value "rollback probe" -Encoding ASCII
+
+      - name: 打包
+        shell: pwsh
+        run: |
+          $config = @{
+            app_dir           = "rb_app"
+            png_icon          = "branding/icon.png"
+            ico_icon          = "branding/icon.ico"
+            app_name          = "MswiCiRollback"
+            version           = "1.0.0"
+            publisher         = "mswi-ci"
+            exe_name          = "Setup_MswiCiRollback"
+            main_exe          = "app.exe"
+            add_to_path       = $true
+            file_associations = ".mswiroll"
+            # runner 是無人值守環境，沒有人可以回應提權要求。
+            no_admin_install  = $true
+          }
+          $config | ConvertTo-Json -Depth 5 | Set-Content -Path rb_config.json -Encoding UTF8
+          python builder_cli.py pack --config rb_config.json
+          if ($LASTEXITCODE -ne 0) { throw "打包失敗" }
+          # 搬出 dist：後面沒有第二次打包，但 dist/ 的內容不該被當成穩定的
+          # 落腳處（build_all() 每次開頭都會清空它）。
+          New-Item -ItemType Directory -Force -Path rb_out | Out-Null
+          Move-Item "dist\Setup_MswiCiRollback.exe" "rb_out\Setup_MswiCiRollback.exe" -Force
+
+      - name: 對照組——正常安裝，捷徑與登錄表都要在
+        shell: pwsh
+        run: |
+          $proc = Start-Process -FilePath "rb_out\Setup_MswiCiRollback.exe" `
+            -ArgumentList "/S", "/LOG=rb_install.log" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+            throw "正常安裝就失敗了，exit code = $($proc.ExitCode)"
+          }
+
+          $installDir = Join-Path $env:LOCALAPPDATA "Programs\MswiCiRollback"
+          $startMenu  = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\MswiCiRollback.lnk"
+          $desktop    = Join-Path $env:USERPROFILE "Desktop\MswiCiRollback.lnk"
+          $key        = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\MswiCiRollback"
+
+          $failures = @()
+          if (-not (Test-Path (Join-Path $installDir "app.exe"))) { $failures += "app.exe 不在安裝目錄裡" }
+          if (-not (Test-Path $key)) { $failures += "解除安裝登錄表項目不存在" }
+          # 這兩條是這個專案第一次真的去看捷徑在不在。
+          if (-not (Test-Path $startMenu)) { $failures += "開始功能表捷徑不存在：$startMenu" }
+          if (-not (Test-Path $desktop))   { $failures += "桌面捷徑不存在：$desktop" }
+          $userPath = (Get-ItemProperty 'HKCU:\Environment' -Name Path -ErrorAction SilentlyContinue).Path
+          if (-not ($userPath -and ($userPath -split ';' | Where-Object { $_.TrimEnd('\') -eq $installDir.TrimEnd('\') }))) {
+            $failures += "PATH 裡沒有安裝目錄"
+          }
+          if ($failures.Count -gt 0) { throw ($failures -join "`n") }
+          Write-Host "PASS: 正常安裝——app.exe、登錄表項目、開始功能表捷徑、桌面捷徑、PATH 全部到位"
+
+      - name: 對照組——解除安裝，捷徑也要跟著消失
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:LOCALAPPDATA "Programs\MswiCiRollback"
+          $proc = Start-Process -FilePath (Join-Path $installDir "uninstall.exe") `
+            -ArgumentList "--silent" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "靜默解除安裝失敗，exit code = $($proc.ExitCode)" }
+          # 解除安裝會排程一個背景 .bat 刪掉 uninstall.exe 自己（見 self_delete.py）。
+          Start-Sleep -Seconds 6
+
+          $startMenu = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\MswiCiRollback.lnk"
+          $desktop   = Join-Path $env:USERPROFILE "Desktop\MswiCiRollback.lnk"
+          $failures = @()
+          if (Test-Path $installDir) { $failures += "安裝目錄仍然存在" }
+          if (Test-Path $startMenu)  { $failures += "開始功能表捷徑殘留" }
+          if (Test-Path $desktop)    { $failures += "桌面捷徑殘留" }
+          if ($failures.Count -gt 0) { throw ($failures -join "`n") }
+          Write-Host "PASS: 解除安裝——安裝目錄與兩個捷徑都已清除"
+
+      - name: 讓安裝在最後一步失敗，然後驗回滾
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:LOCALAPPDATA "Programs\MswiCiRollback"
+          # 安裝的最後一步是把 install_manifest.json 寫進安裝目錄。事先在那個
+          # 位置放一個**同名的資料夾**，那一步就會拋出 OSError——而複製檔案、
+          # 登錄表、捷徑、檔案關聯、PATH 全都已經寫進去了，正好是回滾要清的
+          # 全部。後置腳本失敗只算警告、不觸發回滾，所以不能用那個當觸發點。
+          New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $installDir "install_manifest.json") | Out-Null
+          # 一個事先就存在的檔案，用來確認回滾不會順手清掉不屬於這次安裝的東西。
+          Set-Content -Path (Join-Path $installDir "pre_existing.txt") `
+            -Value "not ours" -Encoding ASCII
+
+          $proc = Start-Process -FilePath "rb_out\Setup_MswiCiRollback.exe" `
+            -ArgumentList "/S", "/LOG=rb_rollback.log" -Wait -PassThru
+          Write-Host "安裝結束碼：$($proc.ExitCode)"
+          if ($proc.ExitCode -eq 0) {
+            throw "最後一步應該要失敗，卻回報成功（exit code 0）——這一輪沒有觸發到回滾，後面的檢查沒有意義"
+          }
+
+          $startMenu = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\MswiCiRollback.lnk"
+          $desktop   = Join-Path $env:USERPROFILE "Desktop\MswiCiRollback.lnk"
+          $key       = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\MswiCiRollback"
+
+          $failures = @()
+          if (Test-Path (Join-Path $installDir "app.exe")) { $failures += "app.exe 沒有被回滾掉" }
+          if (Test-Path (Join-Path $installDir "data.txt")) { $failures += "data.txt 沒有被回滾掉" }
+          if (Test-Path $key) { $failures += "解除安裝登錄表項目沒有被回滾掉" }
+          if (Test-Path $startMenu) { $failures += "開始功能表捷徑沒有被回滾掉" }
+          if (Test-Path $desktop) { $failures += "桌面捷徑沒有被回滾掉" }
+          $userPath = (Get-ItemProperty 'HKCU:\Environment' -Name Path -ErrorAction SilentlyContinue).Path
+          if ($userPath -and ($userPath -split ';' | Where-Object { $_.TrimEnd('\') -eq $installDir.TrimEnd('\') })) {
+            $failures += "PATH 裡的安裝目錄沒有被回滾掉"
+          }
+          # 反過來的一項：回滾只該清這次安裝寫入的東西。
+          if (-not (Test-Path (Join-Path $installDir "pre_existing.txt"))) {
+            $failures += "回滾清掉了安裝之前就存在的檔案"
+          }
+          if ($failures.Count -gt 0) { throw ($failures -join "`n") }
+          Write-Host "PASS: 回滾——檔案、登錄表項目、兩個捷徑、PATH 都已復原，且沒有動到事先存在的檔案"
+
+      - name: 收尾（把刻意留下的障礙物清掉）
+        if: always()
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:LOCALAPPDATA "Programs\MswiCiRollback"
+          if (Test-Path $installDir) { Remove-Item $installDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+      - name: 上傳安裝紀錄（不管成功失敗都上傳，方便事後排查）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rollback-shortcuts-logs
+          path: |
+            rb_install.log
+            rb_rollback.log
+          if-no-files-found: ignore
