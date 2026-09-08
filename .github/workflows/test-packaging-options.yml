@@ -729,8 +729,20 @@ jobs:
           $plainConfig | ConvertTo-Json -Depth 5 |
             Set-Content -Path plain_config.json -Encoding UTF8
 
+          # 每編完一顆就立刻搬走：builder_cli.py pack 底層的 build_all() 開頭會
+          # 清空整個 dist/，第二次打包會把第一顆砍掉（2026-09-08 實際踩到，
+          # 症狀是後面的步驟回報「找不到檔案」，不會指向這個原因）。
+          New-Item -ItemType Directory -Force -Path pw_out | Out-Null
+
           python builder_cli.py pack --config pw_config.json
+          if ($LASTEXITCODE -ne 0) { throw "打包（開保護）失敗" }
+          Move-Item "dist\Setup_MswiCiPassword.exe" "pw_out\Setup_MswiCiPassword.exe" -Force
+
           python builder_cli.py pack --config plain_config.json
+          if ($LASTEXITCODE -ne 0) { throw "打包（對照組）失敗" }
+          Move-Item "dist\Setup_MswiCiPlain.exe" "pw_out\Setup_MswiCiPlain.exe" -Force
+
+          Get-ChildItem pw_out | ForEach-Object { Write-Host ("{0}  {1:N0} bytes" -f $_.Name, $_.Length) }
 
       - name: 應用程式內容真的被加密了（含對照組）
         shell: pwsh
@@ -753,19 +765,19 @@ jobs:
 
           # 對照組先跑：這一段搜尋要先證明它抓得到東西。找不到就代表搜尋本身
           # 壞了，此時另一顆的「找不到」什麼都不能說明——兩者在結果上長得一樣。
-          if (-not (ContainsText "dist\Setup_MswiCiPlain.exe" $plainEntry)) {
+          if (-not (ContainsText "pw_out\Setup_MswiCiPlain.exe" $plainEntry)) {
             $failures += "對照組（未開保護）裡找不到 $plainEntry 這筆資源——這段搜尋本身沒有作用，加密與否無從判斷"
           } else {
             Write-Host "PASS: 對照組裡找得到明文內容的資源項目，搜尋有效"
           }
 
-          if (ContainsText "dist\Setup_MswiCiPassword.exe" $plainEntry) {
+          if (ContainsText "pw_out\Setup_MswiCiPassword.exe" $plainEntry) {
             $failures += "開了密碼保護的安裝檔裡仍有 $plainEntry——應用程式內容是以明文目錄內嵌的，沒有走加密那一條"
           } else {
             Write-Host "PASS: 開了保護的安裝檔裡沒有明文內容的資源項目"
           }
 
-          if (-not (ContainsText "dist\Setup_MswiCiPassword.exe" "app_contents.enc")) {
+          if (-not (ContainsText "pw_out\Setup_MswiCiPassword.exe" "app_contents.enc")) {
             $failures += "開了密碼保護的安裝檔裡找不到 app_contents.enc——加密後的檔案根本沒有被內嵌"
           } else {
             Write-Host "PASS: 開了保護的安裝檔內嵌的是 app_contents.enc"
@@ -777,7 +789,7 @@ jobs:
         shell: pwsh
         run: |
           $installDir = Join-Path $env:LOCALAPPDATA "Programs\MswiCiPassword"
-          $proc = Start-Process -FilePath "dist\Setup_MswiCiPassword.exe" `
+          $proc = Start-Process -FilePath "pw_out\Setup_MswiCiPassword.exe" `
             -ArgumentList "/S" -Wait -PassThru
           if ($proc.ExitCode -eq 0) {
             throw "沒帶 /PASSWORD= 卻回報安裝成功（exit code 0）"
@@ -791,7 +803,7 @@ jobs:
         shell: pwsh
         run: |
           $installDir = Join-Path $env:LOCALAPPDATA "Programs\MswiCiPassword"
-          $proc = Start-Process -FilePath "dist\Setup_MswiCiPassword.exe" `
+          $proc = Start-Process -FilePath "pw_out\Setup_MswiCiPassword.exe" `
             -ArgumentList "/S", "/PASSWORD=definitely-not-the-password" -Wait -PassThru
           if ($proc.ExitCode -eq 0) {
             throw "密碼錯誤卻回報安裝成功（exit code 0）"
@@ -805,7 +817,7 @@ jobs:
         shell: pwsh
         run: |
           $installDir = Join-Path $env:LOCALAPPDATA "Programs\MswiCiPassword"
-          $proc = Start-Process -FilePath "dist\Setup_MswiCiPassword.exe" `
+          $proc = Start-Process -FilePath "pw_out\Setup_MswiCiPassword.exe" `
             -ArgumentList "/S", "/PASSWORD=$env:MSWI_CI_INSTALL_PASSWORD", `
                           "/LOG=pw_silent_install.log" -Wait -PassThru
           if ($proc.ExitCode -ne 0) {
