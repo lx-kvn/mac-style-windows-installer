@@ -657,3 +657,197 @@ jobs:
           name: msix-engine-logs
           path: msix_silent_install.log
           if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # 安裝密碼保護（install_password_env）。
+  #
+  # 這個欄位的失敗方式是安靜的：加密沒有生效時，安裝檔照樣編得出來、照樣裝
+  # 得起來、行為看起來一模一樣，只是保護不存在。因此這裡驗的重點不是「帶對
+  # 密碼裝得起來」，而是「沒有密碼裝不起來」與「應用程式內容真的不是明文躺
+  # 在 exe 裡」。
+  #
+  # 明文檢查帶一個對照組：同一份 app_dir 另外編一顆不開保護的，那顆裡面必須
+  # 找得到明文標記。找不到的話代表這段搜尋壞了，而不是加密生效了——兩者在
+  # 結果上長得一樣（同一個陷阱在 tools/verify_upgrade_install.py 真的踩過）。
+  test-install-password:
+    runs-on: windows-latest
+
+    env:
+      PYTHONUTF8: "1"
+      # 密碼本身不放進設定檔，只放環境變數名稱（見 CLI_USAGE 的
+      # install_password_env）。
+      MSWI_CI_INSTALL_PASSWORD: "ci-install-password-2026"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 準備測試用的 app_dir（含一個明文標記）
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path pw_app | Out-Null
+          Copy-Item "$env:WINDIR\System32\notepad.exe" "pw_app\app.exe"
+          # 這串字只存在於這個檔案裡，用來判斷應用程式內容有沒有以明文被
+          # 帶進 exe。挑一個不會在其他地方偶然出現的形狀。
+          Set-Content -Path "pw_app\canary.txt" `
+            -Value "MSWI-PLAINTEXT-CANARY-9f3ad271" -Encoding ASCII
+
+      - name: 打包兩顆——一顆開密碼保護，一顆不開（對照組）
+        shell: pwsh
+        run: |
+          $common = @{
+            app_dir   = "pw_app"
+            png_icon  = "branding/icon.png"
+            ico_icon  = "branding/icon.ico"
+            version   = "1.0.0"
+            publisher = "mswi-ci"
+            main_exe  = "app.exe"
+            # runner 是無人值守環境，沒有人可以回應提權要求。
+            no_admin_install = $true
+          }
+
+          $protectedConfig = $common.Clone()
+          $protectedConfig.app_name = "MswiCiPassword"
+          $protectedConfig.exe_name = "Setup_MswiCiPassword"
+          $protectedConfig.install_password_env = "MSWI_CI_INSTALL_PASSWORD"
+          $protectedConfig | ConvertTo-Json -Depth 5 |
+            Set-Content -Path pw_config.json -Encoding UTF8
+
+          $plainConfig = $common.Clone()
+          $plainConfig.app_name = "MswiCiPlain"
+          $plainConfig.exe_name = "Setup_MswiCiPlain"
+          $plainConfig | ConvertTo-Json -Depth 5 |
+            Set-Content -Path plain_config.json -Encoding UTF8
+
+          python builder_cli.py pack --config pw_config.json
+          python builder_cli.py pack --config plain_config.json
+
+      - name: 應用程式內容真的被加密了（含對照組）
+        shell: pwsh
+        run: |
+          # 驗的是**內嵌資源的名字**，不是搜尋明文內容。PyInstaller 的 onefile
+          # 封存會壓縮每一筆內容，因此就算完全沒有加密，app_dir 裡的明文也不會
+          # 以原樣出現在 exe 的位元組裡（2026-09-09 實測確認）——用明文當標記的
+          # 話，對照組會失敗，而那個檢查等於什麼都證明不了。
+          #
+          # 資源名稱則是未壓縮儲存的，而且那兩個名字是 embedded_payload 的模組
+          # 說明明文記載的「打包端與安裝端之間的契約」：PLAIN 內嵌
+          # app_contents/ 整個目錄，ENCRYPTED 內嵌單一的 app_contents.enc。
+          function ContainsText($path, $needle) {
+            $bytes = [System.IO.File]::ReadAllBytes($path)
+            return [System.Text.Encoding]::Latin1.GetString($bytes).Contains($needle)
+          }
+
+          $plainEntry = "app_contents\canary.txt"
+          $failures = @()
+
+          # 對照組先跑：這一段搜尋要先證明它抓得到東西。找不到就代表搜尋本身
+          # 壞了，此時另一顆的「找不到」什麼都不能說明——兩者在結果上長得一樣。
+          if (-not (ContainsText "dist\Setup_MswiCiPlain.exe" $plainEntry)) {
+            $failures += "對照組（未開保護）裡找不到 $plainEntry 這筆資源——這段搜尋本身沒有作用，加密與否無從判斷"
+          } else {
+            Write-Host "PASS: 對照組裡找得到明文內容的資源項目，搜尋有效"
+          }
+
+          if (ContainsText "dist\Setup_MswiCiPassword.exe" $plainEntry) {
+            $failures += "開了密碼保護的安裝檔裡仍有 $plainEntry——應用程式內容是以明文目錄內嵌的，沒有走加密那一條"
+          } else {
+            Write-Host "PASS: 開了保護的安裝檔裡沒有明文內容的資源項目"
+          }
+
+          if (-not (ContainsText "dist\Setup_MswiCiPassword.exe" "app_contents.enc")) {
+            $failures += "開了密碼保護的安裝檔裡找不到 app_contents.enc——加密後的檔案根本沒有被內嵌"
+          } else {
+            Write-Host "PASS: 開了保護的安裝檔內嵌的是 app_contents.enc"
+          }
+
+          if ($failures.Count -gt 0) { throw ($failures -join "`n") }
+
+      - name: 沒帶密碼裝不起來
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:LOCALAPPDATA "Programs\MswiCiPassword"
+          $proc = Start-Process -FilePath "dist\Setup_MswiCiPassword.exe" `
+            -ArgumentList "/S" -Wait -PassThru
+          if ($proc.ExitCode -eq 0) {
+            throw "沒帶 /PASSWORD= 卻回報安裝成功（exit code 0）"
+          }
+          if (Test-Path $installDir) {
+            throw "沒帶密碼卻在 $installDir 留下了東西"
+          }
+          Write-Host "PASS: 沒帶密碼時以 exit code $($proc.ExitCode) 中止，且沒有落地"
+
+      - name: 密碼錯了也裝不起來
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:LOCALAPPDATA "Programs\MswiCiPassword"
+          $proc = Start-Process -FilePath "dist\Setup_MswiCiPassword.exe" `
+            -ArgumentList "/S", "/PASSWORD=definitely-not-the-password" -Wait -PassThru
+          if ($proc.ExitCode -eq 0) {
+            throw "密碼錯誤卻回報安裝成功（exit code 0）"
+          }
+          if (Test-Path $installDir) {
+            throw "密碼錯誤卻在 $installDir 留下了東西"
+          }
+          Write-Host "PASS: 密碼錯誤時以 exit code $($proc.ExitCode) 中止，且沒有落地"
+
+      - name: 帶對密碼裝得起來，而且解得出原本的內容
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:LOCALAPPDATA "Programs\MswiCiPassword"
+          $proc = Start-Process -FilePath "dist\Setup_MswiCiPassword.exe" `
+            -ArgumentList "/S", "/PASSWORD=$env:MSWI_CI_INSTALL_PASSWORD", `
+                          "/LOG=pw_silent_install.log" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+            throw "帶對密碼仍然失敗，exit code = $($proc.ExitCode)"
+          }
+
+          $failures = @()
+          if (-not (Test-Path (Join-Path $installDir "app.exe"))) {
+            $failures += "app.exe 不在安裝目錄裡"
+          }
+          # 解密之後的內容要與加密之前完全相同。只檢查檔案存在的話，一個
+          # 空檔案或壞掉的內容都會通過。
+          $canaryPath = Join-Path $installDir "canary.txt"
+          if (-not (Test-Path $canaryPath)) {
+            $failures += "canary.txt 不在安裝目錄裡"
+          } elseif ((Get-Content $canaryPath -Raw).Trim() -ne "MSWI-PLAINTEXT-CANARY-9f3ad271") {
+            $failures += "canary.txt 的內容與加密之前不同——解密沒有還原出原本的檔案"
+          }
+          if ($failures.Count -gt 0) { throw ($failures -join "`n") }
+          Write-Host "PASS: 帶對密碼安裝成功，解密後的內容與原本一致"
+
+      - name: 靜默解除安裝並確認清乾淨
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:LOCALAPPDATA "Programs\MswiCiPassword"
+          $proc = Start-Process -FilePath (Join-Path $installDir "uninstall.exe") `
+            -ArgumentList "--silent" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+            throw "靜默解除安裝回報失敗，exit code = $($proc.ExitCode)"
+          }
+          # 解除安裝會排程一個背景 .bat 刪掉 uninstall.exe 自己（見
+          # self_delete.py），給它幾秒鐘完成。
+          Start-Sleep -Seconds 5
+          if (Test-Path $installDir) {
+            throw "安裝目錄仍然存在：$installDir"
+          }
+          Write-Host "PASS: 解除安裝完成，安裝目錄已清除"
+
+      - name: 上傳安裝紀錄（不管成功失敗都上傳，方便事後排查）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-password-logs
+          path: pw_silent_install.log
+          if-no-files-found: ignore
