@@ -20,14 +20,10 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# vm_lease 由另一個 repo 提供，理由與跳過方式見 tests/test_vms.py 開頭。
-try:
-    import vm_lease  # noqa: F401
-except ImportError as exc:  # pragma: no cover - 取決於執行機器裝了什麼
-    raise unittest.SkipTest(
-        "vm_lease 未安裝，跳過虛擬機驅動的測試（見 tests/test_vms.py 的說明）"
-    ) from exc
-
+# 這份不再需要 vm_lease：`drive_installer_gui` 已改為在函式內部才匯入
+# `tools.vms`（2026-09-09）。原本這裡有一段 unittest.SkipTest 的守衛，代價是
+# 這 18 項判準在 CI 上整份跳過——而判準寫錯的後果正是「拿到一個看起來有結論、
+# 實際上不成立的答案」，那更需要在一台乾淨的機器上被驗過。
 from tools import drive_installer_gui as drive
 
 

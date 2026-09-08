@@ -28,7 +28,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import packaging_core
 
-from tools import vms
+# `tools.vms` 不在最上層匯入：它要求 `vm_lease`，而那個套件由另一個 repo
+# 提供、只裝在開發機上。放在最上層的話，凡是匯入這個模組的測試在 CI 上連
+# 載入都會失敗——判準那幾十項因此一項都跑不到，而那些正是「拿到客體回報
+# 之後怎麼判定」的全部保障（2026-09-09 實際踩到，理由同
+# tools/verify_msix_all_users.py）。
 
 
 PASS = "pass"
@@ -334,6 +338,8 @@ def run(vm, setup_path, app_name, work_dir, main_exe="app.exe",
     腳本必須以 `interactive=True` 執行：拖曳要發生在使用者看得到的桌面工作
     階段上，工作階段 0 沒有可以操作的桌面。
     """
+    from tools import vms
+
     remote_setup = GUEST_DIR + "\\" + os.path.basename(setup_path)
     size_mb = os.path.getsize(setup_path) / (1024 * 1024)
     with stage(f"把安裝檔送進客體（{size_mb:.0f} MB）", log=log):
@@ -376,6 +382,8 @@ def run(vm, setup_path, app_name, work_dir, main_exe="app.exe",
 
 def main(argv=None):
     import argparse
+
+    from tools import vms
 
     # 客體寫回來的文字不受這支工具控制，其中可能含有主控台編不出來的
     # 字元（實際踩過：客體讀錯編碼寫回一段亂碼）。少了這一行，一輪已經
