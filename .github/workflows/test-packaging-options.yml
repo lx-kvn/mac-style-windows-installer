@@ -1048,3 +1048,199 @@ jobs:
             rb_install.log
             rb_rollback.log
           if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # 相依元件：dependencies / custom_dependencies / bundle_dependencies。
+  #
+  # 這一組欄位在此之前完全沒有被任何自動化碰過，而它們的失敗方式是安靜的：
+  # 偵測沒接上時安裝照樣成功，只是那則「建議先安裝」永遠不出現；內嵌沒生效
+  # 時安裝檔照樣編得出來，只是它在離線的機器上會去下載一個下載不到的東西。
+  #
+  # 偵測那一段用**同一顆安裝檔**跑兩次，中間只差一個登錄表機碼。同一顆
+  # 安裝檔、同一個指令，輸出卻不同——那是「偵測真的有在跑」唯一不靠推論的
+  # 證據。不下載任何東西，因此也不受網路狀況影響。
+  test-dependencies:
+    runs-on: windows-latest
+
+    env:
+      PYTHONUTF8: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 準備 app_dir 與兩份設定（自訂相依元件、以及要不要內嵌）
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dep_app | Out-Null
+          Copy-Item "$env:WINDIR\System32\notepad.exe" "dep_app\app.exe"
+
+          # 自訂相依元件：偵測指向一個我們自己控制的 HKCU 機碼，因此「裝了
+          # 沒」完全由這個 job 決定，不看這台 runner 上實際裝了什麼。
+          # download_url 必須是 https（打包階段會驗），但這一輪不會真的去下載
+          # ——偵測說已安裝時不下載，偵測說缺少時靜默安裝也只是記一則警告。
+          $custom = @(@{
+            key            = "mswi_ci_probe_dep"
+            display_name   = "MSWI CI Probe Dependency"
+            download_url   = "https://example.invalid/mswi-ci-probe.exe"
+            registry_check = @{ hive = "HKCU"; path = "Software\MswiCiDepProbe" }
+          })
+
+          $base = @{
+            app_dir             = "dep_app"
+            png_icon            = "branding/icon.png"
+            ico_icon            = "branding/icon.ico"
+            version             = "1.0.0"
+            publisher           = "mswi-ci"
+            main_exe            = "app.exe"
+            no_admin_install    = $true
+            custom_dependencies = $custom
+          }
+
+          $plain = $base.Clone()
+          $plain.app_name = "MswiCiDeps"
+          $plain.exe_name = "Setup_MswiCiDeps"
+          $plain | ConvertTo-Json -Depth 6 | Set-Content -Path dep_config.json -Encoding UTF8
+
+          # 內嵌那一顆：多帶 bundle_dependencies。這一步會在打包當下真的把
+          # VC++ Redistributable 下載下來內嵌進去。
+          $bundled = $base.Clone()
+          $bundled.app_name             = "MswiCiDepsBundled"
+          $bundled.exe_name             = "Setup_MswiCiDepsBundled"
+          $bundled.dependencies         = @("vcredist_x64")
+          $bundled.bundle_dependencies  = @("vcredist_x64")
+          $bundled | ConvertTo-Json -Depth 6 | Set-Content -Path dep_bundled_config.json -Encoding UTF8
+
+      - name: 打包兩顆
+        shell: pwsh
+        run: |
+          # 每編完一顆就立刻搬走：build_all() 開頭會清空整個 dist/。
+          New-Item -ItemType Directory -Force -Path dep_out | Out-Null
+
+          python builder_cli.py pack --config dep_config.json
+          if ($LASTEXITCODE -ne 0) { throw "打包（未內嵌）失敗" }
+          Move-Item "dist\Setup_MswiCiDeps.exe" "dep_out\Setup_MswiCiDeps.exe" -Force
+
+          python builder_cli.py pack --config dep_bundled_config.json
+          if ($LASTEXITCODE -ne 0) { throw "打包（內嵌）失敗" }
+          Move-Item "dist\Setup_MswiCiDepsBundled.exe" "dep_out\Setup_MswiCiDepsBundled.exe" -Force
+
+          Get-ChildItem dep_out | ForEach-Object { Write-Host ("{0}  {1:N0} bytes" -f $_.Name, $_.Length) }
+
+      - name: 內嵌的相依元件真的在安裝檔裡（含對照組）
+        shell: pwsh
+        run: |
+          # 與密碼保護那個 job 同一個作法：驗**內嵌資源的名字**。PyInstaller
+          # 會壓縮每一筆內容，明文搜尋不到；資源名稱則是未壓縮儲存的。
+          # 這個名字是打包端與安裝端之間的契約——installer_core 的
+          # install_dependency() 查的固定路徑就是 dependencies/<key>.exe。
+          function ContainsText($path, $needle) {
+            $bytes = [System.IO.File]::ReadAllBytes($path)
+            return [System.Text.Encoding]::Latin1.GetString($bytes).Contains($needle)
+          }
+
+          $entry = "dependencies\vcredist_x64.exe"
+          $failures = @()
+
+          # 對照組先跑：沒有帶 bundle_dependencies 的那顆**不該**有這筆資源。
+          # 它要是也有，代表這段搜尋比對到的是別的東西，另一顆的「有」就不能
+          # 當成內嵌成功的證據。
+          if (ContainsText "dep_out\Setup_MswiCiDeps.exe" $entry) {
+            $failures += "沒有帶 bundle_dependencies 的安裝檔裡也有 $entry——這段搜尋比對到的不是內嵌的那份"
+          } else {
+            Write-Host "PASS: 對照組（未內嵌）裡沒有這筆資源"
+          }
+
+          if (-not (ContainsText "dep_out\Setup_MswiCiDepsBundled.exe" $entry)) {
+            $failures += "帶了 bundle_dependencies 卻找不到 $entry——相依元件沒有被內嵌"
+          } else {
+            Write-Host "PASS: 內嵌的那顆裡有 $entry"
+          }
+
+          # 內嵌的是一顆二十幾 MB 的安裝檔，兩顆的大小差距應該看得出來。
+          $plainSize = (Get-Item "dep_out\Setup_MswiCiDeps.exe").Length
+          $bundledSize = (Get-Item "dep_out\Setup_MswiCiDepsBundled.exe").Length
+          Write-Host ("未內嵌 {0:N0}／內嵌 {1:N0}，差 {2:N0} bytes" -f $plainSize, $bundledSize, ($bundledSize - $plainSize))
+          if (($bundledSize - $plainSize) -lt 5000000) {
+            $failures += "兩顆的大小只差 $($bundledSize - $plainSize) bytes，內嵌的東西看起來不在裡面"
+          }
+
+          if ($failures.Count -gt 0) { throw ($failures -join "`n") }
+
+      - name: 偵測到「已安裝」時不提示（同一顆安裝檔，第一次）
+        shell: pwsh
+        run: |
+          # 先把偵測要找的機碼建起來，讓這個自訂相依元件被判定為已安裝。
+          New-Item -Path "HKCU:\Software\MswiCiDepProbe" -Force | Out-Null
+
+          $proc = Start-Process -FilePath "dep_out\Setup_MswiCiDeps.exe" `
+            -ArgumentList "/S", "/LOG=dep_present.log" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "安裝失敗，exit code = $($proc.ExitCode)" }
+
+          $log = Get-Content dep_present.log -Raw -Encoding UTF8
+          if ($log -match "MSWI CI Probe Dependency") {
+            throw "偵測說它已安裝，紀錄裡卻仍然出現「建議先安裝」的提示"
+          }
+          Write-Host "PASS: 偵測到已安裝時沒有提示"
+
+          # 收尾，讓下一輪從乾淨狀態開始。
+          $installDir = Join-Path $env:LOCALAPPDATA "Programs\MswiCiDeps"
+          $proc = Start-Process -FilePath (Join-Path $installDir "uninstall.exe") `
+            -ArgumentList "--silent" -Wait -PassThru
+          Start-Sleep -Seconds 5
+
+      - name: 偵測到「缺少」時會提示（同一顆安裝檔，第二次）
+        shell: pwsh
+        run: |
+          # 這一輪與上一輪唯一的差別就是這個機碼不見了。同一顆安裝檔、同一個
+          # 指令，輸出卻不同——那是「偵測真的有在跑」唯一不靠推論的證據。
+          Remove-Item "HKCU:\Software\MswiCiDepProbe" -Recurse -Force -ErrorAction SilentlyContinue
+
+          $proc = Start-Process -FilePath "dep_out\Setup_MswiCiDeps.exe" `
+            -ArgumentList "/S", "/LOG=dep_missing.log" -Wait -PassThru
+          # 相依元件缺少只會記錄警告、不阻擋安裝（靜默模式沒有畫面可以提示）。
+          if ($proc.ExitCode -ne 0) { throw "相依元件缺少不該讓安裝失敗，exit code = $($proc.ExitCode)" }
+
+          $log = Get-Content dep_missing.log -Raw -Encoding UTF8
+          $failures = @()
+          if ($log -notmatch "MSWI CI Probe Dependency") {
+            $failures += "偵測說它缺少，紀錄裡卻沒有出現那則提示——自訂相依元件根本沒有被檢查"
+          }
+          if ($log -notmatch "example\.invalid") {
+            $failures += "提示裡沒有帶上下載連結，使用者拿不到「去哪裡裝」"
+          }
+          if ($failures.Count -gt 0) { throw ($failures -join "`n") }
+          Write-Host "PASS: 偵測到缺少時提示了，而且帶著下載連結"
+
+      - name: 收尾
+        if: always()
+        shell: pwsh
+        run: |
+          Remove-Item "HKCU:\Software\MswiCiDepProbe" -Recurse -Force -ErrorAction SilentlyContinue
+          $installDir = Join-Path $env:LOCALAPPDATA "Programs\MswiCiDeps"
+          if (Test-Path $installDir) {
+            $u = Join-Path $installDir "uninstall.exe"
+            if (Test-Path $u) { Start-Process -FilePath $u -ArgumentList "--silent" -Wait }
+            Start-Sleep -Seconds 5
+            Remove-Item $installDir -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: 上傳安裝紀錄（不管成功失敗都上傳，方便事後排查）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependencies-logs
+          path: |
+            dep_present.log
+            dep_missing.log
+          if-no-files-found: ignore
