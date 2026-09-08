@@ -1096,6 +1096,10 @@ jobs:
             registry_check = @{ hive = "HKCU"; path = "Software\MswiCiDepProbe" }
           })
 
+          # custom_dependencies 只是**定義**，還要在 dependencies 清單裡列出來
+          # 才會被檢查（get_warnings() 走的是 dependencies，custom_dependencies
+          # 只提供 checker）。漏了這一行的話那一筆完全不會有作用，而打包階段
+          # 不會提醒——2026-09-09 就是這樣紅了一次。
           $base = @{
             app_dir             = "dep_app"
             png_icon            = "branding/icon.png"
@@ -1105,6 +1109,7 @@ jobs:
             main_exe            = "app.exe"
             no_admin_install    = $true
             custom_dependencies = $custom
+            dependencies        = @("mswi_ci_probe_dep")
           }
 
           $plain = $base.Clone()
@@ -1117,7 +1122,7 @@ jobs:
           $bundled = $base.Clone()
           $bundled.app_name             = "MswiCiDepsBundled"
           $bundled.exe_name             = "Setup_MswiCiDepsBundled"
-          $bundled.dependencies         = @("vcredist_x64")
+          $bundled.dependencies         = @("mswi_ci_probe_dep", "vcredist_x64")
           $bundled.bundle_dependencies  = @("vcredist_x64")
           $bundled | ConvertTo-Json -Depth 6 | Set-Content -Path dep_bundled_config.json -Encoding UTF8
 
@@ -1180,6 +1185,10 @@ jobs:
       - name: 偵測到「已安裝」時不提示（同一顆安裝檔，第一次）
         shell: pwsh
         run: |
+          # 這一輪的斷言是「紀錄裡沒有那則提示」，單看是空的——偵測根本沒接上
+          # 時它也會通過（2026-09-09 就是這樣：這一輪綠、下一輪紅，紅的那個
+          # 才是真的在驗）。它的意義來自與下一輪的對照：同一顆安裝檔、同一個
+          # 指令，只差一個登錄表機碼，輸出卻不同。兩輪都要通過才算數。
           # 先把偵測要找的機碼建起來，讓這個自訂相依元件被判定為已安裝。
           New-Item -Path "HKCU:\Software\MswiCiDepProbe" -Force | Out-Null
 
