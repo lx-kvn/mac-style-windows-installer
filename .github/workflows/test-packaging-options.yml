@@ -135,15 +135,32 @@ jobs:
           Check "安裝前置腳本有執行" (Test-Path (Join-Path $env:TEMP "mswi_ci_pre_marker.txt"))
           Check "安裝後置腳本有執行" (Test-Path (Join-Path $env:TEMP "mswi_ci_post_marker.txt"))
 
-          # 已知限制：file_assoc.py 目前不分 no_admin_install，一律寫
-          # HKEY_LOCAL_MACHINE\Software\Classes——這個安裝檔本身沒有要求
-          # 提權（no_admin_install=true 不帶 --uac-admin），寫不寫得進去
-          # 取決於這台 runner 執行帳號當下的 UAC/權杖狀態，不是這個工具
-          # 本身邏輯對不對的問題，所以這項只警告、不讓整個 job 失敗。
-          if (Test-Path "HKLM:\Software\Classes\.mswitest") {
-            Write-Host "PASS: 檔案關聯機碼存在"
+          # 檔案關聯。這一段原本寫在 HKLM 底下找，而且找不到時只警告不失敗，
+          # 註解把原因歸給「runner 的 UAC/權杖狀態」——**那個診斷是錯的**。
+          # file_assoc.py 早就接上了 InstallScope：no_admin_install=true 時
+          # 寫的是 HKCU\Software\Classes（見該模組 register() 的 hive 那一行）。
+          # 也就是說這個檢查一直在錯的地方找，於是永遠 WARN、永遠不會失敗
+          # ——一條從來沒有驗到東西的檢查（2026-09-09 修正）。
+          #
+          # 驗的是真正讓「雙擊那個副檔名會開啟這支程式」成立的那幾個機碼，
+          # 不只是「副檔名機碼在不在」：副檔名要指向 ProgID、ProgID 底下的
+          # open 命令要指向裝好的那支 exe。少了後者，關聯存在但點了沒反應。
+          $classes = "HKCU:\Software\Classes"
+          $progId = "AppFilemswitest"   # file_extension.prog_id() 的對外契約
+          Check "副檔名機碼存在（HKCU，no_admin_install=true）" (Test-Path "$classes\.mswitest")
+          if (Test-Path "$classes\.mswitest") {
+            $pointsAt = (Get-ItemProperty "$classes\.mswitest" -ErrorAction SilentlyContinue).'(default)'
+            Check "副檔名指向 ProgID $progId" ($pointsAt -eq $progId)
           } else {
-            Write-Host "WARN: 檔案關聯機碼不存在（可能是這台 runner 的 UAC/權杖狀態導致 HKLM 寫入被拒，不計入失敗）"
+            $failures += "副檔名指向 ProgID $progId"
+          }
+          $cmdKey = "$classes\$progId\shell\open\command"
+          Check "ProgID 的開啟命令存在" (Test-Path $cmdKey)
+          if (Test-Path $cmdKey) {
+            $cmd = (Get-ItemProperty $cmdKey -ErrorAction SilentlyContinue).'(default)'
+            Check "開啟命令指向裝好的 app.exe" ($cmd -like "*$installDir*app.exe*")
+          } else {
+            $failures += "開啟命令指向裝好的 app.exe"
           }
 
           if ($failures.Count -gt 0) {
@@ -182,6 +199,8 @@ jobs:
           Check "解除安裝登錄表項目已移除" `
             (-not (Test-Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\MswiCiTest"))
           Check "排程工作已移除" (-not [bool](Get-ScheduledTask -TaskName "MswiCiTestTask" -ErrorAction SilentlyContinue))
+          Check "檔案關聯的副檔名機碼已移除" (-not (Test-Path "HKCU:\Software\Classes\.mswitest"))
+          Check "檔案關聯的 ProgID 已移除" (-not (Test-Path "HKCU:\Software\Classes\AppFilemswitest"))
           Check "PATH（HKCU\Environment）已移除安裝目錄" `
             ((Get-ItemProperty "HKCU:\Environment" -Name Path -ErrorAction SilentlyContinue).Path -notlike "*$installDir*")
 

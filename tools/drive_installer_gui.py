@@ -89,15 +89,39 @@ def drag_path(start, end, steps=24):
 
 
 def guest_script(setup_path, app_name, install_dir=None, main_exe="app.exe",
-                 steps=24):
+                 steps=24, click_before_drag=None):
     """產生客體端要跑的 PowerShell。
 
     先等視窗出現並取得它的位置，才開始碰滑鼠——視窗還沒出現就移動並按下，
     點到的是桌面，而報告上會看起來像「拖了但沒有反應」。
+
+    `click_before_drag`：拖曳之前先在視窗的這個相對位置點一下，形式與
+    `ICON_AT` 相同（視窗矩形的比例）。授權合約頁的驗證用它按下「同意並
+    繼續」——那一頁擋在拖曳畫面之前，不先過它就拖不到東西
+    （見 `tools/verify_eula_gate.py`）。送滑鼠事件的那段 C# 因此只留這
+    一份，不在別處複製。
     """
     install_dir = install_dir or (r"$env:LOCALAPPDATA\Programs\\" + app_name)
     icon_x, icon_y = ICON_AT
     target_x, target_y = TARGET_AT
+    pre_click = ""
+    if click_before_drag:
+        click_x, click_y = click_before_drag
+        pre_click = f"""
+# 先按下一顆按鈕再拖曳。位置與 icon/target 一樣是視窗矩形的比例，因此要等
+# 上面量到 $rect 之後才算得出來。
+$clickX = $rect.Left + [int]($w * {click_x})
+$clickY = $rect.Top  + [int]($h * {click_y})
+[Mouse]::MoveTo($clickX, $clickY)
+Start-Sleep -Milliseconds 300
+[Mouse]::Down()
+Start-Sleep -Milliseconds 120
+[Mouse]::Up()
+Note 'pre_click_sent' 'True'
+Note 'pre_click_at' "$clickX,$clickY"
+# 按下之後畫面要換頁，馬上拖曳會拖在還沒消失的那一頁上。
+Start-Sleep -Seconds 3
+"""
 
     return f"""$ErrorActionPreference = 'Continue'
 $report = '{REPORT}'
@@ -227,7 +251,7 @@ $rect = New-Object Mouse+RECT
 $w = $rect.Right - $rect.Left
 $h = $rect.Bottom - $rect.Top
 Note 'window_rect' "$($rect.Left),$($rect.Top),$w,$h"
-
+{pre_click}
 $iconX   = $rect.Left + [int]($w * {icon_x})
 $iconY   = $rect.Top  + [int]($h * {icon_y})
 $targetX = $rect.Left + [int]($w * {target_x})
@@ -304,7 +328,7 @@ def parse_report(text):
 
 
 def run(vm, setup_path, app_name, work_dir, main_exe="app.exe",
-        screenshot=None, log=print):
+        screenshot=None, log=print, click_before_drag=None):
     """把安裝檔送進客體、在桌面上實際拖一次、取回結果。
 
     腳本必須以 `interactive=True` 執行：拖曳要發生在使用者看得到的桌面工作
@@ -318,7 +342,8 @@ def run(vm, setup_path, app_name, work_dir, main_exe="app.exe",
 
     local_script = os.path.join(work_dir, "drive_installer.ps1")
     vms.write_guest_script(local_script,
-                           guest_script(remote_setup, app_name, main_exe=main_exe))
+                           guest_script(remote_setup, app_name, main_exe=main_exe,
+                                        click_before_drag=click_before_drag))
     remote_script = GUEST_DIR + "\\" + os.path.basename(local_script)
     with stage("送入腳本", log=log):
         vm.copy_in(local_script, remote_script)
