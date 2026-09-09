@@ -314,6 +314,25 @@ with vms.preserved_tab(vm.machine.vmx):
 截圖裡要看得到合約內文與「同意並繼續」那顆按鈕。看不到就中止流程——那代表
 這顆安裝檔沒有帶到合約。
 
+#### 8d. 虛擬機：MSIX 的全機器使用者範圍（改動有碰到 MSIX 時）
+
+`msix.all_users` 那條路（提權的子行程、雜湊比對、降級）只有虛擬機驗得到——
+CI 的 runner 永遠是提權的，而這個功能的形狀正是建立在「未提權的主行程」與
+「提權的子行程」兩者的分別上。
+
+```bash
+python -m tools.verify_msix_all_users <all_users 打開的 Setup.exe> <同一次建置的 .msix> --cer <測試憑證>
+```
+
+四項判定（提權子行程完成佈建、雜湊不符即拒絕、靜默未提權時降級、靜默已提權
+時直接佈建）任何一項不是 `pass` 就中止流程，`inconclusive` 也算。
+
+材料要另外編一顆探針安裝檔（`msix.all_users` 為真、自簽憑證），不是這個專案
+自己的發布產物——後者走的是傳統引擎。
+
+**版本內容完全沒有碰到 MSIX 相關程式碼時可以略過這一步**，但要在回報裡明講
+略過了，不要靜默跳過。
+
 ### 9. 產生 Release Notes 草稿
 
 在 `docs/releases/` 底下新增 `PRE-RELEASE_NOTES_v<版本號>.md`，格式沿用

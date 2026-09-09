@@ -93,7 +93,8 @@ def drag_path(start, end, steps=24):
 
 
 def guest_script(setup_path, app_name, install_dir=None, main_exe="app.exe",
-                 steps=24, click_before_drag=None):
+                 steps=24, click_before_drag=None, window_title=None,
+                 icon_at=None, target_at=None):
     """產生客體端要跑的 PowerShell。
 
     先等視窗出現並取得它的位置，才開始碰滑鼠——視窗還沒出現就移動並按下，
@@ -104,10 +105,19 @@ def guest_script(setup_path, app_name, install_dir=None, main_exe="app.exe",
     繼續」——那一頁擋在拖曳畫面之前，不先過它就拖不到東西
     （見 `tools/verify_eula_gate.py`）。送滑鼠事件的那段 C# 因此只留這
     一份，不在別處複製。
+
+    `window_title`／`icon_at`／`target_at`：解除安裝那一端的拖曳（把圖示拖到
+    垃圾桶）走的是同一套機制，差別只有要找哪個視窗、以及兩個端點在視窗裡的
+    位置（見 `tools/verify_uninstall_drag.py`）。留空即沿用安裝那一端的值。
+
+    落地判準不在這裡：這個函式只回報 `install_dir_exists`／`main_exe_exists`
+    這些事實，安裝要的是「出現」、解除安裝要的是「消失」，方向由呼叫端自己
+    的判準函式決定。
     """
     install_dir = install_dir or (r"$env:LOCALAPPDATA\Programs\\" + app_name)
-    icon_x, icon_y = ICON_AT
-    target_x, target_y = TARGET_AT
+    window_title = window_title or WINDOW_TITLE
+    icon_x, icon_y = icon_at or ICON_AT
+    target_x, target_y = target_at or TARGET_AT
     pre_click = ""
     if click_before_drag:
         click_x, click_y = click_before_drag
@@ -234,7 +244,7 @@ $waitSeconds = 90
 $hwnd = [IntPtr]::Zero
 $waited = 0
 for ($i = 0; $i -lt ($waitSeconds * 2); $i++) {{
-    $hwnd = [Mouse]::FindByTitle('{WINDOW_TITLE}')
+    $hwnd = [Mouse]::FindByTitle('{window_title}')
     if ($hwnd -ne [IntPtr]::Zero) {{ break }}
     Start-Sleep -Milliseconds 500
     $waited = $i / 2
@@ -284,7 +294,7 @@ Start-Sleep -Seconds 12
 $installDir = "{install_dir}"
 Note 'install_dir_exists' (Test-Path $installDir)
 Note 'main_exe_exists' (Test-Path (Join-Path $installDir '{main_exe}'))
-Note 'result_screen' ([Mouse]::FindByTitle('{WINDOW_TITLE}') -ne [IntPtr]::Zero)
+Note 'result_screen' ([Mouse]::FindByTitle('{window_title}') -ne [IntPtr]::Zero)
 Note 'done' 'True'
 """
 
