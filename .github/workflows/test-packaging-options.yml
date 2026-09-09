@@ -1253,3 +1253,242 @@ jobs:
             dep_present.log
             dep_missing.log
           if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # 剩下的打包欄位與命令列旗標：doc_icon／doc_icons／folder_name／
+  # path_target_exe，以及 /D=、/DIR=、/NODESKTOPSHORTCUT。
+  #
+  # 每一條斷言都配一條反向的：folder_name 生效代表安裝目錄用的是它、**而不是**
+  # app_name；path_target_exe 生效代表 PATH 進的是那支 exe 所在的子目錄、
+  # **而不是**安裝根目錄；doc_icons 生效代表有個別指定的副檔名用自己的圖示、
+  # 而沒指定的那個**退回**共用圖示。少了反向那半，「有東西」與「東西剛好長得
+  # 一樣」分不出來。
+  #
+  # 一顆安裝檔跑多輪（打包一次要兩分鐘，而這些欄位彼此不衝突）。
+  test-extra-fields-and-flags:
+    runs-on: windows-latest
+
+    env:
+      PYTHONUTF8: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 準備 app_dir（CLI 放在子目錄裡）與兩張不同的文件圖示
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path ex_app | Out-Null
+          New-Item -ItemType Directory -Force -Path ex_app\tools | Out-Null
+          Copy-Item "$env:WINDIR\System32\notepad.exe" "ex_app\app.exe"
+          # path_target_exe 指向這一支。放在子目錄裡才分得出「PATH 進的是這支
+          # exe 所在的目錄」還是「PATH 進的是安裝根目錄」——兩者同一層的話，
+          # 這個欄位有沒有生效看不出來。
+          Copy-Item "$env:WINDIR\System32\notepad.exe" "ex_app\tools\cli.exe"
+
+          # 兩張內容不同的 ICO，用來分辨「個別指定」與「共用」有沒有走對。
+          # 內容不同不是為了外觀，是為了讓事後比對檔案雜湊時分得出誰是誰。
+          Copy-Item "branding\icon.ico" "shared_doc.ico"
+          Copy-Item "branding\icon.ico" "per_ext_doc.ico"
+          # 在其中一張尾端多加幾個位元組，讓兩張的雜湊不同。ICO 的讀取以檔頭
+          # 的目錄項為準，尾端多出來的資料不影響它顯示。
+          Add-Content -Path "per_ext_doc.ico" -Value "mswi-per-ext" -Encoding ASCII
+
+      - name: 打包
+        shell: pwsh
+        run: |
+          $config = @{
+            app_dir           = "ex_app"
+            png_icon          = "branding/icon.png"
+            ico_icon          = "branding/icon.ico"
+            app_name          = "MswiCiExtras"
+            # 安裝目錄要用這個名字，不是 app_name。
+            folder_name       = "MswiCiExtrasFolder"
+            version           = "1.0.0"
+            publisher         = "mswi-ci"
+            exe_name          = "Setup_MswiCiExtras"
+            main_exe          = "app.exe"
+            add_to_path       = $true
+            path_target_exe   = "tools/cli.exe"
+            file_associations = ".mswia,.mswib"
+            doc_icon          = "shared_doc.ico"
+            doc_icons         = @{ ".mswia" = "per_ext_doc.ico" }
+            no_admin_install  = $true
+          }
+          $config | ConvertTo-Json -Depth 6 | Set-Content -Path ex_config.json -Encoding UTF8
+          python builder_cli.py pack --config ex_config.json
+          if ($LASTEXITCODE -ne 0) { throw "打包失敗" }
+          New-Item -ItemType Directory -Force -Path ex_out | Out-Null
+          Move-Item "dist\Setup_MswiCiExtras.exe" "ex_out\Setup_MswiCiExtras.exe" -Force
+
+      - name: 預設安裝——folder_name、path_target_exe、兩種文件圖示
+        shell: pwsh
+        run: |
+          $proc = Start-Process -FilePath "ex_out\Setup_MswiCiExtras.exe" `
+            -ArgumentList "/S", "/LOG=ex_install.log" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "安裝失敗，exit code = $($proc.ExitCode)" }
+
+          $byFolder = Join-Path $env:LOCALAPPDATA "Programs\MswiCiExtrasFolder"
+          $byAppName = Join-Path $env:LOCALAPPDATA "Programs\MswiCiExtras"
+          $failures = @()
+
+          # folder_name：正向與反向。只驗正向的話，folder_name 被忽略而剛好
+          # 兩個名字都建了目錄時也會通過。
+          if (-not (Test-Path (Join-Path $byFolder "app.exe"))) {
+            $failures += "安裝目錄不是 folder_name 指定的 MswiCiExtrasFolder"
+          }
+          if (Test-Path $byAppName) {
+            $failures += "同時在 app_name（MswiCiExtras）底下也建了目錄——folder_name 沒有取代它"
+          }
+
+          # path_target_exe：PATH 要進 tools 子目錄，不是安裝根目錄。
+          $toolsDir = Join-Path $byFolder "tools"
+          $userPath = (Get-ItemProperty 'HKCU:\Environment' -Name Path -ErrorAction SilentlyContinue).Path
+          $parts = @()
+          if ($userPath) { $parts = $userPath -split ';' | ForEach-Object { $_.TrimEnd('\') } }
+          if ($parts -notcontains $toolsDir.TrimEnd('\')) {
+            $failures += "PATH 裡沒有 path_target_exe 所在的子目錄 $toolsDir"
+          }
+          if ($parts -contains $byFolder.TrimEnd('\')) {
+            $failures += "PATH 裡進的是安裝根目錄——path_target_exe 沒有生效"
+          }
+
+          # 文件圖示：個別指定的那個副檔名用自己的圖示，沒指定的退回共用的。
+          # 兩張 ICO 的內容不同，因此「兩個副檔名指到同一張」會被抓出來。
+          $sharedIco = Join-Path $byFolder "doc_icon.ico"
+          $perExtIco = Join-Path $byFolder "doc_icon_mswia.ico"
+          if (-not (Test-Path $sharedIco)) { $failures += "共用的 doc_icon.ico 沒有落地" }
+          if (-not (Test-Path $perExtIco)) { $failures += "個別指定的 doc_icon_mswia.ico 沒有落地" }
+          if ((Test-Path $sharedIco) -and (Test-Path $perExtIco)) {
+            $a = (Get-FileHash $sharedIco).Hash
+            $b = (Get-FileHash $perExtIco).Hash
+            if ($a -eq $b) {
+              $failures += "兩張文件圖示的內容相同——個別指定的那張其實是共用的那張"
+            }
+          }
+          function IconRef($progId) {
+            $k = "HKCU:\Software\Classes\$progId\DefaultIcon"
+            if (Test-Path $k) { (Get-ItemProperty $k -ErrorAction SilentlyContinue).'(default)' } else { '' }
+          }
+          $refA = IconRef "AppFilemswia"
+          $refB = IconRef "AppFilemswib"
+          if ($refA -notlike "*doc_icon_mswia.ico*") {
+            $failures += ".mswia 的圖示不是它自己那張（實際：$refA）"
+          }
+          if ($refB -notlike "*doc_icon.ico*") {
+            $failures += ".mswib 沒有退回共用的圖示（實際：$refB）"
+          }
+          if ($refA -eq $refB) {
+            $failures += "兩個副檔名指到同一張圖示——doc_icons 沒有生效"
+          }
+
+          if ($failures.Count -gt 0) { throw ($failures -join "`n") }
+          Write-Host "PASS: folder_name、path_target_exe、doc_icon 與 doc_icons 全部生效"
+
+      - name: 解除安裝，讓後面幾輪從乾淨狀態開始
+        shell: pwsh
+        run: |
+          $byFolder = Join-Path $env:LOCALAPPDATA "Programs\MswiCiExtrasFolder"
+          $proc = Start-Process -FilePath (Join-Path $byFolder "uninstall.exe") `
+            -ArgumentList "--silent" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "解除安裝失敗，exit code = $($proc.ExitCode)" }
+          Start-Sleep -Seconds 6
+          if (Test-Path $byFolder) { throw "安裝目錄仍然存在：$byFolder" }
+          Write-Host "PASS: 已清乾淨"
+
+      - name: /D= 指定安裝路徑
+        shell: pwsh
+        run: |
+          $custom = Join-Path $env:RUNNER_TEMP "mswi_custom_dir"
+          $default = Join-Path $env:LOCALAPPDATA "Programs\MswiCiExtrasFolder"
+          $proc = Start-Process -FilePath "ex_out\Setup_MswiCiExtras.exe" `
+            -ArgumentList "/S", "/D=$custom", "/LOG=ex_d.log" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "安裝失敗，exit code = $($proc.ExitCode)" }
+
+          $failures = @()
+          if (-not (Test-Path (Join-Path $custom "app.exe"))) {
+            $failures += "/D= 指定的路徑底下沒有 app.exe：$custom"
+          }
+          # 反向：預設路徑不該有東西。少了這一條，/D= 被忽略時也會通過——
+          # 因為那時候「檔案存在」這件事在別的地方成立。
+          if (Test-Path $default) {
+            $failures += "同時裝進了預設路徑——/D= 沒有取代它"
+          }
+          if ($failures.Count -gt 0) { throw ($failures -join "`n") }
+          Write-Host "PASS: /D= 指定的路徑生效，預設路徑沒有東西"
+
+          Start-Process -FilePath (Join-Path $custom "uninstall.exe") `
+            -ArgumentList "--silent" -Wait | Out-Null
+          Start-Sleep -Seconds 6
+
+      - name: /DIR= 是 /D= 的同義寫法
+        shell: pwsh
+        run: |
+          $custom = Join-Path $env:RUNNER_TEMP "mswi_dir_flag"
+          $proc = Start-Process -FilePath "ex_out\Setup_MswiCiExtras.exe" `
+            -ArgumentList "/S", "/DIR=$custom", "/LOG=ex_dir.log" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "安裝失敗，exit code = $($proc.ExitCode)" }
+          if (-not (Test-Path (Join-Path $custom "app.exe"))) {
+            throw "/DIR= 指定的路徑底下沒有 app.exe：$custom"
+          }
+          Write-Host "PASS: /DIR= 與 /D= 同義"
+
+          Start-Process -FilePath (Join-Path $custom "uninstall.exe") `
+            -ArgumentList "--silent" -Wait | Out-Null
+          Start-Sleep -Seconds 6
+
+      - name: /NODESKTOPSHORTCUT 不建立桌面捷徑，但開始功能表的還在
+        shell: pwsh
+        run: |
+          $desktop = Join-Path $env:USERPROFILE "Desktop\MswiCiExtras.lnk"
+          $startMenu = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\MswiCiExtras.lnk"
+          Remove-Item $desktop -Force -ErrorAction SilentlyContinue
+          Remove-Item $startMenu -Force -ErrorAction SilentlyContinue
+
+          $proc = Start-Process -FilePath "ex_out\Setup_MswiCiExtras.exe" `
+            -ArgumentList "/S", "/NODESKTOPSHORTCUT", "/LOG=ex_nods.log" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "安裝失敗，exit code = $($proc.ExitCode)" }
+
+          $failures = @()
+          if (Test-Path $desktop) { $failures += "帶了 /NODESKTOPSHORTCUT 卻仍然建立了桌面捷徑" }
+          # 反向：開始功能表的捷徑不受這個旗標影響。少了這一條，「捷徑功能整個
+          # 壞掉」也會讓上一條通過。
+          if (-not (Test-Path $startMenu)) {
+            $failures += "開始功能表的捷徑也不見了——這個旗標只該影響桌面那一個"
+          }
+          if ($failures.Count -gt 0) { throw ($failures -join "`n") }
+          Write-Host "PASS: 桌面捷徑沒有建立，開始功能表的仍然建立了"
+
+      - name: 收尾
+        if: always()
+        shell: pwsh
+        run: |
+          $byFolder = Join-Path $env:LOCALAPPDATA "Programs\MswiCiExtrasFolder"
+          if (Test-Path $byFolder) {
+            $u = Join-Path $byFolder "uninstall.exe"
+            if (Test-Path $u) { Start-Process -FilePath $u -ArgumentList "--silent" -Wait }
+            Start-Sleep -Seconds 6
+            Remove-Item $byFolder -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: 上傳安裝紀錄（不管成功失敗都上傳，方便事後排查）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: extra-fields-logs
+          path: |
+            ex_install.log
+            ex_d.log
+            ex_dir.log
+            ex_nods.log
+          if-no-files-found: ignore
