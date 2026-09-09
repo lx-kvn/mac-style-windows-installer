@@ -1582,6 +1582,25 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "打包（低版本）失敗" }
           Move-Item "dist\Setup_MswiCiMinVerLow.exe" "mv_out\Setup_MswiCiMinVerLow.exe" -Force
 
+      - name: 先看這台機器上的 VC++ 登錄表長什麼樣
+        shell: pwsh
+        run: |
+          # dependency_install._check_vcredist_x64() 查的是 64 位元檢視下的
+          # HKLM\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64。
+          # 那個可轉散發套件的安裝程式本身是 32 位元的，因此那把機碼也可能
+          # 落在 WOW6432Node 底下——兩邊都印出來，才分得出「真的沒裝」與
+          # 「偵測找錯地方」。
+          foreach ($p in @(
+              "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64",
+              "HKLM:\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\x64")) {
+            if (Test-Path $p) {
+              $v = Get-ItemProperty $p
+              Write-Host ("有：{0}  Installed={1}  Version={2}" -f $p, $v.Installed, $v.Version)
+            } else {
+              Write-Host ("沒有：{0}" -f $p)
+            }
+          }
+
       - name: 低版本那顆不該提示（同時是前提檢查）
         shell: pwsh
         run: |
@@ -1634,4 +1653,136 @@ jobs:
           path: |
             mv_low.log
             mv_high.log
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # 安裝前的兩道檢查：主程式執行中偵測，以及磁碟空間。
+  #
+  # 執行中偵測用同一顆安裝檔跑兩次，中間只差「那支程式有沒有在跑」。同一個
+  # 指令、不同結果，那是這道檢查真的有執行的證據——只驗「程式在跑時裝不
+  # 起來」的話，安裝因為別的原因失敗也會通過。
+  #
+  # 磁碟空間只驗那段檢查有執行（紀錄裡有那一行）。要驗它的判斷正不正確，得把
+  # 磁碟塞到剩下不夠的程度，那不是 runner 上做得到的事。
+  test-preinstall-checks:
+    runs-on: windows-latest
+
+    env:
+      PYTHONUTF8: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 準備 app_dir 與打包
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path pre_app | Out-Null
+          # 用 notepad 當替身：它是一支開得起來、關得掉、而且會一直留在行程
+          # 表裡的視窗程式，正好是這道偵測要找的那種。
+          Copy-Item "$env:WINDIR\System32\notepad.exe" "pre_app\app.exe"
+
+          $config = @{
+            app_dir          = "pre_app"
+            png_icon         = "branding/icon.png"
+            ico_icon         = "branding/icon.ico"
+            app_name         = "MswiCiPreCheck"
+            version          = "1.0.0"
+            publisher        = "mswi-ci"
+            exe_name         = "Setup_MswiCiPreCheck"
+            main_exe         = "app.exe"
+            no_admin_install = $true
+          }
+          $config | ConvertTo-Json -Depth 6 | Set-Content -Path pre_config.json -Encoding UTF8
+          python builder_cli.py pack --config pre_config.json
+          if ($LASTEXITCODE -ne 0) { throw "打包失敗" }
+          New-Item -ItemType Directory -Force -Path pre_out | Out-Null
+          Move-Item "dist\Setup_MswiCiPreCheck.exe" "pre_out\Setup_MswiCiPreCheck.exe" -Force
+
+      - name: 程式沒在跑時裝得起來（對照組），順便驗磁碟空間那段有執行
+        shell: pwsh
+        run: |
+          $proc = Start-Process -FilePath "pre_out\Setup_MswiCiPreCheck.exe" `
+            -ArgumentList "/S", "/LOG=pre_ok.log" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "安裝失敗，exit code = $($proc.ExitCode)" }
+
+          $log = Get-Content pre_ok.log -Raw -Encoding UTF8
+          if ($log -notmatch "磁碟空間") {
+            throw "紀錄裡沒有磁碟空間檢查那一行——那段檢查沒有執行"
+          }
+          Write-Host "PASS: 程式沒在跑時裝得起來，磁碟空間那段有執行"
+
+      - name: 程式在跑時應該被擋下來
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:LOCALAPPDATA "Programs\MswiCiPreCheck"
+          $app = Start-Process -FilePath (Join-Path $installDir "app.exe") -PassThru
+          # 給它一點時間真的出現在行程表裡，否則偵測會看不到它，而這一輪就
+          # 變成第二次的乾淨安裝——會通過，卻什麼都沒驗到。
+          Start-Sleep -Seconds 5
+          $seen = Get-Process -Name "app" -ErrorAction SilentlyContinue
+          if (-not $seen) { throw "那支程式沒有留在行程表裡，這一輪的前提不成立" }
+
+          $proc = Start-Process -FilePath "pre_out\Setup_MswiCiPreCheck.exe" `
+            -ArgumentList "/S", "/LOG=pre_running.log" -Wait -PassThru
+          Write-Host "安裝結束碼：$($proc.ExitCode)"
+
+          $failures = @()
+          if ($proc.ExitCode -eq 0) {
+            $failures += "主程式正在執行中，安裝卻回報成功——這道偵測沒有生效"
+          }
+          $log = Get-Content pre_running.log -Raw -Encoding UTF8
+          if ($log -notmatch "執行中") {
+            $failures += "紀錄裡沒有說明是因為程式正在執行——使用者拿不到可以處理的原因"
+          }
+
+          Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+          if ($failures.Count -gt 0) { throw ($failures -join "`n") }
+          Write-Host "PASS: 程式在跑時被擋下來，而且說明了原因"
+
+      - name: 關掉之後又裝得起來
+        shell: pwsh
+        run: |
+          # 這一輪確認上一輪擋下來的原因真的是「程式在跑」，不是這顆安裝檔
+          # 從第二次起就裝不起來。
+          $proc = Start-Process -FilePath "pre_out\Setup_MswiCiPreCheck.exe" `
+            -ArgumentList "/S", "/LOG=pre_again.log" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+            throw "程式已經關掉了卻仍然裝不起來，exit code = $($proc.ExitCode)——上一輪擋下來的原因不是「程式在跑」"
+          }
+          Write-Host "PASS: 關掉之後又裝得起來"
+
+      - name: 收尾
+        if: always()
+        shell: pwsh
+        run: |
+          Get-Process -Name "app" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          $dir = Join-Path $env:LOCALAPPDATA "Programs\MswiCiPreCheck"
+          if (Test-Path $dir) {
+            $u = Join-Path $dir "uninstall.exe"
+            if (Test-Path $u) { Start-Process -FilePath $u -ArgumentList "--silent" -Wait }
+            Start-Sleep -Seconds 5
+            Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: 上傳安裝紀錄（不管成功失敗都上傳，方便事後排查）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: preinstall-checks-logs
+          path: |
+            pre_ok.log
+            pre_running.log
+            pre_again.log
           if-no-files-found: ignore
