@@ -54,6 +54,7 @@ MESSAGES = {
         "custom_dep.bad_sha256": "custom_dependencies 的「{key}」sha256 格式不正確，必須是 64 位十六進位字元（SHA-256 摘要）。",
         "custom_dep.builtin_clash": "custom_dependencies 的 key「{key}」跟內建的相依元件撞名，請改用其他名稱。",
         "custom_dep.duplicate": "custom_dependencies 的 key「{key}」重複了。",
+        "custom_dep.not_enabled": "custom_dependencies 的「{key}」沒有在 dependencies 清單裡啟用，這一筆完全不會被檢查。要啟用就把它加進 dependencies，不用的話就從 custom_dependencies 移除。",
         "custom_dep.insecure_url": "custom_dependencies 的「{key}」download_url 必須是 https:// 開頭，不接受未加密的下載連結。",
         "custom_dep.missing_fields": "custom_dependencies 裡每一筆都必須填 key、display_name、download_url、registry_check.path。",
         "custom_dep.not_object": "custom_dependencies 裡每一筆都必須是物件（字典）。",
@@ -109,6 +110,7 @@ MESSAGES = {
         "custom_dep.bad_sha256": "The sha256 for custom_dependencies entry \"{key}\" is malformed; it must be 64 hexadecimal characters (a SHA-256 digest).",
         "custom_dep.builtin_clash": "The custom_dependencies key \"{key}\" collides with a built-in prerequisite; use a different name.",
         "custom_dep.duplicate": "The custom_dependencies key \"{key}\" appears more than once.",
+        "custom_dep.not_enabled": "The custom_dependencies entry \"{key}\" is not enabled in the dependencies list, so it is never checked. Add it to dependencies to enable it, or remove it from custom_dependencies.",
         "custom_dep.insecure_url": "The download_url for custom_dependencies entry \"{key}\" must start with https:// — unencrypted download links are not accepted.",
         "custom_dep.missing_fields": "Every entry in custom_dependencies must fill in key, display_name, download_url and registry_check.path.",
         "custom_dep.not_object": "Every entry in custom_dependencies must be an object (a dictionary).",
@@ -684,6 +686,13 @@ def _validate_dependency_policy(dependencies, custom_dependencies_raw, bundle_de
             return None, None, _invalid("custom_dep.builtin_clash", lang, key=key)
         if key in seen_custom_keys:
             return None, None, _invalid("custom_dep.duplicate", lang, key=key)
+        # custom_dependencies 只提供 checker，實際要檢查哪幾個由 dependencies
+        # 決定（dependency_install.get_warnings() 走的是後者）。定義了卻沒有
+        # 列進去的那一筆完全不會被檢查，而使用者以為自己設了一個前置需求。
+        # 與 dependencies_min_version 沒啟用、bundle_dependencies 沒啟用是同
+        # 一種情形，處置也一致：擋下來，不默默放行。
+        if key not in dependencies:
+            return None, None, _invalid("custom_dep.not_enabled", lang, key=key)
         seen_custom_keys.add(key)
 
         # sha256（選填）：下載完成後、執行前用來驗證檔案完整性/沒被竄改，

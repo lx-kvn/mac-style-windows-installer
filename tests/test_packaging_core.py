@@ -592,15 +592,51 @@ class TestValidateAndBuildPackData(PackDataValidationTestBase):
             "key": "my_dep", "display_name": "X", "download_url": "https://example.test/x.exe",
             "registry_check": {"path": "Software\\X"},
         }
-        _, error = self._validate(self._base_data(custom_dependencies=[entry, dict(entry)]))
+        _, error = self._validate(self._base_data(
+            dependencies=["my_dep"], custom_dependencies=[entry, dict(entry)]))
         self.assertIsNotNone(error)
         self.assertIn("重複", error)
 
     def test_valid_custom_dependency_passes_through(self):
-        pack_data, error = self._validate(self._base_data(custom_dependencies=[{
-            "key": "my_dep", "display_name": "My Dep", "download_url": "https://example.test/x.exe",
-            "silent_args": ["/quiet"], "registry_check": {"hive": "HKLM", "path": "Software\\X"},
+        pack_data, error = self._validate(self._base_data(
+            dependencies=["my_dep"],
+            custom_dependencies=[{
+                "key": "my_dep", "display_name": "My Dep",
+                "download_url": "https://example.test/x.exe",
+                "silent_args": ["/quiet"],
+                "registry_check": {"hive": "HKLM", "path": "Software\\X"},
+            }]))
+        self.assertIsNone(error)
+        self.assertEqual(pack_data["custom_dependencies"][0]["key"], "my_dep")
+
+    def test_custom_dependency_not_enabled_is_rejected(self):
+        """定義了卻沒有列進 `dependencies`，那一筆完全不會被檢查。
+
+        `custom_dependencies` 只提供 checker，實際要檢查哪幾個由
+        `dependencies` 決定（`dependency_install.get_warnings()` 走的是後者）。
+        默默放行的話，使用者以為自己設定了一個前置需求，而安裝端從頭到尾
+        不會提到它——與 `dependencies_min_version` 沒啟用、以及
+        `bundle_dependencies` 沒啟用是同一種情形，處置也一致。
+
+        2026-09-09 在替這個欄位補 CI 驗證時發現：那一輪的設定就漏了這一行，
+        而打包完全沒有提醒。
+        """
+        _, error = self._validate(self._base_data(custom_dependencies=[{
+            "key": "my_dep", "display_name": "My Dep",
+            "download_url": "https://example.test/x.exe",
+            "registry_check": {"path": "Software\X"},
         }]))
+        self.assertIsNotNone(error)
+        self.assertIn("my_dep", error)
+
+    def test_custom_dependency_listed_in_dependencies_is_accepted(self):
+        pack_data, error = self._validate(self._base_data(
+            dependencies=["my_dep"],
+            custom_dependencies=[{
+                "key": "my_dep", "display_name": "My Dep",
+                "download_url": "https://example.test/x.exe",
+                "registry_check": {"path": "Software\X"},
+            }]))
         self.assertIsNone(error)
         self.assertEqual(pack_data["custom_dependencies"][0]["key"], "my_dep")
 
@@ -1294,7 +1330,7 @@ class TestValidateDependencyPolicy(unittest.TestCase):
 
     def test_valid_custom_dependency_passes_through(self):
         custom, bundle, error = packaging_core._validate_dependency_policy(
-            [], [{
+            ["my_dep"], [{
                 "key": "my_dep", "display_name": "X", "download_url": "https://x",
                 "registry_check": {"path": "SOFTWARE\\X"},
             }], []
@@ -1321,7 +1357,7 @@ class TestValidateDependencyPolicy(unittest.TestCase):
         程式，這支安裝程式預設是 --uac-admin 編譯的，等於是遠端程式碼
         執行。打包階段就要擋掉，不要等到使用者的機器上才出事。"""
         custom, bundle, error = packaging_core._validate_dependency_policy(
-            [], [{
+            ["my_dep"], [{
                 "key": "my_dep", "display_name": "X", "download_url": "http://example.test/x.exe",
                 "registry_check": {"path": "SOFTWARE\\X"},
             }], []
@@ -1331,7 +1367,7 @@ class TestValidateDependencyPolicy(unittest.TestCase):
 
     def test_https_download_url_is_accepted(self):
         custom, bundle, error = packaging_core._validate_dependency_policy(
-            [], [{
+            ["my_dep"], [{
                 "key": "my_dep", "display_name": "X", "download_url": "https://example.test/x.exe",
                 "registry_check": {"path": "SOFTWARE\\X"},
             }], []
@@ -1340,7 +1376,7 @@ class TestValidateDependencyPolicy(unittest.TestCase):
 
     def test_sha256_is_passed_through_and_normalized_to_lowercase(self):
         custom, bundle, error = packaging_core._validate_dependency_policy(
-            [], [{
+            ["my_dep"], [{
                 "key": "my_dep", "display_name": "X", "download_url": "https://example.test/x.exe",
                 "registry_check": {"path": "SOFTWARE\\X"},
                 "sha256": "ABCDEF0123456789" * 4,
@@ -1351,7 +1387,7 @@ class TestValidateDependencyPolicy(unittest.TestCase):
 
     def test_sha256_with_invalid_format_is_rejected(self):
         custom, bundle, error = packaging_core._validate_dependency_policy(
-            [], [{
+            ["my_dep"], [{
                 "key": "my_dep", "display_name": "X", "download_url": "https://example.test/x.exe",
                 "registry_check": {"path": "SOFTWARE\\X"},
                 "sha256": "not-a-valid-hash",
@@ -1369,7 +1405,7 @@ class TestValidateDependencyPolicy(unittest.TestCase):
         expected，會退回 exact-match 語意，變成 value==None 恆為 False，
         這個相依元件在任何機器上都會被誤判成未安裝）。"""
         custom, bundle, error = packaging_core._validate_dependency_policy(
-            [], [{
+            ["my_dep"], [{
                 "key": "my_dep", "display_name": "X", "download_url": "https://example.test/x.exe",
                 "registry_check": {"path": "SOFTWARE\\X", "min_version": "1.2.3", "enum_subkeys": True},
             }], []
@@ -1380,7 +1416,7 @@ class TestValidateDependencyPolicy(unittest.TestCase):
 
     def test_min_version_omitted_defaults_to_none(self):
         custom, bundle, error = packaging_core._validate_dependency_policy(
-            [], [{
+            ["my_dep"], [{
                 "key": "my_dep", "display_name": "X", "download_url": "https://example.test/x.exe",
                 "registry_check": {"path": "SOFTWARE\\X"},
             }], []
@@ -1391,7 +1427,7 @@ class TestValidateDependencyPolicy(unittest.TestCase):
 
     def test_sha256_omitted_defaults_to_none(self):
         custom, bundle, error = packaging_core._validate_dependency_policy(
-            [], [{
+            ["my_dep"], [{
                 "key": "my_dep", "display_name": "X", "download_url": "https://example.test/x.exe",
                 "registry_check": {"path": "SOFTWARE\\X"},
             }], []
@@ -1434,7 +1470,7 @@ class TestBuiltInDependencyKeysFollowDependencyDefs(unittest.TestCase):
             # 原本內建的 vcredist_x64：假清單底下已經不算內建了，可以被
             # 自訂相依元件使用同一個 key，不應該再被擋下來。
             custom, _, error = packaging_core._validate_dependency_policy(
-                [], [{
+                ["vcredist_x64"], [{
                     "key": "vcredist_x64", "display_name": "X", "download_url": "https://x",
                     "registry_check": {"path": "SOFTWARE\\X"},
                 }], []
