@@ -98,8 +98,16 @@ class TheGuestScript(unittest.TestCase):
         self.assertIn("Add-Content", script)
 
     def test_the_installer_path_is_quoted(self):
+        """含空白的路徑要包起來。用的是雙引號而不是單引號，因為解除安裝那
+        一端要啟動的是 `$env:LOCALAPPDATA\\Programs\\...\\uninstall.exe`，
+        單引號會讓那段環境變數原封不動地被當成檔名。"""
         script = drive.guest_script(r"C:\Users\Tester\Setup My App.exe", "My App")
-        self.assertIn("'C:\\Users\\Tester\\Setup My App.exe'", script)
+        self.assertIn('"C:\\Users\\Tester\\Setup My App.exe"', script)
+
+    def test_an_environment_variable_in_the_path_still_expands(self):
+        script = drive.guest_script(r"$env:LOCALAPPDATA\Programs\X\uninstall.exe",
+                                    "X")
+        self.assertIn('Start-Process -FilePath "$env:LOCALAPPDATA', script)
 
 
 class ItSaysWhatItIsDoing(unittest.TestCase):
@@ -179,6 +187,131 @@ class TheVerdict(unittest.TestCase):
         passed = drive.evaluate(self._report())
         self.assertEqual(passed.verdict, drive.PASS)
         self.assertNotIn("screenshot", passed.detail)
+
+
+class TheSameQuestionIsAskedBeforeAndAfter(unittest.TestCase):
+    """「安裝目錄在不在」要在拖曳前後各量一次。
+
+    只量後面那次的話，`install_dir_exists=True` 有可能是這台機器本來就裝著
+    ——那種情況下這一輪什麼都沒驗到，卻會是綠的。解除安裝那一端更明顯：
+    只量後面的話，「目錄不見了」在一台從來沒裝過的機器上無條件成立。
+    """
+
+    def test_the_script_probes_before_the_drag(self):
+        script = drive.guest_script(r"C:\Users\Tester\Setup.exe", "TestApp")
+        self.assertIn("install_dir_before", script)
+        self.assertLess(script.index("install_dir_before"),
+                        script.index("[Mouse]::Down()"))
+
+    def test_the_script_probes_after_the_drag_too(self):
+        script = drive.guest_script(r"C:\Users\Tester\Setup.exe", "TestApp")
+        self.assertLess(script.index("[Mouse]::Up()"),
+                        script.index("install_dir_exists"))
+
+    def test_a_directory_that_was_already_there_is_inconclusive(self):
+        """拖曳之前就已經裝著的話，拖曳之後「還在」證明不了任何事。"""
+        report = {"window_found": "True", "drag_sent": "True",
+                  "install_dir_before": "True", "main_exe_before": "True",
+                  "install_dir_exists": "True", "main_exe_exists": "True"}
+        self.assertEqual(drive.evaluate(report).verdict, drive.INCONCLUSIVE)
+
+    def test_an_old_report_without_the_before_reading_still_evaluates(self):
+        """既有的判準不因為多了這兩個鍵而改變：沒回報就當作沒有前置狀態。"""
+        report = {"window_found": "True", "drag_sent": "True",
+                  "install_dir_exists": "True", "main_exe_exists": "True"}
+        self.assertEqual(drive.evaluate(report).verdict, drive.PASS)
+
+
+class ItCanTypeIntoTheWindow(unittest.TestCase):
+    """密碼關卡要先在輸入框裡打字才過得去，那一頁擋在拖曳畫面之前。"""
+
+    def _script(self, **kw):
+        return drive.guest_script(r"C:\Users\Tester\Setup.exe", "TestApp",
+                                  click_before_drag=(0.5, 0.5), **kw)
+
+    def test_the_text_goes_out_as_keystrokes(self):
+        script = self._script(type_before_drag="hunter2")
+        self.assertIn("SendKeys", script)
+        self.assertIn("hunter2", script)
+
+    def test_it_types_after_clicking_the_field_and_before_dragging(self):
+        """順序錯了就打在沒有焦點的地方，而報告上看起來像「密碼錯」。"""
+        script = self._script(type_before_drag="hunter2")
+        self.assertLess(script.index("pre_click_sent"), script.index("SendKeys"))
+        # 比對的是**拖曳的起點**，不是第一個 `[Mouse]::Down()`——先點一下
+        # 那一段自己也有一個，比到它等於什麼都沒檢查。
+        self.assertLess(script.index("SendKeys"),
+                        script.index("[Mouse]::MoveTo($iconX"))
+
+    def test_the_confirm_button_is_clicked_after_typing(self):
+        script = self._script(type_before_drag="hunter2",
+                              click_after_typing=(0.6, 0.78))
+        self.assertIn("post_click_at", script)
+        self.assertLess(script.index("SendKeys"), script.index("post_click_at"))
+
+    def test_characters_that_mean_something_to_sendkeys_are_escaped(self):
+        """`+^%~(){}[]` 在 SendKeys 裡是控制字元，原樣送出去打進去的是別的
+        東西——而那一頁只會回報「密碼錯誤」，看不出是送法的問題。"""
+        script = self._script(type_before_drag="a+b^c%d")
+        self.assertIn("a{+}b{^}c{%}d", script)
+
+    def test_no_typing_means_no_keyboard_code_at_all(self):
+        script = self._script()
+        self.assertNotIn("SendKeys", script)
+
+
+class ItCanPressTheButtonOnTheResultScreen(unittest.TestCase):
+    """結果畫面上那顆按鈕按下去才算走完。
+
+    真實量到的：拖到垃圾桶之後 `app.exe` 已經不見了，安裝目錄卻還在——整個
+    目錄由 `self_delete` 排出來的背景指令刪掉，而那段指令要等使用者在完成
+    畫面按下「完成」才會排（見 `uninstall.py` 的 `finish_and_exit()`）。
+    只量到那一步就收工的話，「目錄還在」會被誤判成解除安裝失敗。
+    """
+
+    def _script(self, **kw):
+        return drive.guest_script(r"C:\Users\Tester\Setup.exe", "TestApp", **kw)
+
+    def test_it_clicks_after_the_drag_has_settled(self):
+        script = self._script(click_after_settle=(0.5, 0.668))
+        self.assertIn("finish_click_at", script)
+        self.assertLess(script.index("[Mouse]::Up()"),
+                        script.index("finish_click_at"))
+
+    def test_it_measures_the_same_thing_again_afterwards(self):
+        script = self._script(click_after_settle=(0.5, 0.668))
+        self.assertIn("install_dir_after_finish", script)
+        self.assertLess(script.index("finish_click_at"),
+                        script.index("install_dir_after_finish"))
+
+    def test_without_the_click_there_is_no_second_reading(self):
+        """沒按那顆按鈕就不該回報按完之後的狀態——回報一個沒發生過的
+        動作的結果，判準會拿它當證據。"""
+        script = self._script()
+        self.assertNotIn("install_dir_after_finish", script)
+
+
+class TheWindowAndTheEndpointsCanBeSwapped(unittest.TestCase):
+    """解除安裝那一端走同一段腳本，只換視窗標題與兩個端點。"""
+
+    def test_the_title_and_the_endpoints_reach_the_script(self):
+        script = drive.guest_script(r"C:\Users\Tester\uninstall.exe", "TestApp",
+                                    window_title="解除安裝",
+                                    icon_at=(0.287, 0.442),
+                                    target_at=(0.716, 0.442))
+        self.assertIn("解除安裝", script)
+        self.assertIn("0.287", script)
+        self.assertIn("0.716", script)
+        # 要找的是**尋找視窗那一行**換過了，不是「安裝應用程式」這幾個字
+        # 從腳本裡消失——那幾個字也出現在說明用的註解裡，拿它當判準會抓到
+        # 註解、抓不到真正的行為。
+        self.assertIn("FindByTitle('解除安裝')", script)
+        self.assertNotIn("FindByTitle('" + drive.WINDOW_TITLE + "')", script)
+
+    def test_leaving_them_out_keeps_the_install_side_values(self):
+        script = drive.guest_script(r"C:\Users\Tester\Setup.exe", "TestApp")
+        self.assertIn(drive.WINDOW_TITLE, script)
+        self.assertIn(str(drive.ICON_AT[0]), script)
 
 
 if __name__ == "__main__":

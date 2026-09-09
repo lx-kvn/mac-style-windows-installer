@@ -92,9 +92,24 @@ def drag_path(start, end, steps=24):
     return points
 
 
+def escape_for_sendkeys(text):
+    """把 `SendKeys` 會當成控制字元的那幾個字包起來。
+
+    `+^%~(){}[]` 原樣送出去打進去的是別的東西（`+` 是 Shift、`~` 是 Enter、
+    `(` 開始一個群組）。密碼欄位對這種錯誤只會回報「密碼錯誤」，看不出是
+    送法的問題。`{{}}` 要先處理，否則後面幾個補上的大括號會再被跳脫一次。
+    """
+    text = text.replace("{", "{{}").replace("}", "{}}")
+    for char in "+^%~()[]":
+        text = text.replace(char, "{" + char + "}")
+    return text.replace("'", "''")
+
+
 def guest_script(setup_path, app_name, install_dir=None, main_exe="app.exe",
                  steps=24, click_before_drag=None, window_title=None,
-                 icon_at=None, target_at=None):
+                 icon_at=None, target_at=None, settle_seconds=12,
+                 type_before_drag=None, click_after_typing=None,
+                 click_after_settle=None, after_finish_seconds=20):
     """產生客體端要跑的 PowerShell。
 
     先等視窗出現並取得它的位置，才開始碰滑鼠——視窗還沒出現就移動並按下，
@@ -116,6 +131,26 @@ def guest_script(setup_path, app_name, install_dir=None, main_exe="app.exe",
     """
     install_dir = install_dir or (r"$env:LOCALAPPDATA\Programs\\" + app_name)
     window_title = window_title or WINDOW_TITLE
+    finish = ""
+    if click_after_settle:
+        finish_x, finish_y = click_after_settle
+        finish = f"""
+# 結果畫面上那顆按鈕。解除安裝的整個目錄要按下「完成」之後才會被背景指令
+# 刪掉（見 uninstall.py 的 finish_and_exit()），不按的話量到的是「檔案
+# 都不見了、資料夾還在」那個中間狀態。
+$finishX = $rect.Left + [int]($w * {finish_x})
+$finishY = $rect.Top  + [int]($h * {finish_y})
+[Mouse]::MoveTo($finishX, $finishY)
+Start-Sleep -Milliseconds 300
+[Mouse]::Down()
+Start-Sleep -Milliseconds 120
+[Mouse]::Up()
+Note 'finish_click_at' "$finishX,$finishY"
+# 背景那段指令自己還帶一段延遲才動手。
+Start-Sleep -Seconds {after_finish_seconds}
+Note 'install_dir_after_finish' (Test-Path $installDir)
+Note 'main_exe_after_finish' (Test-Path (Join-Path $installDir '{main_exe}'))
+"""
     icon_x, icon_y = icon_at or ICON_AT
     target_x, target_y = target_at or TARGET_AT
     pre_click = ""
@@ -134,6 +169,30 @@ Start-Sleep -Milliseconds 120
 Note 'pre_click_sent' 'True'
 Note 'pre_click_at' "$clickX,$clickY"
 # 按下之後畫面要換頁，馬上拖曳會拖在還沒消失的那一頁上。
+Start-Sleep -Seconds 3
+"""
+        if type_before_drag is not None:
+            # 打字接在點擊之後：輸入框要先拿到焦點，否則按鍵送到別的地方，
+            # 而那一頁只會回報「密碼錯誤」，看不出是送法的問題。這一段因此
+            # 併進 pre_click，順序由結構保證而不是靠呼叫端記得。
+            pre_click += f"""
+$wshell = New-Object -ComObject WScript.Shell
+$wshell.SendKeys('{escape_for_sendkeys(type_before_drag)}')
+Note 'typed' 'True'
+Start-Sleep -Milliseconds 500
+"""
+            if click_after_typing:
+                post_x, post_y = click_after_typing
+                pre_click += f"""
+$postX = $rect.Left + [int]($w * {post_x})
+$postY = $rect.Top  + [int]($h * {post_y})
+[Mouse]::MoveTo($postX, $postY)
+Start-Sleep -Milliseconds 300
+[Mouse]::Down()
+Start-Sleep -Milliseconds 120
+[Mouse]::Up()
+Note 'post_click_at' "$postX,$postY"
+# 送出之後畫面要換頁，馬上拖曳會拖在還沒消失的那一頁上。
 Start-Sleep -Seconds 3
 """
 
@@ -232,7 +291,10 @@ public class Mouse {{
 }}
 "@
 
-Start-Process -FilePath '{setup_path}'
+# 路徑用雙引號，讓 `$env:LOCALAPPDATA` 這種寫法在客體端展開。解除安裝那一端
+# 要啟動的是安裝目錄底下的 uninstall.exe，而那個目錄的絕對位置取決於客體的
+# 使用者名稱——寫死使用者名稱會讓這支工具綁在某一台機器上。
+Start-Process -FilePath "{setup_path}"
 
 # 等視窗出現。視窗還沒出現就開始移動游標並按下，點到的是桌面，而報告上會
 # 看起來像「拖了但沒有反應」。
@@ -265,6 +327,13 @@ $rect = New-Object Mouse+RECT
 $w = $rect.Right - $rect.Left
 $h = $rect.Bottom - $rect.Top
 Note 'window_rect' "$($rect.Left),$($rect.Top),$w,$h"
+
+# 拖曳之前先量一次同一個表達式。只量後面那次的話，兩端都有一個永遠成立的
+# 讀法：安裝端的「目錄在」有可能是這台機器本來就裝著，解除安裝端的「目錄
+# 不見了」在從來沒裝過的機器上無條件為真。
+$installDir = "{install_dir}"
+Note 'install_dir_before' (Test-Path $installDir)
+Note 'main_exe_before' (Test-Path (Join-Path $installDir '{main_exe}'))
 {pre_click}
 $iconX   = $rect.Left + [int]($w * {icon_x})
 $iconY   = $rect.Top  + [int]($h * {icon_y})
@@ -288,13 +357,14 @@ Start-Sleep -Milliseconds 300
 [Mouse]::Up()
 Note 'drag_sent' 'True'
 
-# 安裝需要一點時間，而且結果畫面出現之後才算走完。
-Start-Sleep -Seconds 12
+# 落地要一點時間，而且結果畫面出現之後才算走完。解除安裝還要把整個目錄
+# 拿掉、再把自己刪掉，比安裝久，因此這段等待由呼叫端決定。
+Start-Sleep -Seconds {settle_seconds}
 
-$installDir = "{install_dir}"
 Note 'install_dir_exists' (Test-Path $installDir)
 Note 'main_exe_exists' (Test-Path (Join-Path $installDir '{main_exe}'))
 Note 'result_screen' ([Mouse]::FindByTitle('{window_title}') -ne [IntPtr]::Zero)
+{finish}
 Note 'done' 'True'
 """
 
@@ -317,6 +387,10 @@ def evaluate(report):
                       "安裝精靈的視窗沒有出現，這一輪沒有測到拖曳。")
     if report["drag_sent"] != "True":
         return Result(name, INCONCLUSIVE, "滑鼠事件沒有送出。")
+    if report.get("install_dir_before") == "True":
+        # 拖曳之前就已經裝著的話，拖曳之後「還在」不是這個手勢的功勞。
+        return Result(name, INCONCLUSIVE,
+                      "拖曳之前安裝目錄就已經存在，這一輪量不出手勢的效果。")
 
     problems = [key for key in ("install_dir_exists", "main_exe_exists")
                 if report[key] != "True"]
@@ -342,24 +416,40 @@ def parse_report(text):
 
 
 def run(vm, setup_path, app_name, work_dir, main_exe="app.exe",
-        screenshot=None, log=print, click_before_drag=None):
+        screenshot=None, log=print, click_before_drag=None,
+        remote_target=None, window_title=None, icon_at=None, target_at=None,
+        settle_seconds=12, type_before_drag=None, click_after_typing=None,
+        click_after_settle=None):
     """把安裝檔送進客體、在桌面上實際拖一次、取回結果。
 
     腳本必須以 `interactive=True` 執行：拖曳要發生在使用者看得到的桌面工作
     階段上，工作階段 0 沒有可以操作的桌面。
+
+    `remote_target`：要啟動的程式已經在客體裡（例如安裝完才存在的
+    `uninstall.exe`），這時候 `setup_path` 不會被送進去。
     """
     from tools import vms
 
-    remote_setup = GUEST_DIR + "\\" + os.path.basename(setup_path)
-    size_mb = os.path.getsize(setup_path) / (1024 * 1024)
-    with stage(f"把安裝檔送進客體（{size_mb:.0f} MB）", log=log):
-        # 這一步最花時間，而且沒有任何外顯跡象——不報出來就看不出是不是卡住。
-        vm.copy_in(setup_path, remote_setup)
+    if remote_target:
+        remote_setup = remote_target
+    else:
+        remote_setup = GUEST_DIR + "\\" + os.path.basename(setup_path)
+        size_mb = os.path.getsize(setup_path) / (1024 * 1024)
+        with stage(f"把安裝檔送進客體（{size_mb:.0f} MB）", log=log):
+            # 這一步最花時間，而且沒有任何外顯跡象——不報出來就看不出是不是
+            # 卡住。
+            vm.copy_in(setup_path, remote_setup)
 
     local_script = os.path.join(work_dir, "drive_installer.ps1")
     vms.write_guest_script(local_script,
                            guest_script(remote_setup, app_name, main_exe=main_exe,
-                                        click_before_drag=click_before_drag))
+                                        click_before_drag=click_before_drag,
+                                        window_title=window_title,
+                                        icon_at=icon_at, target_at=target_at,
+                                        settle_seconds=settle_seconds,
+                                        type_before_drag=type_before_drag,
+                                        click_after_typing=click_after_typing,
+                                        click_after_settle=click_after_settle))
     remote_script = GUEST_DIR + "\\" + os.path.basename(local_script)
     with stage("送入腳本", log=log):
         vm.copy_in(local_script, remote_script)
