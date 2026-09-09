@@ -1688,9 +1688,11 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path pre_app | Out-Null
-          # 用 notepad 當替身：它是一支開得起來、關得掉、而且會一直留在行程
-          # 表裡的視窗程式，正好是這道偵測要找的那種。
-          Copy-Item "$env:WINDIR\System32\notepad.exe" "pre_app\app.exe"
+          # 用 cmd.exe 的複本當替身，不用 notepad：後者在新版 Windows 上是個
+          # 轉接殼，啟動之後把工作交給封裝版的記事本、自己就退場了，因此
+          # tasklist 上留不住——而這道偵測要的正是「那支程式還在」（2026-09-09
+          # 實測：啟動後五秒就找不到它，這個 job 因此紅過一次）。
+          Copy-Item "$env:WINDIR\System32\cmd.exe" "pre_app\app.exe"
 
           $config = @{
             app_dir          = "pre_app"
@@ -1733,7 +1735,10 @@ jobs:
         shell: pwsh
         run: |
           $installDir = Join-Path $env:LOCALAPPDATA "Programs\MswiCiPreCheck"
-          $app = Start-Process -FilePath (Join-Path $installDir "app.exe") -PassThru
+          # 帶一個長時間的 ping 讓它持續存在。不用 timeout：它需要主控台的
+          # 輸入控制代碼，在隱藏視窗下會以「不支援輸入重新導向」失敗。
+          $app = Start-Process -FilePath (Join-Path $installDir "app.exe") `
+            -ArgumentList "/c", "ping -n 300 127.0.0.1" -PassThru -WindowStyle Hidden
           # 給它一點時間真的出現在行程表裡，否則偵測會看不到它，而這一輪就
           # 變成第二次的乾淨安裝——會通過，卻什麼都沒驗到。
           Start-Sleep -Seconds 5
