@@ -272,6 +272,10 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path admin_app | Out-Null
+          # local_appdata_files 指定的那一支。這個 job 的主安裝目錄在
+          # Program Files，而這個欄位要求它落在 %LOCALAPPDATA%——兩者不同層
+          # 才分得出這個欄位有沒有生效。
+          Copy-Item "$env:WINDIR\System32\notepad.exe" "admin_app\helper.exe"
           Copy-Item "$env:WINDIR\System32\notepad.exe" admin_app\app.exe
           Set-Content -Path admin_app\readme.txt -Value "elevated payload" -Encoding UTF8
 
@@ -296,6 +300,7 @@ jobs:
               start_type        = "demand"
             }
             create_restore_point_before_install = $true
+            local_appdata_files = @("helper.exe")
           }
           $config | ConvertTo-Json -Depth 5 | Set-Content -Path admin_config.json -Encoding UTF8
           Get-Content admin_config.json
@@ -330,6 +335,14 @@ jobs:
           Check "解除安裝登錄表項目存在（HKLM，no_admin_install=false）" `
             (Test-Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\MswiCiElevated")
           Check "Windows 服務已註冊" ([bool](Get-Service -Name "MswiCiElevatedSvc" -ErrorAction SilentlyContinue))
+
+          # local_appdata_files：正向與反向。只驗「檔案在使用者目錄」的話，
+          # 這個欄位被忽略而兩個位置都放了一份時也會通過。
+          $userDir = Join-Path $env:LOCALAPPDATA "Programs\MswiCiElevated"
+          Check "local_appdata_files 指定的檔案落在使用者目錄" `
+            (Test-Path (Join-Path $userDir "helper.exe"))
+          Check "那個檔案沒有同時留在主安裝目錄" `
+            (-not (Test-Path (Join-Path $installDir "helper.exe")))
 
           # 已知限制：System Restore/Volume Shadow Copy 在 GitHub 的
           # Windows Server 系 runner 上不保證存在，只警告不失敗。這一項
@@ -381,6 +394,8 @@ jobs:
           Check "解除安裝登錄表項目已移除" `
             (-not (Test-Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\MswiCiElevated"))
           Check "Windows 服務已移除" (-not [bool](Get-Service -Name "MswiCiElevatedSvc" -ErrorAction SilentlyContinue))
+          Check "使用者目錄那一份也已移除" `
+            (-not (Test-Path (Join-Path (Join-Path $env:LOCALAPPDATA "Programs\MswiCiElevated") "helper.exe")))
 
           if ($failures.Count -gt 0) {
             Write-Host "共 $($failures.Count) 項驗證失敗：$($failures -join '、')"
@@ -1491,4 +1506,132 @@ jobs:
             ex_d.log
             ex_dir.log
             ex_nods.log
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # dependencies_min_version：內建相依元件的最低版本。
+  #
+  # 這個欄位只支援內建的 vcredist_x64／dotnet_desktop（自訂的走各自的
+  # registry_check.min_version）。因此驗它一定要用真的裝在 runner 上的那一個，
+  # 而「裝了沒」不由這個 job 控制——所以改用兩顆安裝檔互為對照：最低版本高到
+  # 不可能達到的那顆必須提示，低到一定達到的那顆必須不提示。同一台機器、同一
+  # 個相依元件，只有這個欄位不同，輸出卻不同。
+  #
+  # 低版本那顆同時是前提檢查：它要是也提示了，代表這台 runner 上根本沒有裝
+  # VC++ Redistributable，那麼高版本那顆的「有提示」就不能歸因於這個欄位。
+  test-dependencies-min-version:
+    runs-on: windows-latest
+
+    env:
+      PYTHONUTF8: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 準備 app_dir
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path mv_app | Out-Null
+          Copy-Item "$env:WINDIR\System32\notepad.exe" "mv_app\app.exe"
+
+      - name: 打包兩顆——最低版本一高一低
+        shell: pwsh
+        run: |
+          $base = @{
+            app_dir          = "mv_app"
+            png_icon         = "branding/icon.png"
+            ico_icon         = "branding/icon.ico"
+            version          = "1.0.0"
+            publisher        = "mswi-ci"
+            main_exe         = "app.exe"
+            no_admin_install = $true
+            dependencies     = @("vcredist_x64")
+          }
+
+          $high = $base.Clone()
+          $high.app_name = "MswiCiMinVerHigh"
+          $high.exe_name = "Setup_MswiCiMinVerHigh"
+          # 高到不可能達到：不管 runner 上裝的是哪一版都算「太舊」。
+          $high.dependencies_min_version = @{ vcredist_x64 = "99.0.0.0" }
+          $high | ConvertTo-Json -Depth 6 | Set-Content -Path mv_high.json -Encoding UTF8
+
+          $low = $base.Clone()
+          $low.app_name = "MswiCiMinVerLow"
+          $low.exe_name = "Setup_MswiCiMinVerLow"
+          # 低到一定達到：只要 runner 上有裝，就算符合。
+          $low.dependencies_min_version = @{ vcredist_x64 = "1.0.0.0" }
+          $low | ConvertTo-Json -Depth 6 | Set-Content -Path mv_low.json -Encoding UTF8
+
+          # 每編完一顆就搬走：build_all() 開頭會清空整個 dist/。
+          New-Item -ItemType Directory -Force -Path mv_out | Out-Null
+          python builder_cli.py pack --config mv_high.json
+          if ($LASTEXITCODE -ne 0) { throw "打包（高版本）失敗" }
+          Move-Item "dist\Setup_MswiCiMinVerHigh.exe" "mv_out\Setup_MswiCiMinVerHigh.exe" -Force
+          python builder_cli.py pack --config mv_low.json
+          if ($LASTEXITCODE -ne 0) { throw "打包（低版本）失敗" }
+          Move-Item "dist\Setup_MswiCiMinVerLow.exe" "mv_out\Setup_MswiCiMinVerLow.exe" -Force
+
+      - name: 低版本那顆不該提示（同時是前提檢查）
+        shell: pwsh
+        run: |
+          $proc = Start-Process -FilePath "mv_out\Setup_MswiCiMinVerLow.exe" `
+            -ArgumentList "/S", "/LOG=mv_low.log" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "安裝失敗，exit code = $($proc.ExitCode)" }
+          $log = Get-Content mv_low.log -Raw -Encoding UTF8
+          if ($log -match "Visual C\+\+ Redistributable") {
+            throw "最低版本設成 1.0.0.0 仍然提示缺少——這台 runner 上沒有裝 VC++ Redistributable，高版本那一輪的結果無從歸因"
+          }
+          Write-Host "PASS: 低版本沒有提示，前提成立（runner 上有裝 VC++）"
+
+          $installDir = Join-Path $env:LOCALAPPDATA "Programs\MswiCiMinVerLow"
+          Start-Process -FilePath (Join-Path $installDir "uninstall.exe") `
+            -ArgumentList "--silent" -Wait | Out-Null
+          Start-Sleep -Seconds 6
+
+      - name: 高版本那顆必須提示
+        shell: pwsh
+        run: |
+          $proc = Start-Process -FilePath "mv_out\Setup_MswiCiMinVerHigh.exe" `
+            -ArgumentList "/S", "/LOG=mv_high.log" -Wait -PassThru
+          # 相依元件缺少只會記錄警告、不阻擋安裝。
+          if ($proc.ExitCode -ne 0) { throw "相依元件版本太舊不該讓安裝失敗，exit code = $($proc.ExitCode)" }
+          $log = Get-Content mv_high.log -Raw -Encoding UTF8
+          if ($log -notmatch "Visual C\+\+ Redistributable") {
+            throw "最低版本設成 99.0.0.0 卻沒有提示——dependencies_min_version 沒有生效"
+          }
+          Write-Host "PASS: 高版本提示了，這個欄位有生效"
+
+      - name: 收尾
+        if: always()
+        shell: pwsh
+        run: |
+          foreach ($name in @("MswiCiMinVerLow", "MswiCiMinVerHigh")) {
+            $dir = Join-Path $env:LOCALAPPDATA ("Programs\" + $name)
+            if (Test-Path $dir) {
+              $u = Join-Path $dir "uninstall.exe"
+              if (Test-Path $u) { Start-Process -FilePath $u -ArgumentList "--silent" -Wait }
+              Start-Sleep -Seconds 5
+              Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+          }
+
+      - name: 上傳安裝紀錄（不管成功失敗都上傳，方便事後排查）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: min-version-logs
+          path: |
+            mv_low.log
+            mv_high.log
           if-no-files-found: ignore
