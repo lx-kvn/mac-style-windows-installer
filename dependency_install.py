@@ -97,9 +97,35 @@ def _read_registry_version(hive, path, value_name=None, enum_subkeys=False):
                     i += 1
                 return max(versions, key=parse_version) if versions else None
             val, _ = winreg.QueryValueEx(key, value_name)
-            return str(val)
+            return _normalise_version_string(str(val))
     except Exception:
         return None
+
+
+def _normalise_version_string(raw):
+    """把登錄表讀到的版本字串轉成 `version_compare` 認得的形狀。
+
+    VC++ 可轉散發套件寫進 `Version` 值的字串開頭有一個 `v`（2026-09-09 於
+    GitHub Actions 的 windows-latest 實測：`v14.51.36247.00`）。而
+    `parse_version()` 每一段只取開頭連續的數字，`v14` 沒有開頭數字，主版本號
+    因此被讀成 0——`v14.51.36247.00` 解析出來是 `(0, 51, 36247, 0)`，比任何
+    設定過的最低版本都小。
+
+    後果是安靜的：只要 `dependencies_min_version` 給了 `vcredist_x64`，不管
+    使用者裝的是哪一版都會被判定成太舊，安裝檔一律叫他去重裝，而這不會報錯，
+    只是多一則提示。
+
+    只剝開頭那一個 `v` 與前後空白，不做其他猜測：讀到看不懂的東西時維持原樣，
+    讓比較那一層自己判斷，比在這裡自作主張安全。
+
+    修在這裡而不是 `parse_version()`：那個 `v` 是 VC++ 寫入時的格式，屬於外部
+    契約的轉接；`parse_version()` 服務的是本專案自己的版本號格式（ADR-0003），
+    不為了另一個系統的寫法而放寬。
+    """
+    text = raw.strip()
+    if text[:1] in ("v", "V"):
+        return text[1:]
+    return text
 
 
 def _generic_registry_version_check(hive, path, value_name=None, enum_subkeys=False, min_version=None):

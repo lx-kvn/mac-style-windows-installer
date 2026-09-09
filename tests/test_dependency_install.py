@@ -277,5 +277,63 @@ class TestBundledDependencyIsAlsoVerified(unittest.TestCase):
         self.assertTrue(os.path.exists(self.bundled_path))
 
 
+class RegistryVersionStringsMayStartWithV(unittest.TestCase):
+    """VC++ 可轉散發套件寫進登錄表的 `Version` 值開頭有一個 `v`。
+
+    2026-09-09 於 GitHub Actions 的 windows-latest 實測，兩個檢視下都是：
+
+        HKLM\\SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\x64
+        Installed=1  Version=v14.51.36247.00
+
+    而 `version_compare.parse_version()` 每一段只取開頭連續的數字，`v14` 沒有
+    開頭數字，因此主版本號被讀成 0——`v14.51.36247.00` 解析出來是
+    `(0, 51, 36247, 0)`，比任何設定過的最低版本都小。
+
+    後果是安靜的：只要 `dependencies_min_version` 給了 `vcredist_x64`，不管
+    使用者裝的是哪一版都會被判定成太舊，安裝檔一律叫他去重裝，而這件事不會
+    報錯，只是多一則提示。
+
+    修在讀登錄表這一層而不是 `parse_version()`：那個 `v` 是 VC++ 寫入時的
+    格式，屬於外部契約的轉接；`parse_version()` 服務的是本專案自己的版本號
+    格式（見 ADR-0003），不該為了另一個系統的寫法而放寬。
+    """
+
+    def setUp(self):
+        self.fake_reg = FakeWinReg()
+        self.patcher = mock.patch.dict(sys.modules, {"winreg": self.fake_reg})
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    def _read(self, value):
+        self.fake_reg.set_hklm("Software\\Probe", {"Version": value})
+        return di._read_registry_version("HKLM", "Software\\Probe",
+                                         value_name="Version")
+
+    def test_a_leading_v_is_stripped(self):
+        self.assertEqual(self._read("v14.51.36247.00"), "14.51.36247.00")
+
+    def test_an_uppercase_v_is_stripped_too(self):
+        self.assertEqual(self._read("V14.51.36247.00"), "14.51.36247.00")
+
+    def test_a_plain_version_is_untouched(self):
+        self.assertEqual(self._read("14.51.36247.00"), "14.51.36247.00")
+
+    def test_surrounding_whitespace_is_trimmed(self):
+        self.assertEqual(self._read("  v14.0.0  "), "14.0.0")
+
+    def test_the_real_value_passes_a_low_minimum_and_fails_a_high_one(self):
+        """這一條才是這個修正真正要成立的事：實測到的那個字串，設定了低到一定
+        達到的最低版本時必須算符合、高到不可能達到時必須算不符合。兩個方向
+        都要驗——只驗一邊的話，「永遠回傳符合」或「永遠回傳不符合」各有一半
+        會通過。"""
+        self.fake_reg.set_hklm("Software\\Probe", {"Version": "v14.51.36247.00"})
+        self.assertTrue(di._generic_registry_version_check(
+            "HKLM", "Software\\Probe", value_name="Version", min_version="1.0.0.0"))
+        self.assertFalse(di._generic_registry_version_check(
+            "HKLM", "Software\\Probe", value_name="Version", min_version="99.0.0.0"))
+
+
 if __name__ == "__main__":
     unittest.main()

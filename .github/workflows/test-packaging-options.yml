@@ -1716,9 +1716,16 @@ jobs:
             -ArgumentList "/S", "/LOG=pre_ok.log" -Wait -PassThru
           if ($proc.ExitCode -ne 0) { throw "安裝失敗，exit code = $($proc.ExitCode)" }
 
-          $log = Get-Content pre_ok.log -Raw -Encoding UTF8
+          # 磁碟空間那一行寫在**安裝目錄裡的 install_log.txt**，不是 /LOG=
+          # 指定的那一份——安裝流程內部的 log() 進的是前者，而 /LOG= 那一份由
+          # run_silent_install() 自己維護，兩者不相通（見 installer_core 的
+          # 說明）。第一版找錯檔案，紅了一次。
+          $installDir = Join-Path $env:LOCALAPPDATA "Programs\MswiCiPreCheck"
+          $inner = Join-Path $installDir "install_log.txt"
+          if (-not (Test-Path $inner)) { throw "安裝目錄裡沒有 install_log.txt" }
+          $log = Get-Content $inner -Raw -Encoding UTF8
           if ($log -notmatch "磁碟空間") {
-            throw "紀錄裡沒有磁碟空間檢查那一行——那段檢查沒有執行"
+            throw "安裝紀錄裡沒有磁碟空間檢查那一行——那段檢查沒有執行"
           }
           Write-Host "PASS: 程式沒在跑時裝得起來，磁碟空間那段有執行"
 
