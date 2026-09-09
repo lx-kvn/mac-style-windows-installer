@@ -291,6 +291,34 @@ class ItCanPressTheButtonOnTheResultScreen(unittest.TestCase):
         self.assertNotIn("install_dir_after_finish", script)
 
 
+class ItWaitsForThePageBeforeTouchingIt(unittest.TestCase):
+    """視窗出現不等於那一頁畫好了。
+
+    真實抓到（2026-09-09，介面語言那一輪）：視窗第 13.5 秒出現，固定等 3 秒
+    之後就開始拖，而同一時間讀輔助使用樹只讀得到視窗外框的那幾個名稱——網頁
+    內容還沒有掛上去。那一輪因此「拖了但什麼都沒發生」，而報告上看起來像
+    拖曳手勢壞掉。改成等到樹上出現應用程式的名字為止。
+    """
+
+    def _script(self, **kw):
+        return drive.guest_script(r"C:\Users\Tester\Setup.exe", "TestApp", **kw)
+
+    def test_it_waits_for_the_application_name_to_appear(self):
+        script = self._script()
+        self.assertIn("page_ready", script)
+        self.assertIn("TestApp", script)
+        self.assertLess(script.index("page_ready"),
+                        script.index("[Mouse]::MoveTo($iconX"))
+
+    def test_it_reports_how_long_that_took(self):
+        """等了多久要說出來：卡在這一步與卡在下一步的處置不同。"""
+        self.assertIn("page_wait_seconds", self._script())
+
+    def test_a_page_that_never_appears_does_not_hang_forever(self):
+        script = self._script()
+        self.assertIn("$pageWaitSeconds = 90", script)
+
+
 class ItCanReadTheTextOnTheScreen(unittest.TestCase):
     """畫面上實際顯示的字要讀得回來，否則「介面是哪個語言」只能靠人看截圖。
 
@@ -313,8 +341,10 @@ class ItCanReadTheTextOnTheScreen(unittest.TestCase):
         self.assertLess(script.index("window_text"),
                         script.index("Note 'pre_click_sent'"))
 
-    def test_without_asking_there_is_no_accessibility_code(self):
-        self.assertNotIn("UIAutomationClient", self._script())
+    def test_without_asking_the_text_is_not_reported(self):
+        """輔助使用介面本來就會被用到（等頁面畫好那一步），這裡要確認的是
+        沒有要求時**不會多回報一份畫面文字**，而不是那段程式碼消失。"""
+        self.assertNotIn("Note 'window_text'", self._script())
 
     def test_it_can_read_the_result_screen_too(self):
         """安裝跑完之後畫面換成完成畫面，那一頁的字要另外讀一次。"""

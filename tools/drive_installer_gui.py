@@ -111,7 +111,14 @@ def _uia_snippet(key):
     走輔助使用介面：WebView2 把網頁內容的文字掛在那棵樹上，因此讀到的是
     使用者眼睛看到的字，不是程式碼裡的常數。
     """
-    return """
+    return _UIA_READ + """
+Note '""" + key + """' ($seen -join ' | ')
+"""
+
+
+# 讀一次輔助使用樹，結果留在 $seen。抽出來的理由是它有三個用途：等頁面畫好、
+# 拖曳前讀一次、拖曳後再讀一次。
+_UIA_READ = """
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 $element = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
@@ -125,7 +132,29 @@ if ($element) {
         if ($label -and $seen -notcontains $label) { $seen += $label }
     }
 }
-Note '""" + key + """' ($seen -join ' | ')
+"""
+
+
+def _wait_for_page(app_name, seconds=90):
+    """等到輔助使用樹上出現應用程式的名字為止。
+
+    視窗出現不等於那一頁畫好了。真實抓到（2026-09-09）：視窗第 13.5 秒出現，
+    固定等 3 秒之後就開始拖，而那時候樹上只有視窗外框的那幾個名稱——網頁內容
+    還沒掛上去，那一輪因此「拖了但什麼都沒發生」。應用程式的名字在兩種語言下
+    都一樣，拿它當判準不受介面語言影響。
+    """
+    return f"""
+$pageWaitSeconds = {seconds}
+$pageReady = $false
+$pageWaited = 0
+for ($i = 0; $i -lt ($pageWaitSeconds * 2); $i++) {{
+{_UIA_READ}
+    if ($seen -join ' | ' -like '*{app_name}*') {{ $pageReady = $true; break }}
+    Start-Sleep -Milliseconds 500
+    $pageWaited = $i / 2
+}}
+Note 'page_ready' $pageReady
+Note 'page_wait_seconds' $pageWaited
 """
 
 
@@ -176,6 +205,7 @@ Start-Sleep -Seconds {after_finish_seconds}
 Note 'install_dir_after_finish' (Test-Path $installDir)
 Note 'main_exe_after_finish' (Test-Path (Join-Path $installDir '{main_exe}'))
 """
+    wait_for_page = _wait_for_page(app_name)
     read_text = ""
     if dump_text:
         # 位置在點擊與拖曳之前——那些動作會換頁，之後讀到的是別一頁的字。
@@ -350,8 +380,7 @@ if ($hwnd -eq [IntPtr]::Zero) {{
     exit 1
 }}
 
-Start-Sleep -Seconds 3          # 讓 WebView2 把內容畫完
-
+{wait_for_page}
 $rect = New-Object Mouse+RECT
 [void][Mouse]::GetWindowRect($hwnd, [ref]$rect)
 $w = $rect.Right - $rect.Left
