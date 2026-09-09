@@ -291,6 +291,44 @@ class ItCanPressTheButtonOnTheResultScreen(unittest.TestCase):
         self.assertNotIn("install_dir_after_finish", script)
 
 
+class ItCanReadTheTextOnTheScreen(unittest.TestCase):
+    """畫面上實際顯示的字要讀得回來，否則「介面是哪個語言」只能靠人看截圖。
+
+    走的是輔助使用介面（UI Automation）：WebView2 會把網頁內容的文字掛在
+    那棵樹上，因此讀得到的是使用者眼睛看到的那幾個字，不是程式碼裡的常數。
+    """
+
+    def _script(self, **kw):
+        return drive.guest_script(r"C:\Users\Tester\Setup.exe", "TestApp", **kw)
+
+    def test_it_asks_the_accessibility_tree(self):
+        script = self._script(dump_text=True)
+        self.assertIn("UIAutomationClient", script)
+        self.assertIn("FromHandle", script)
+        self.assertIn("window_text", script)
+
+    def test_it_reads_before_touching_anything(self):
+        """點過、拖過之後畫面已經換頁，那時候讀到的是別一頁的字。"""
+        script = self._script(dump_text=True, click_before_drag=(0.5, 0.5))
+        self.assertLess(script.index("window_text"),
+                        script.index("Note 'pre_click_sent'"))
+
+    def test_without_asking_there_is_no_accessibility_code(self):
+        self.assertNotIn("UIAutomationClient", self._script())
+
+    def test_it_can_read_the_result_screen_too(self):
+        """安裝跑完之後畫面換成完成畫面，那一頁的字要另外讀一次。"""
+        script = self._script(dump_text_after=True)
+        self.assertIn("window_text_after", script)
+        self.assertLess(script.index("[Mouse]::Up()"),
+                        script.index("window_text_after"))
+
+    def test_the_two_readings_are_separate(self):
+        script = self._script(dump_text=True, dump_text_after=True)
+        self.assertLess(script.index("Note 'window_text'"),
+                        script.index("window_text_after"))
+
+
 class TheWindowAndTheEndpointsCanBeSwapped(unittest.TestCase):
     """解除安裝那一端走同一段腳本，只換視窗標題與兩個端點。"""
 

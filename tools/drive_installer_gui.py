@@ -105,11 +105,36 @@ def escape_for_sendkeys(text):
     return text.replace("'", "''")
 
 
+def _uia_snippet(key):
+    """讀出視窗裡（含 WebView2 網頁內容）所有節點的名稱。
+
+    走輔助使用介面：WebView2 把網頁內容的文字掛在那棵樹上，因此讀到的是
+    使用者眼睛看到的字，不是程式碼裡的常數。
+    """
+    return """
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$element = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
+$seen = @()
+if ($element) {
+    $found = $element.FindAll(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($node in $found) {
+        $label = $node.Current.Name
+        if ($label -and $seen -notcontains $label) { $seen += $label }
+    }
+}
+Note '""" + key + """' ($seen -join ' | ')
+"""
+
+
 def guest_script(setup_path, app_name, install_dir=None, main_exe="app.exe",
                  steps=24, click_before_drag=None, window_title=None,
                  icon_at=None, target_at=None, settle_seconds=12,
                  type_before_drag=None, click_after_typing=None,
-                 click_after_settle=None, after_finish_seconds=20):
+                 click_after_settle=None, after_finish_seconds=20,
+                 dump_text=False, dump_text_after=False):
     """產生客體端要跑的 PowerShell。
 
     先等視窗出現並取得它的位置，才開始碰滑鼠——視窗還沒出現就移動並按下，
@@ -151,12 +176,17 @@ Start-Sleep -Seconds {after_finish_seconds}
 Note 'install_dir_after_finish' (Test-Path $installDir)
 Note 'main_exe_after_finish' (Test-Path (Join-Path $installDir '{main_exe}'))
 """
+    read_text = ""
+    if dump_text:
+        # 位置在點擊與拖曳之前——那些動作會換頁，之後讀到的是別一頁的字。
+        read_text = _uia_snippet("window_text")
+    read_after = _uia_snippet("window_text_after") if dump_text_after else ""
     icon_x, icon_y = icon_at or ICON_AT
     target_x, target_y = target_at or TARGET_AT
-    pre_click = ""
+    pre_click = read_text
     if click_before_drag:
         click_x, click_y = click_before_drag
-        pre_click = f"""
+        pre_click += f"""
 # 先按下一顆按鈕再拖曳。位置與 icon/target 一樣是視窗矩形的比例，因此要等
 # 上面量到 $rect 之後才算得出來。
 $clickX = $rect.Left + [int]($w * {click_x})
@@ -364,6 +394,7 @@ Start-Sleep -Seconds {settle_seconds}
 Note 'install_dir_exists' (Test-Path $installDir)
 Note 'main_exe_exists' (Test-Path (Join-Path $installDir '{main_exe}'))
 Note 'result_screen' ([Mouse]::FindByTitle('{window_title}') -ne [IntPtr]::Zero)
+{read_after}
 {finish}
 Note 'done' 'True'
 """
@@ -419,7 +450,7 @@ def run(vm, setup_path, app_name, work_dir, main_exe="app.exe",
         screenshot=None, log=print, click_before_drag=None,
         remote_target=None, window_title=None, icon_at=None, target_at=None,
         settle_seconds=12, type_before_drag=None, click_after_typing=None,
-        click_after_settle=None):
+        click_after_settle=None, dump_text=False, dump_text_after=False):
     """把安裝檔送進客體、在桌面上實際拖一次、取回結果。
 
     腳本必須以 `interactive=True` 執行：拖曳要發生在使用者看得到的桌面工作
@@ -449,7 +480,9 @@ def run(vm, setup_path, app_name, work_dir, main_exe="app.exe",
                                         settle_seconds=settle_seconds,
                                         type_before_drag=type_before_drag,
                                         click_after_typing=click_after_typing,
-                                        click_after_settle=click_after_settle))
+                                        click_after_settle=click_after_settle,
+                                        dump_text=dump_text,
+                                        dump_text_after=dump_text_after))
     remote_script = GUEST_DIR + "\\" + os.path.basename(local_script)
     with stage("送入腳本", log=log):
         vm.copy_in(local_script, remote_script)
