@@ -1768,6 +1768,19 @@ jobs:
         run: |
           # 這一輪確認上一輪擋下來的原因真的是「程式在跑」，不是這顆安裝檔
           # 從第二次起就裝不起來。
+          #
+          # 先移除再裝：機器上已經裝著同一個東西，直接再裝一次會走進更新覆蓋
+          # 安裝那條路，而那條路在提權的 runner 上會被 upgrade.py 的安全防護
+          # 擋下來（舊版項目在 HKCU 且行程已提權即拒絕），與這裡要驗的執行中
+          # 偵測無關。2026-09-09 實際踩到，第三輪因此紅過一次。
+          $installDir = Join-Path $env:LOCALAPPDATA "Programs\MswiCiPreCheck"
+          $u = Join-Path $installDir "uninstall.exe"
+          if (Test-Path $u) {
+            Start-Process -FilePath $u -ArgumentList "--silent" -Wait | Out-Null
+            Start-Sleep -Seconds 6
+          }
+          if (Test-Path $installDir) { throw "移除之後安裝目錄仍然存在，第三輪的前提不成立" }
+
           $proc = Start-Process -FilePath "pre_out\Setup_MswiCiPreCheck.exe" `
             -ArgumentList "/S", "/LOG=pre_again.log" -Wait -PassThru
           if ($proc.ExitCode -ne 0) {
