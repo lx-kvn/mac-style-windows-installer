@@ -318,6 +318,15 @@ class ItWaitsForThePageBeforeTouchingIt(unittest.TestCase):
         script = self._script()
         self.assertIn("$pageWaitSeconds = 90", script)
 
+    def test_what_to_wait_for_can_be_changed(self):
+        """擋在前面的那幾頁（授權合約、密碼）上面沒有應用程式的名字。
+
+        不能改的話，那幾輪每一輪都會在這一步白等 90 秒到上限（實測過）。
+        """
+        script = self._script(wait_for_text="同意並繼續")
+        self.assertIn("'*同意並繼續*'", script)
+        self.assertNotIn("'*TestApp*'", script)
+
 
 class ItCanPressAButtonBeforeDragging(unittest.TestCase):
     """更新／降版那幾個對話框是安裝檔一開起來就問的，不是拖完才問。

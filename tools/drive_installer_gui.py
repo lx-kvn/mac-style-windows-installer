@@ -135,13 +135,15 @@ if ($element) {
 """
 
 
-def _wait_for_page(app_name, seconds=90):
-    """等到輔助使用樹上出現應用程式的名字為止。
+def _wait_for_page(wanted, seconds=90):
+    """等到輔助使用樹上出現指定的那串字為止。
 
     視窗出現不等於那一頁畫好了。真實抓到（2026-09-09）：視窗第 13.5 秒出現，
     固定等 3 秒之後就開始拖，而那時候樹上只有視窗外框的那幾個名稱——網頁內容
     還沒掛上去，那一輪因此「拖了但什麼都沒發生」。應用程式的名字在兩種語言下
-    都一樣，拿它當判準不受介面語言影響。
+    都一樣，拿它當判準不受介面語言影響。擋在前面的那幾頁（授權合約、密碼）
+    上面沒有那個名字，呼叫端可以改指定別的字串——不改的話這一步會白等
+    到上限（實測每輪 90 秒）。
     """
     return f"""
 $pageWaitSeconds = {seconds}
@@ -149,7 +151,7 @@ $pageReady = $false
 $pageWaited = 0
 for ($i = 0; $i -lt ($pageWaitSeconds * 2); $i++) {{
 {_UIA_READ}
-    if ($seen -join ' | ' -like '*{app_name}*') {{ $pageReady = $true; break }}
+    if ($seen -join ' | ' -like '*{wanted}*') {{ $pageReady = $true; break }}
     Start-Sleep -Milliseconds 500
     $pageWaited = $i / 2
 }}
@@ -214,7 +216,7 @@ def guest_script(setup_path, app_name, install_dir=None, main_exe="app.exe",
                  type_before_drag=None, click_after_typing=None,
                  click_after_settle=None, after_finish_seconds=20,
                  dump_text=False, dump_text_after=False,
-                 invoke_before_drag=None):
+                 invoke_before_drag=None, wait_for_text=None):
     """產生客體端要跑的 PowerShell。
 
     先等視窗出現並取得它的位置，才開始碰滑鼠——視窗還沒出現就移動並按下，
@@ -256,7 +258,7 @@ Start-Sleep -Seconds {after_finish_seconds}
 Note 'install_dir_after_finish' (Test-Path $installDir)
 Note 'main_exe_after_finish' (Test-Path (Join-Path $installDir '{main_exe}'))
 """
-    wait_for_page = _wait_for_page(app_name)
+    wait_for_page = _wait_for_page(wait_for_text or app_name)
     read_text = ""
     if dump_text:
         # 位置在點擊與拖曳之前——那些動作會換頁，之後讀到的是別一頁的字。
@@ -537,7 +539,7 @@ def run(vm, setup_path, app_name, work_dir, main_exe="app.exe",
         remote_target=None, window_title=None, icon_at=None, target_at=None,
         settle_seconds=12, type_before_drag=None, click_after_typing=None,
         click_after_settle=None, dump_text=False, dump_text_after=False,
-        after_finish_seconds=20, invoke_before_drag=None):
+        after_finish_seconds=20, invoke_before_drag=None, wait_for_text=None):
     """把安裝檔送進客體、在桌面上實際拖一次、取回結果。
 
     腳本必須以 `interactive=True` 執行：拖曳要發生在使用者看得到的桌面工作
@@ -571,7 +573,8 @@ def run(vm, setup_path, app_name, work_dir, main_exe="app.exe",
                                         dump_text=dump_text,
                                         dump_text_after=dump_text_after,
                                         after_finish_seconds=after_finish_seconds,
-                                        invoke_before_drag=invoke_before_drag))
+                                        invoke_before_drag=invoke_before_drag,
+                                        wait_for_text=wait_for_text))
     remote_script = GUEST_DIR + "\\" + os.path.basename(local_script)
     with stage("送入腳本", log=log):
         vm.copy_in(local_script, remote_script)
