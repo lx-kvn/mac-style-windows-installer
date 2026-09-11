@@ -319,6 +319,51 @@ class ItWaitsForThePageBeforeTouchingIt(unittest.TestCase):
         self.assertIn("$pageWaitSeconds = 90", script)
 
 
+class ItCanPressAButtonBeforeDragging(unittest.TestCase):
+    """更新／降版那幾個對話框是安裝檔一開起來就問的，不是拖完才問。
+
+    真實抓到（2026-09-09）：順序反過來的話，那一下拖在對話框的遮罩上、什麼
+    都沒碰到，而按完按鈕之後也沒有人再拖一次——三輪因此都是「按到了、卻什麼
+    都沒發生」，而報告上看起來像那顆按鈕沒有作用。
+    """
+
+    def _script(self, **kw):
+        return drive.guest_script(r"C:\Users\Tester\Setup.exe", "TestApp", **kw)
+
+    def test_the_button_is_pressed_before_the_drag(self):
+        script = self._script(invoke_before_drag="仍要繼續安裝")
+        self.assertIn("before_drag_pressed", script)
+        self.assertLess(script.index("before_drag_pressed"),
+                        script.index("[Mouse]::MoveTo($iconX"))
+
+    def test_it_says_what_it_saw_when_the_button_is_not_there(self):
+        script = self._script(invoke_before_drag="仍要繼續安裝")
+        self.assertIn("before_drag_seen", script)
+
+    def test_without_it_there_is_no_such_step(self):
+        self.assertNotIn("before_drag_pressed", self._script())
+
+    def test_it_looks_the_button_up_by_name(self):
+        script = self._script(invoke_before_drag="仍要繼續安裝")
+        self.assertIn("仍要繼續安裝", script)
+        self.assertIn("NameProperty", script)
+
+    def test_it_asks_the_button_where_it_is_and_clicks_it(self):
+        """位置向那顆按鈕本人問，再用與拖曳同一套滑鼠事件點下去。
+
+        不送按鍵：`SendKeys` 送的是**前景視窗**，而前景是跑腳本的主控台
+        ——2026-09-09 實測焦點移過去了（focus_error 是空的）、對話框卻沒關掉。
+        """
+        script = self._script(invoke_before_drag="確定")
+        self.assertIn("BoundingRectangle", script)
+        self.assertIn("before_drag_at", script)
+
+    def test_an_element_with_no_area_is_not_treated_as_pressed(self):
+        """沒有面積的元素點不到——那通常表示它其實不在畫面上。"""
+        script = self._script(invoke_before_drag="確定")
+        self.assertIn("$box.Width -gt 0", script)
+
+
 class ItCanReadTheTextOnTheScreen(unittest.TestCase):
     """畫面上實際顯示的字要讀得回來，否則「介面是哪個語言」只能靠人看截圖。
 

@@ -158,12 +158,63 @@ Note 'page_wait_seconds' $pageWaited
 """
 
 
+def _press_by_name(name, label):
+    """找到叫這個名字的按鈕、把焦點移過去、按空白鍵。
+
+    位置向那顆按鈕本人問（`BoundingRectangle`），再用與拖曳同一套滑鼠事件點
+    下去。不用輔助使用介面的 `Invoke`：它丟例外時腳本仍會往下走，而下一行
+    照樣把「按到了」記成 True，那條回報因此永遠成立。也不用送按鍵：`SendKeys`
+    送的是前景視窗，而前景是跑這支腳本的主控台——實測焦點移過去了、對話框
+    卻沒關掉。
+
+    找不到那顆按鈕時，把畫面上看得到的名稱一併回報：「按不到」與「按了沒
+    作用」的處置完全不同，分不出來的話查不下去。
+    """
+    return _UIA_READ + f"""
+$target = $null
+if ($element) {{
+    $wanted = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::NameProperty, '{name}')
+    $target = $element.FindFirst(
+        [System.Windows.Automation.TreeScope]::Descendants, $wanted)
+}}
+Note '{label}_found' ($target -ne $null)
+if ($target -ne $null) {{
+    # 位置向那顆按鈕本人問，不是量出來的座標；點下去走的是與拖曳同一條輸入
+    # 路徑。不送按鍵：SendKeys 送給前景視窗，而前景是跑這支腳本的主控台
+    # （2026-09-09 實測，焦點移過去了、對話框卻沒關掉）。
+    $box = $target.Current.BoundingRectangle
+    Note '{label}_rect' "$($box.X),$($box.Y),$($box.Width),$($box.Height)"
+    if ($box.Width -gt 0 -and $box.Height -gt 0) {{
+        $px = [int]($box.X + $box.Width / 2)
+        $py = [int]($box.Y + $box.Height / 2)
+        [Mouse]::MoveTo($px, $py)
+        Start-Sleep -Milliseconds 300
+        [Mouse]::Down()
+        Start-Sleep -Milliseconds 120
+        [Mouse]::Up()
+        Note '{label}_pressed' 'True'
+        Note '{label}_at' "$px,$py"
+        Start-Sleep -Seconds 5
+    }} else {{
+        # 沒有面積的元素點不到——那通常表示它其實不在畫面上。
+        Note '{label}_pressed' 'False'
+        Note '{label}_seen' ($seen -join ' | ')
+    }}
+}} else {{
+    Note '{label}_pressed' 'False'
+    Note '{label}_seen' ($seen -join ' | ')
+}}
+"""
+
+
 def guest_script(setup_path, app_name, install_dir=None, main_exe="app.exe",
                  steps=24, click_before_drag=None, window_title=None,
                  icon_at=None, target_at=None, settle_seconds=12,
                  type_before_drag=None, click_after_typing=None,
                  click_after_settle=None, after_finish_seconds=20,
-                 dump_text=False, dump_text_after=False):
+                 dump_text=False, dump_text_after=False,
+                 invoke_before_drag=None):
     """產生客體端要跑的 PowerShell。
 
     先等視窗出現並取得它的位置，才開始碰滑鼠——視窗還沒出現就移動並按下，
@@ -213,6 +264,12 @@ Note 'main_exe_after_finish' (Test-Path (Join-Path $installDir '{main_exe}'))
     read_after = _uia_snippet("window_text_after") if dump_text_after else ""
     icon_x, icon_y = icon_at or ICON_AT
     target_x, target_y = target_at or TARGET_AT
+    if invoke_before_drag:
+        # 更新／降版那幾個對話框是安裝檔一開起來就問的，不是拖完才問（見
+        # `tools/verify_msix_dialogs.py`）。先按過它才輪得到拖曳——順序反過來
+        # 的話，那一下拖在對話框的遮罩上，而按完按鈕之後沒有人再拖一次。
+        read_text = read_text + _press_by_name(invoke_before_drag,
+                                               "before_drag")
     pre_click = read_text
     if click_before_drag:
         click_x, click_y = click_before_drag
@@ -479,7 +536,8 @@ def run(vm, setup_path, app_name, work_dir, main_exe="app.exe",
         screenshot=None, log=print, click_before_drag=None,
         remote_target=None, window_title=None, icon_at=None, target_at=None,
         settle_seconds=12, type_before_drag=None, click_after_typing=None,
-        click_after_settle=None, dump_text=False, dump_text_after=False):
+        click_after_settle=None, dump_text=False, dump_text_after=False,
+        after_finish_seconds=20, invoke_before_drag=None):
     """把安裝檔送進客體、在桌面上實際拖一次、取回結果。
 
     腳本必須以 `interactive=True` 執行：拖曳要發生在使用者看得到的桌面工作
@@ -511,7 +569,9 @@ def run(vm, setup_path, app_name, work_dir, main_exe="app.exe",
                                         click_after_typing=click_after_typing,
                                         click_after_settle=click_after_settle,
                                         dump_text=dump_text,
-                                        dump_text_after=dump_text_after))
+                                        dump_text_after=dump_text_after,
+                                        after_finish_seconds=after_finish_seconds,
+                                        invoke_before_drag=invoke_before_drag))
     remote_script = GUEST_DIR + "\\" + os.path.basename(local_script)
     with stage("送入腳本", log=log):
         vm.copy_in(local_script, remote_script)
