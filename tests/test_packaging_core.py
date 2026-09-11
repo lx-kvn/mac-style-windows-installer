@@ -1892,10 +1892,16 @@ class TestMsixBackendIsProbedInTheBuildEnvironment(unittest.TestCase):
     """
 
     def _env(self, probe_output):
+        # 探測輸出一律補上 PYTHON_OK：這一組談的是 MSIX 綁定套件在不在，
+        # 前提是那個直譯器本身是真的。少了它，`python_found` 會是假，
+        # `ready` 跟著變假——量到的就不是這一組想問的東西了
+        # （「有沒有 Python」現在以能不能真的執行為準，見
+        # `tests/test_python_detection.py`）。
         with mock.patch("packaging_core.shutil.which", return_value="python.exe"), \
              mock.patch("packaging_core.subprocess.run",
                         side_effect=_fakes.decode_probe_run(
-                            _fakes.decode_probe_script(ascii_text=probe_output))):
+                            _fakes.decode_probe_script(
+                                ascii_text="PYTHON_OK\n" + probe_output))):
             return packaging_core.check_build_environment()
 
     def test_the_bindings_are_reported_when_the_probe_finds_them(self):

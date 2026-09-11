@@ -332,6 +332,14 @@ def check_build_environment():
     直譯器有沒有裝 pywebview（installer_core.py 需要 import webview，沒裝
     的話 pyinstaller 分析階段就會直接失敗）。pywin32 只影響捷徑功能，
     缺了不擋編譯，單獨標示為建議安裝。
+
+    **「有沒有 Python」以能不能真的執行為準，不是名字找不找得到。** Windows
+    預設就把微軟商店的捷徑替身放在 PATH 上
+    （`%LOCALAPPDATA%\\Microsoft\\WindowsApps\\python.exe`），`shutil.which()`
+    因此在一台完全沒裝 Python 的機器上也找得到它，那一格會是一個假的綠燈
+    ——而同一頁建議的 `pip install ...` 在那台機器上一定失敗，使用者卻不會
+    往「其實沒有 Python」那個方向查（2026-09-12 在乾淨的 Windows 11 上實際
+    量到）。找到的路徑仍然回報，那是查問題的線索。
     """
     result = {
         "pyinstaller_found": False,
@@ -347,7 +355,8 @@ def check_build_environment():
     result["pyinstaller_found"] = pyinstaller_path is not None
 
     python_path = shutil.which("python") or shutil.which("python3") or shutil.which("py")
-    result["python_found"] = python_path is not None
+    # 先記下找到的是哪一個檔案（查問題時要用），但「有沒有 Python」等下面
+    # 真的跑過才算數——見這個函式的說明。
     result["python_path"] = python_path or ""
 
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -357,6 +366,9 @@ def check_build_environment():
         # 每次都要重新啟動一個完整的 Python 直譯器，這個開銷不小，而且工具每次開啟
         # 都要重付一次。合併成一個子行程、一次測完兩件事，直接砍半這筆固定成本。
         probe_script = (
+            # 這一行是「這個直譯器真的跑得起來」的證據。商店的捷徑替身不會
+            # 印出它，只會印一段叫人去商店安裝的訊息。
+            "print('PYTHON_OK')\n"
             "import sys\n"
             "try:\n"
             "    import webview\n"
@@ -387,10 +399,13 @@ def check_build_environment():
                 text=True, encoding="utf-8", errors="replace",
             )
             output = proc.stdout or ""
+            result["python_found"] = "PYTHON_OK" in output
             result["webview_found"] = "WEBVIEW_OK" in output
             result["pywin32_found"] = "PYWIN32_OK" in output
             result["msix_backend_found"] = "MSIX_BACKEND_OK" in output
         except Exception:
+            # 連跑都跑不起來的直譯器不算數：後面的編譯一定失敗。
+            result["python_found"] = False
             result["webview_found"] = False
             result["pywin32_found"] = False
             result["msix_backend_found"] = False
