@@ -357,15 +357,37 @@ class ItCanPressAButtonBeforeDragging(unittest.TestCase):
         self.assertIn("仍要繼續安裝", script)
         self.assertIn("NameProperty", script)
 
-    def test_it_asks_the_button_where_it_is_and_clicks_it(self):
-        """位置向那顆按鈕本人問，再用與拖曳同一套滑鼠事件點下去。
-
-        不送按鍵：`SendKeys` 送的是**前景視窗**，而前景是跑腳本的主控台
-        ——2026-09-09 實測焦點移過去了（focus_error 是空的）、對話框卻沒關掉。
-        """
+    def test_an_element_that_is_not_on_screen_is_not_treated_as_pressed(self):
+        """先問它有沒有面積：沒有面積的元素按不到，而那通常表示它其實不在
+        畫面上（被遮住、或還沒畫出來）。"""
         script = self._script(invoke_before_drag="確定")
         self.assertIn("BoundingRectangle", script)
-        self.assertIn("before_drag_at", script)
+        self.assertIn("$box.Width -gt 0", script)
+
+    def test_it_invokes_the_button_instead_of_clicking_coordinates(self):
+        """網頁裡的按鈕不用座標按。
+
+        2026-09-12 實測量到的：**視窗層級**的矩形與 `GetWindowRect` 是同一個
+        空間（拖曳一直正常就是因為這樣），但**網頁內容裡**的元素回報的是實體
+        像素，而 `[Mouse]::MoveTo` 以 `GetSystemMetrics`（邏輯像素，量到
+        2046x952，畫面實際是 2558x1190）正規化——同一個 y 座標因此被當成不同
+        比例，游標落到按鈕下方一百多像素的地方。
+
+        沒有任何一個「從視窗算出來的比例」能同時修好兩者：拿視窗的兩種矩形
+        相除得到 1（兩者同空間），拿桌面與 `GetSystemMetrics` 相除也得到 1。
+        改成根本不碰座標。
+        """
+        script = self._script(invoke_before_drag="確定")
+        self.assertIn("InvokePattern", script)
+        self.assertIn("Invoke()", script)
+
+    def test_a_failure_to_invoke_is_recorded_not_swallowed(self):
+        """這是當初不用 Invoke 的理由：它丟例外時腳本仍會往下走，而下一行
+        照樣把「按到了」記成 True——那條回報因此永遠成立。包起來、把例外記
+        下來就沒有這個問題。"""
+        script = self._script(invoke_before_drag="確定")
+        self.assertIn("before_drag_error", script)
+        self.assertIn("catch", script)
 
     def test_an_element_with_no_area_is_not_treated_as_pressed(self):
         """沒有面積的元素點不到——那通常表示它其實不在畫面上。"""

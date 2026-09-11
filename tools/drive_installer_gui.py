@@ -161,13 +161,21 @@ Note 'page_wait_seconds' $pageWaited
 
 
 def _press_by_name(name, label):
-    """找到叫這個名字的按鈕、把焦點移過去、按空白鍵。
+    """找到叫這個名字的按鈕並按下去。**不用座標。**
 
-    位置向那顆按鈕本人問（`BoundingRectangle`），再用與拖曳同一套滑鼠事件點
-    下去。不用輔助使用介面的 `Invoke`：它丟例外時腳本仍會往下走，而下一行
-    照樣把「按到了」記成 True，那條回報因此永遠成立。也不用送按鍵：`SendKeys`
-    送的是前景視窗，而前景是跑這支腳本的主控台——實測焦點移過去了、對話框
-    卻沒關掉。
+    為什麼不用座標（2026-09-12 實測）：**視窗層級**的矩形與 `GetWindowRect`
+    是同一個空間——拖曳那一段一直正常就是因為這樣——但**網頁內容裡**的元素
+    回報的是實體像素，而 `[Mouse]::MoveTo` 以 `GetSystemMetrics` 正規化，
+    拿到的是邏輯像素（量到 2046x952，而畫面實際是 2558x1190）。同一個 y 座標
+    因此被當成不同比例，游標落到按鈕下方一百多像素的地方。
+
+    沒有任何一個「從視窗算出來的比例」能同時修好兩者：拿那個視窗的兩種矩形
+    相除得到 1（兩者同空間），拿桌面與 `GetSystemMetrics` 相除也得到 1。兩種
+    都試過、都量過。因此改成根本不碰座標，用輔助使用介面的 `Invoke`。
+
+    當初排除 `Invoke` 的理由是它丟例外時腳本仍會往下走，而下一行照樣把
+    「按到了」記成 True——那條回報因此永遠成立。包起來、把例外記下來就沒有
+    這個問題，而那本來就該做。
 
     找不到那顆按鈕時，把畫面上看得到的名稱一併回報：「按不到」與「按了沒
     作用」的處置完全不同，分不出來的話查不下去。
@@ -182,24 +190,24 @@ if ($element) {{
 }}
 Note '{label}_found' ($target -ne $null)
 if ($target -ne $null) {{
-    # 位置向那顆按鈕本人問，不是量出來的座標；點下去走的是與拖曳同一條輸入
-    # 路徑。不送按鍵：SendKeys 送給前景視窗，而前景是跑這支腳本的主控台
-    # （2026-09-09 實測，焦點移過去了、對話框卻沒關掉）。
     $box = $target.Current.BoundingRectangle
     Note '{label}_rect' "$($box.X),$($box.Y),$($box.Width),$($box.Height)"
     if ($box.Width -gt 0 -and $box.Height -gt 0) {{
-        $px = [int]($box.X + $box.Width / 2)
-        $py = [int]($box.Y + $box.Height / 2)
-        [Mouse]::MoveTo($px, $py)
-        Start-Sleep -Milliseconds 300
-        [Mouse]::Down()
-        Start-Sleep -Milliseconds 120
-        [Mouse]::Up()
-        Note '{label}_pressed' 'True'
-        Note '{label}_at' "$px,$py"
+        # 不碰座標（見這個函式的說明）。例外要記下來——不記的話下一行的
+        # 「按到了」就是一條永遠成立的回報。
+        $failed = ''
+        try {{
+            $pattern = $target.GetCurrentPattern(
+                [System.Windows.Automation.InvokePattern]::Pattern)
+            $pattern.Invoke()
+        }} catch {{
+            $failed = $_.Exception.Message
+        }}
+        Note '{label}_error' $failed
+        Note '{label}_pressed' ($failed -eq '')
         Start-Sleep -Seconds 5
     }} else {{
-        # 沒有面積的元素點不到——那通常表示它其實不在畫面上。
+        # 沒有面積的元素按不到——那通常表示它其實不在畫面上。
         Note '{label}_pressed' 'False'
         Note '{label}_seen' ($seen -join ' | ')
     }}
