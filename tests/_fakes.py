@@ -199,6 +199,11 @@ def make_installer_api(**overrides):
 
     with mock.patch.object(installer_core, "get_resource_path", side_effect=nowhere):
         api = installer_core.InstallerAPI()
+    # 介面語言釘成繁體中文，不用這台機器偵測到的那一個。安裝流程送到畫面上的
+    # 字現在依語言查表（2026-09-11），因此任何斷言訊息內容的測試在英文機器上
+    # 會量到另一種語言——而 CI 的 runner 正是英文的。要驗英文那一邊的測試自己
+    # 把 `ui_language` 設成 "en"，那是一個明確的選擇而不是機器的巧合。
+    api.ui_language = "zh-TW"
     for key, value in overrides.items():
         setattr(api, key, value)
     return api

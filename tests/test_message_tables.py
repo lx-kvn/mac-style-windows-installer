@@ -24,6 +24,9 @@ MODULES = [
     "msix_settings",
     "packaging_core",
     "webview2_runtime",
+    "installer_core",
+    "msix_install",
+    "msix_all_users",
 ]
 
 

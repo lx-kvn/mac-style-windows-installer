@@ -36,6 +36,7 @@ from window_drag import WindowDragController
 from disk_space import required_install_size, check_drive_space, format_size
 import file_assoc
 import lang_detect
+import messages
 import webview2_runtime
 import restart_manager
 import system_entries
@@ -69,6 +70,141 @@ DEFAULT_UI_LANGUAGE = "zh-TW"
 # 原本沒有這行，純粹是靠這兩個方法各自的 try/except Exception 意外吞掉
 # 讀取未賦值全域變數會拋的 NameError，效果剛好一樣，但不是刻意設計的。
 window = None
+
+
+# 安裝流程送到**畫面上**的字。安裝紀錄（install_log.txt）不走這裡：那是給
+# 開發者看的診斷資料，不是介面。
+#
+# 真實抓到的缺陷（2026-09-11，`tools/verify_ui_language.py`）：這些字原本
+# 全部寫死中文，而前端只在 Python 回傳的訊息與它自己的標題一字不差時才不
+# 顯示它（`messageBeyondTitle()`）。中文系統上兩者剛好一樣，因此英文系統上
+# 「標題英文、內文中文」這個缺陷在中文機器上完全看不出來，而 CI 沒有畫面也
+# 看不到。`install_success` 因此必須與 `ui/index.html` 的
+# `install_success_title` 逐字相同，兩邊改了一邊就會露出來。
+MESSAGES = {
+    "zh-TW": {
+        "install_in_progress": "安裝正在進行中，請稍候。",
+        "already_finished":
+            "這個安裝程式已經完成安裝，如果需要重新安裝請重新開啟安裝程式。",
+        "msix_coexist":
+            "這台電腦上有一份同名但簽章者不同的套件（{full_name}）。\n"
+            "系統會把它與這次要安裝的視為兩個不相關的應用程式，安裝之後"
+            "兩者會並存。\n"
+            "這個安裝程式不會自動移除它——那份套件有可能屬於另一個開發者。",
+        "no_payload": "安裝失敗：找不到內建軟體資源！",
+        "no_disk_space": "磁碟空間不足：{detail}。",
+        "disk_shortfall_item": "{drive} 需要約 {required}、剩餘 {free}",
+        # 分隔符也是一則訊息：頓號只有中文用。
+        "list_separator": "、",
+        "process_running": "偵測到「{name}」正在執行中。\n請先關閉程式後再繼續安裝。",
+        "pre_script_failed": "安裝失敗：安裝前置腳本執行失敗。{detail}",
+        "empty_payload": "安裝失敗：打包的資源資料夾是空的。",
+        "integrity_failed":
+            "安裝失敗：{count} 個檔案複製後驗證不通過，安裝資源可能已損壞。"
+            "已自動清除本次安裝複製的檔案。",
+        "install_success": "安裝成功",
+        "unknown_error": "發生未知錯誤：\n{error}",
+        "progress_installing": "正在安裝...",
+        "progress_removing_old": "正在移除舊版本...",
+        "progress_pre_script": "正在執行安裝前置腳本...",
+        "progress_copying": "正在複製檔案 ({done}/{total})...",
+        "progress_writing_config": "正在寫入設定與解除安裝助手...",
+        "progress_registering": "正在註冊系統項目...",
+        "progress_post_script": "正在執行安裝後置腳本...",
+        "progress_writing_log": "正在寫入安裝紀錄...",
+        "progress_done": "安裝完成",
+        "os_locked":
+            "安裝失敗：{file_label}正被其他程式使用中，暫時無法覆寫。{locker_hint}"
+            "請先關閉相關程式後再重試安裝。\n"
+            "若按下「關閉此程式」後問題持續發生，也可能是防毒/安全軟體攔截了"
+            "終止系統關鍵行程（例如檔案總管）的動作，請確認相關防護設定是否允許此操作。",
+        "os_locked_by": "目前偵測到鎖定這個檔案的程式：{names}。",
+        "os_locked_unknown": "未知程式",
+        "os_locked_some_file": "某個檔案",
+        "os_locked_named": "「{name}」",
+        "os_access_denied":
+            "安裝失敗：存取被拒。這支安裝程式已經是以系統管理員身分執行，"
+            "通常不是「權限不足」造成的，比較可能是防毒軟體、Windows 防勒索軟體的"
+            "「受控資料夾存取」，或企業網域原則限制了這個安裝路徑的寫入權限。\n"
+            "請暫時停用相關防護，或改安裝到其他路徑（例如桌面或 D 槽）後再試。",
+        "os_write_protect":
+            "安裝失敗：目標磁碟或媒體目前是唯讀（寫入保護）狀態，請改安裝到其他磁碟。",
+        "os_permission":
+            "安裝失敗：權限不足，但這支安裝程式已經是以系統管理員身分執行，"
+            "不太可能是使用者權限的問題（可能是舊版本尚未移除完畢，請關閉安裝程式"
+            "稍後再試一次；或安裝路徑有其他特殊的存取限制）。",
+        "os_generic": "安裝失敗：{error}",
+    },
+    "en": {
+        "install_in_progress": "An installation is already running. Please wait.",
+        "already_finished":
+            "This installer has already finished. To install again, please reopen it.",
+        "msix_coexist":
+            "A package with the same name but a different signer ({full_name}) is "
+            "installed on this machine.\n"
+            "Windows treats it and the one being installed as unrelated "
+            "applications, so both will remain after this installation.\n"
+            "This installer does not remove it — that package may belong to "
+            "another developer.",
+        "no_payload": "Installation failed: the bundled application files were not found.",
+        "no_disk_space": "Not enough disk space: {detail}.",
+        "disk_shortfall_item":
+            "{drive} needs about {required}, {free} free",
+        "list_separator": ", ",
+        "process_running":
+            "\u201c{name}\u201d is currently running.\nPlease close it before continuing.",
+        "pre_script_failed":
+            "Installation failed: the pre-install script did not succeed. {detail}",
+        "empty_payload": "Installation failed: the bundled application folder is empty.",
+        "integrity_failed":
+            "Installation failed: {count} file(s) did not pass verification after "
+            "copying, so the bundled files may be damaged. The files copied by this "
+            "installation have been removed.",
+        "install_success": "Installation Complete",
+        "unknown_error": "An unexpected error occurred:\n{error}",
+        "progress_installing": "Installing...",
+        "progress_removing_old": "Removing the old version...",
+        "progress_pre_script": "Running the pre-install script...",
+        "progress_copying": "Copying files ({done}/{total})...",
+        "progress_writing_config": "Writing settings and the uninstaller...",
+        "progress_registering": "Registering system entries...",
+        "progress_post_script": "Running the post-install script...",
+        "progress_writing_log": "Writing the installation log...",
+        "progress_done": "Installation complete",
+        "os_locked":
+            "Installation failed: {file_label} is in use by another program and "
+            "cannot be replaced right now. {locker_hint}Please close it and try "
+            "again.\n"
+            "If the problem persists after using \u201cClose this program\u201d, "
+            "security software may be blocking the termination of a critical system "
+            "process (such as File Explorer); check whether your protection settings "
+            "allow it.",
+        "os_locked_by": "The following program(s) are holding the file: {names}.",
+        "os_locked_unknown": "an unknown program",
+        "os_locked_some_file": "a file",
+        "os_locked_named": "\u201c{name}\u201d",
+        "os_access_denied":
+            "Installation failed: access denied. This installer already runs as an "
+            "administrator, so this is usually not a permission problem; it is more "
+            "likely anti-virus software, Windows controlled folder access, or a "
+            "domain policy restricting writes to this location.\n"
+            "Temporarily disable that protection, or install to another location "
+            "(the desktop or another drive) and try again.",
+        "os_write_protect":
+            "Installation failed: the target disk or medium is read-only "
+            "(write-protected). Please install to another disk.",
+        "os_permission":
+            "Installation failed: permission denied, but this installer already runs "
+            "as an administrator, so a user-permission problem is unlikely (an older "
+            "version may still be finishing its removal — close the installer and try "
+            "again shortly — or this location has other access restrictions).",
+        "os_generic": "Installation failed: {error}",
+    },
+}
+
+
+def _t(key, lang=messages.DEFAULT_LANGUAGE, /, **params):
+    return messages.translate(MESSAGES, key, lang, **params)
 
 
 def _file_checksum(path, chunk_size=1024 * 1024):
@@ -911,11 +1047,12 @@ class InstallerAPI:
         """
         with self._install_lock:
             if self._install_in_progress:
-                return {"status": "error", "message": "安裝正在進行中，請稍候。"}
+                return {"status": "error",
+                        "message": _t("install_in_progress", self.ui_language)}
             if self._install_completed:
                 return {
                     "status": "error",
-                    "message": "這個安裝程式已經完成安裝，如果需要重新安裝請重新開啟安裝程式。",
+                    "message": _t("already_finished", self.ui_language),
                 }
             self._install_in_progress = True
 
@@ -1006,12 +1143,8 @@ class InstallerAPI:
                 and existing.publisher != self.msix_publisher):
             return {
                 "action": "coexist",
-                "message": (
-                    f"這台電腦上有一份同名但簽章者不同的套件（{existing.full_name}）。\n"
-                    "系統會把它與這次要安裝的視為兩個不相關的應用程式，安裝之後"
-                    "兩者會並存。\n"
-                    "這個安裝程式不會自動移除它——那份套件有可能屬於另一個開發者。"
-                ),
+                "message": _t("msix_coexist", self.ui_language,
+                                  full_name=existing.full_name),
                 "package_full_name": existing.full_name,
             }
 
@@ -1044,7 +1177,8 @@ class InstallerAPI:
         def report_progress(percentage):
             # 第十一輪 CI 探針確認進度回報是真實百分比，因此這裡直接轉呈，
             # 不需要退化為不確定進度動畫（第二輪決議第六項的備案未被觸發）。
-            self._report_progress(percentage, "正在安裝...")
+            self._report_progress(percentage,
+                                  _t("progress_installing", self.ui_language))
 
         # 同名的 MSIX 套件是否已安裝（稽核 D3）。identity 只有打包端知道，
         # 它不由 app_name 推導（ADR-0007），因此由設定檔帶過來。舊版工具編
@@ -1145,7 +1279,8 @@ class InstallerAPI:
             # 路徑仍然照舊復原，見下面兩個 except 區塊。
             src_dir = self._app_contents_dir()
             if not os.path.exists(src_dir):
-                return {"status": "error", "message": "安裝失敗：找不到內建軟體資源！"}
+                return {"status": "error",
+                        "message": _t("no_payload", self.ui_language)}
 
             # 覆蓋安裝偵測提前到磁碟空間檢查之前：這是一次唯讀的登錄表查詢，
             # 沒有副作用，但磁碟空間檢查需要知道「這次會不會把舊安裝資料夾
@@ -1159,12 +1294,15 @@ class InstallerAPI:
             if not ok:
                 # 大小一律經 format_size()：整數 MB 會把小於 1 MB 的量顯示成
                 # 0，訊息讀起來會像程式出錯而不像空間不足。
-                detail = "、".join(
-                    f"{d['drive']} 需要約 {format_size(d['required'])}、"
-                    f"剩餘 {format_size(d['free'])}"
+                detail = _t("list_separator", self.ui_language).join(
+                    _t("disk_shortfall_item", self.ui_language,
+                       drive=d["drive"], required=format_size(d["required"]),
+                       free=format_size(d["free"]))
                     for d in drive_reports if not d["sufficient"]
                 )
-                return {"status": "error", "message": f"磁碟空間不足：{detail}。"}
+                return {"status": "error",
+                        "message": _t("no_disk_space", self.ui_language,
+                                      detail=detail)}
             if drive_reports:
                 log(
                     "磁碟空間檢查通過（"
@@ -1191,7 +1329,8 @@ class InstallerAPI:
             if not skip_process_check and self.main_exe and _is_process_running(os.path.basename(self.main_exe)):
                 return {
                     "status": "process_running",
-                    "message": f"偵測到「{self.main_exe}」正在執行中。\n請先關閉程式後再繼續安裝。",
+                    "message": _t("process_running", self.ui_language,
+                                  name=self.main_exe),
                 }
 
             # 覆蓋安裝：使用者在拖曳圖示前的彈窗只是「確認要不要繼續」，真正
@@ -1200,7 +1339,7 @@ class InstallerAPI:
             # run_upgrade_uninstall() 內部會先備份舊安裝資料夾，失敗時自己復原。
             # existing 沿用上面磁碟空間檢查前查到的那一次結果，不重查。
             if existing.get("exists"):
-                self._report_progress(3, "正在移除舊版本...")
+                self._report_progress(3, _t("progress_removing_old", self.ui_language))
                 upgrade_result = self.run_upgrade_uninstall(existing_info=existing)
                 if upgrade_result.get("status") == "error":
                     return {"status": "error", "message": upgrade_result.get("message")}
@@ -1238,12 +1377,14 @@ class InstallerAPI:
             # 主程式可能依賴這個腳本先做的事（例如停用某個會鎖住待複製檔案
             # 的服務），腳本沒成功執行完，後面的複製流程不該假裝沒事繼續跑。
             if self.pre_install_script:
-                self._report_progress(2, "正在執行安裝前置腳本...")
+                self._report_progress(2, _t("progress_pre_script", self.ui_language))
                 ok, msg = self._run_install_script(self.pre_install_script)
                 if not ok:
                     log(f"[錯誤] 安裝前置腳本執行失敗: {msg}")
                     self._restore_upgrade_backup()
-                    return {"status": "error", "message": f"安裝失敗：安裝前置腳本執行失敗。{msg}"}
+                    return {"status": "error",
+                            "message": _t("pre_script_failed",
+                                          self.ui_language, detail=msg)}
                 log("已執行安裝前置腳本")
 
             # 收集要複製的檔案清單（先算總數，才能算出真實百分比）
@@ -1255,7 +1396,8 @@ class InstallerAPI:
             total = len(file_list)
             if total == 0:
                 self._restore_upgrade_backup()
-                return {"status": "error", "message": "安裝失敗：打包的資源資料夾是空的。"}
+                return {"status": "error",
+                        "message": _t("empty_payload", self.ui_language)}
 
             integrity_errors = []
             last_reported = -1
@@ -1285,7 +1427,9 @@ class InstallerAPI:
 
                 percent = int((i + 1) / total * 80)  # 複製階段佔整體流程的 0-80%
                 if percent != last_reported:
-                    self._report_progress(percent, f"正在複製檔案 ({i + 1}/{total})...")
+                    self._report_progress(percent,
+                                          _t("progress_copying", self.ui_language,
+                                             done=i + 1, total=total))
                     last_reported = percent
 
             if integrity_errors:
@@ -1294,13 +1438,13 @@ class InstallerAPI:
                 self._restore_upgrade_backup()
                 return {
                     "status": "error",
-                    "message": f"安裝失敗：{len(integrity_errors)} 個檔案複製後驗證不通過，"
-                               f"安裝資源可能已損壞。已自動清除本次安裝複製的檔案。",
+                    "message": _t("integrity_failed", self.ui_language,
+                                      count=len(integrity_errors)),
                 }
             log(f"已複製 {len(copied_rel_paths)} 個檔案，完整性驗證通過")
 
             # 複製反安裝助手與設定檔
-            self._report_progress(85, "正在寫入設定與解除安裝助手...")
+            self._report_progress(85, _t("progress_writing_config", self.ui_language))
             uninstall_src = get_resource_path("uninstall.exe")
             if os.path.exists(uninstall_src):
                 current_copy_target = os.path.join(self.selected_path, "uninstall.exe")
@@ -1334,7 +1478,7 @@ class InstallerAPI:
                     del self.doc_icons[ext]
 
             # 登錄表 + 捷徑 + 檔案關聯 + PATH
-            self._report_progress(90, "正在註冊系統項目...")
+            self._report_progress(90, _t("progress_registering", self.ui_language))
             try:
                 self._register_uninstall_entry()
                 registry_entry_created = True
@@ -1417,7 +1561,7 @@ class InstallerAPI:
             # 失敗只記錄警告、不讓整體安裝回報失敗——此時主程式已經是可用
             # 狀態，不該因為收尾腳本（例如額外的環境設定）失敗就整個作廢。
             if self.post_install_script:
-                self._report_progress(96, "正在執行安裝後置腳本...")
+                self._report_progress(96, _t("progress_post_script", self.ui_language))
                 ok, script_error = self._run_install_script(self.post_install_script)
                 if ok:
                     log("已執行安裝後置腳本")
@@ -1428,7 +1572,7 @@ class InstallerAPI:
                     warnings.append(msg)
 
             # 寫入安裝清單，供解除安裝時「照清單刪」使用
-            self._report_progress(97, "正在寫入安裝紀錄...")
+            self._report_progress(97, _t("progress_writing_log", self.ui_language))
             manifest = {
                 "app_name": self.app_name,
                 "version": self.version,
@@ -1455,12 +1599,14 @@ class InstallerAPI:
             # install_log.txt 由外層 _trigger_installation_impl() 的 finally
             # 統一寫出（見該處說明），這裡不用再寫一次。
 
-            self._report_progress(100, "安裝完成")
+            self._report_progress(100, _t("progress_done", self.ui_language))
             self._discard_upgrade_backup()
 
             main_exe_path = self._resolve_installed_path(self.main_exe) if self.main_exe else ""
             return {
-                "status": "success", "message": "安裝成功", "main_exe_path": main_exe_path,
+                "status": "success",
+                "message": _t("install_success", self.ui_language),
+                "main_exe_path": main_exe_path,
                 "warnings": warnings,
             }
 
@@ -1492,7 +1638,9 @@ class InstallerAPI:
                 pre_existing_rel_paths=pre_existing_rel_paths,
             )
             self._restore_upgrade_backup()
-            return {"status": "error", "message": f"發生未知錯誤：\n{str(e)}"}
+            return {"status": "error",
+                    "message": _t("unknown_error", self.ui_language,
+                                  error=e)}
 
     def _describe_install_os_error(self, error, dest_file=None):
         """把安裝過程中複製/寫入檔案時真正發生的 OSError 轉換成使用者看得懂
@@ -1528,31 +1676,22 @@ class InstallerAPI:
             if dest_file:
                 processes = restart_manager.find_locking_processes([dest_file])
                 if processes:
-                    names = "、".join(sorted({name for _pid, name in processes if name})) or "未知程式"
-                    locker_hint = f"目前偵測到鎖定這個檔案的程式：{names}。"
-            file_label = f"「{os.path.basename(dest_file)}」" if dest_file else "某個檔案"
-            return (
-                f"安裝失敗：{file_label}正被其他程式使用中，暫時無法覆寫。{locker_hint}"
-                f"請先關閉相關程式後再重試安裝。\n"
-                f"若按下「關閉此程式」後問題持續發生，也可能是防毒/安全軟體攔截了"
-                f"終止系統關鍵行程（例如檔案總管）的動作，請確認相關防護設定是否允許此操作。"
-            )
+                    names = _t("list_separator", self.ui_language).join(
+                        sorted({name for _pid, name in processes if name})) \
+                        or _t("os_locked_unknown", self.ui_language)
+                    locker_hint = _t("os_locked_by", self.ui_language, names=names)
+            file_label = (_t("os_locked_named", self.ui_language,
+                             name=os.path.basename(dest_file)) if dest_file
+                          else _t("os_locked_some_file", self.ui_language))
+            return _t("os_locked", self.ui_language,
+                      file_label=file_label, locker_hint=locker_hint)
         if winerror == 5:
-            return (
-                "安裝失敗：存取被拒。這支安裝程式已經是以系統管理員身分執行，"
-                "通常不是「權限不足」造成的，比較可能是防毒軟體、Windows 防勒索軟體的"
-                "「受控資料夾存取」，或企業網域原則限制了這個安裝路徑的寫入權限。\n"
-                "請暫時停用相關防護，或改安裝到其他路徑（例如桌面或 D 槽）後再試。"
-            )
+            return _t("os_access_denied", self.ui_language)
         if winerror == 19:
-            return "安裝失敗：目標磁碟或媒體目前是唯讀（寫入保護）狀態，請改安裝到其他磁碟。"
+            return _t("os_write_protect", self.ui_language)
         if isinstance(error, PermissionError):
-            return (
-                "安裝失敗：權限不足，但這支安裝程式已經是以系統管理員身分執行，"
-                "不太可能是使用者權限的問題（可能是舊版本尚未移除完畢，請關閉安裝程式"
-                "稍後再試一次；或安裝路徑有其他特殊的存取限制）。"
-            )
-        return f"安裝失敗：{error}"
+            return _t("os_permission", self.ui_language)
+        return _t("os_generic", self.ui_language, error=error)
 
     def _is_lock_violation(self, error):
         """判斷是不是「檔案被其他程式鎖住」這一類 OSError（Windows 的
