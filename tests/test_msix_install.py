@@ -513,5 +513,75 @@ class ProvisioningForAllUsersTest(unittest.TestCase):
         self.assertIn("提權那一段爆了", result["warnings"][0])
 
 
+class TheLegacyFolderGetsCleanedUpToo(unittest.TestCase):
+    """舊版的解除安裝跑完之後，那個資料夾本身也要收掉。
+
+    真實量到（2026-09-11，`tools/verify_msix_dialogs.py` 的遷移那一輪）：MSIX
+    裝上了、舊版的檔案也清掉了，但 `%LOCALAPPDATA%\\Programs\\<App>\\` 還在，
+    裡面剛好剩一支 `uninstall.exe`。成因是遷移以 `--upgrade` 去跑舊的解除安裝
+    程式，而 `self_delete` 對那個旗標不排背景自我刪除——那在傳統換傳統的更新裡
+    是對的（避免把剛複製進去的新檔案一併砍掉），但傳統換 MSIX 沒有任何東西會
+    複製回那個資料夾。使用者雙擊那支殘留的程式時，要移除的那一份已經不在了。
+    """
+
+    class Cleaner:
+        def __init__(self, outcome=None):
+            self.asked = []
+            self.outcome = outcome
+
+        def __call__(self, path):
+            self.asked.append(path)
+            if isinstance(self.outcome, Exception):
+                raise self.outcome
+            return self.outcome
+
+    def _existing(self):
+        return {"exists": True, "install_path": r"C:\Users\T\AppData\Local\X"}
+
+    def test_the_folder_is_cleaned_up_after_a_successful_removal(self):
+        recorder = Recorder(existing=self._existing())
+        cleaner = self.Cleaner()
+        result = run(recorder, remove_legacy_dir=cleaner)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(cleaner.asked, [r"C:\Users\T\AppData\Local\X"])
+
+    def test_it_happens_before_the_package_is_deployed(self):
+        """順序與「先移除舊版再部署」同一個理由：兩份並存的那個狀態不該存在。"""
+        recorder = Recorder(existing=self._existing())
+        run(recorder, remove_legacy_dir=self.Cleaner())
+        self.assertLess(recorder.order.index("remove"),
+                        recorder.order.index("deploy"))
+
+    def test_nothing_is_cleaned_up_when_there_was_no_legacy_install(self):
+        recorder = Recorder()
+        cleaner = self.Cleaner()
+        run(recorder, remove_legacy_dir=cleaner)
+        self.assertEqual(cleaner.asked, [])
+
+    def test_it_is_not_attempted_when_the_removal_failed(self):
+        """移除失敗時那個資料夾裡還有東西，砍掉它等於把使用者的程式刪了。"""
+        recorder = Recorder(existing=self._existing(), remove_ok=False)
+        cleaner = self.Cleaner()
+        run(recorder, remove_legacy_dir=cleaner)
+        self.assertEqual(cleaner.asked, [])
+
+    def test_a_failure_to_clean_up_does_not_take_the_installation_down(self):
+        """收不掉那個空殼不值得讓安裝停下來——使用者要的東西已經裝好了。
+        改為留一條警示，形狀與佈建那條路相同。"""
+        recorder = Recorder(existing=self._existing())
+        cleaner = self.Cleaner(outcome=OSError("目錄被鎖住"))
+        result = run(recorder, remove_legacy_dir=cleaner)
+        self.assertEqual(result["status"], "success")
+        self.assertTrue(result["warnings"])
+        self.assertIn("目錄被鎖住", result["warnings"][0])
+
+    def test_without_the_hook_the_behaviour_is_unchanged(self):
+        """沒給這個參數的呼叫端行為完全不變。"""
+        recorder = Recorder(existing=self._existing())
+        result = run(recorder)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["warnings"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

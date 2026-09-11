@@ -71,6 +71,9 @@ MESSAGES = {
         "legacy_found":
             "偵測到已安裝的舊版本（傳統安裝模式），會先把它移除再安裝新版：{path}",
         "legacy_removal_unknown": "舊版本移除失敗，原因不明。",
+        "legacy_dir_left":
+            "舊版本的安裝資料夾沒有清乾淨（{error}）。裡面的應用程式已經移除，"
+            "剩下的是解除安裝助手本身——它現在沒有作用，可以手動刪除：{path}",
         "legacy_removal_failed":
             "安裝中止：{message}\n新舊版本並存會造成兩筆重複的應用程式項目與"
             "檔案關聯衝突，因此不繼續安裝。",
@@ -124,6 +127,11 @@ MESSAGES = {
             "An older version installed the traditional way was found; it will be "
             "removed before the new one is installed: {path}",
         "legacy_removal_unknown": "Removing the old version failed for an unknown reason.",
+        "legacy_dir_left":
+            "The old installation folder could not be cleaned up ({error}). The "
+            "application itself has been removed; what remains is the old "
+            "uninstaller, which no longer does anything and can be deleted by "
+            "hand: {path}",
         "legacy_removal_failed":
             "Installation stopped: {message}\nLeaving both versions in place would "
             "produce two duplicate application entries and conflicting file "
@@ -281,7 +289,8 @@ def run(package_path, check_existing=None, remove_existing=None, deploy=None,
         progress=None, log=None, package_must_exist=False,
         find_installed_package=None, package_version="", package_publisher="",
         confirm_downgrade=None, remove_installed_package=None,
-        provision_all_users=None, lang=messages.DEFAULT_LANGUAGE):
+        provision_all_users=None, remove_legacy_dir=None,
+        lang=messages.DEFAULT_LANGUAGE):
     """執行 MSIX 模式的安裝，回傳與傳統流程相同形狀的結果字典。
 
     `package_must_exist`：呼叫端已經確認過檔案存在時可以省略這道檢查。預設
@@ -297,6 +306,10 @@ def run(package_path, check_existing=None, remove_existing=None, deploy=None,
     `provision_all_users` 為 None 時完全不走全機器範圍那條路——沒有啟用該
     設定的安裝檔行為與這個參數出現之前相同。
 
+    `remove_legacy_dir` 在傳統模式那一份移除成功之後被呼叫，收掉剩下的空殼。
+    需要它的理由見下方呼叫處的說明。為 None 時完全不做，行為與這個參數出現
+    之前相同。
+
     `lang` 決定所有回傳與回報的訊息用哪一種語言。安裝端傳的是它自己依系統
     語言算出來的那一個值，兩邊不會分岔。
     """
@@ -310,6 +323,9 @@ def run(package_path, check_existing=None, remove_existing=None, deploy=None,
             "message": _t("package_missing", lang, path=package_path),
         }
 
+    # warnings 先建立：清掉舊資料夾失敗時要往這裡放一條，而那一步比下面
+    # 原本建立它的地方更早。
+    warnings = []
     if check_existing:
         existing = check_existing() or {}
         if existing.get("exists"):
@@ -325,11 +341,23 @@ def run(package_path, check_existing=None, remove_existing=None, deploy=None,
                     "message": _t("legacy_removal_failed", lang, message=message),
                 }
             report(_t("old_version_removed", lang))
+            # 那個資料夾本身還在：舊的解除安裝助手被以 `--upgrade` 呼叫，而
+            # `self_delete` 對那個旗標不排背景自我刪除——傳統換傳統的更新裡
+            # 那是對的（避免那段刪除把剛複製進去的新檔案一併帶走），但這裡
+            # 不會有任何東西複製回那個資料夾，剩下的是一支沒有作用的解除安裝
+            # 助手（2026-09-11 實機量到）。
+            #
+            # 收不掉不中止安裝：使用者要的東西已經裝好了，剩下的是一個空殼。
+            if remove_legacy_dir:
+                try:
+                    remove_legacy_dir(existing.get("install_path", ""))
+                except Exception as error:
+                    warnings.append(_t("legacy_dir_left", lang, error=error,
+                                       path=existing.get("install_path", "")))
 
     # 同名的 MSIX 套件是否已安裝——查一次，供版本比較與失敗訊息使用。
     # 查在部署**之前**：「要不要降版」這個決定放在失敗之後的話，使用者此時
     # 看到的是系統的錯誤訊息，不是一個他可以回答的問題（ADR-0015 決定一）。
-    warnings = []
     installed_package = _find_installed(find_installed_package, log, lang)
     if installed_package is not None:
         proceed, refusal = _handle_existing_package(

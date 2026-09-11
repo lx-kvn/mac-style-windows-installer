@@ -116,6 +116,37 @@ def get_resource_path(relative_path):
 DEPENDENCY_CHECKERS = dependency_install.DEPENDENCY_CHECKERS
 
 
+# 傳統模式那份被移除之後，資料夾裡可能剩下的東西。只有這幾個名字算殘留，
+# 比對的是完整檔名而不是開頭——用開頭比對的話，`uninstall.exe.bak` 或使用者
+# 自己的 `installer_config.json.orig` 也會被當成殘留刪掉。
+_LEGACY_RESIDUE = frozenset({"uninstall.exe", "installer_config.json"})
+
+
+def remove_legacy_install_dir(path):
+    """收掉傳統模式那份移除之後剩下的空殼。
+
+    為什麼會剩：舊的解除安裝助手是以 `--upgrade` 被呼叫的，而 `self_delete`
+    對那個旗標不排背景自我刪除——那在傳統換傳統的更新裡是對的（避免那段刪除
+    把剛複製進去的新檔案一併帶走），但換成 MSIX 之後不會有任何東西複製回那個
+    資料夾，剩下的是一支沒有作用的解除安裝助手（2026-09-11 實機量到）。
+
+    **只收自己認得的那幾個名字，不做遞迴刪除。** 認不得的東西留在原地並拋出
+    例外讓呼叫端回報——那有可能是使用者自己放進去的檔案，而這一步跑在安裝流程
+    的中途，刪錯了沒有第二次機會。
+    """
+    if not path or not os.path.isdir(path):
+        # 舊的解除安裝助手自己收乾淨了，那是好事，不是失敗。
+        return
+    leftovers = os.listdir(path)
+    strangers = [name for name in leftovers if name not in _LEGACY_RESIDUE
+                 or os.path.isdir(os.path.join(path, name))]
+    if strangers:
+        raise OSError("資料夾裡還有認不得的東西：" + "、".join(sorted(strangers)))
+    for name in leftovers:
+        os.remove(os.path.join(path, name))
+    os.rmdir(path)
+
+
 def _is_process_running(exe_name):
     """用 tasklist 檢查指定檔名的行程是否正在執行
 
@@ -1064,6 +1095,9 @@ class InstallerAPI:
             confirm_downgrade=lambda info: bool(allow_downgrade),
             remove_installed_package=msix_deploy.remove,
             provision_all_users=provision_all_users,
+            # 舊的解除安裝助手以 `--upgrade` 被呼叫，因此不會自己刪掉那個
+            # 資料夾（見 remove_legacy_install_dir 的說明）。
+            remove_legacy_dir=remove_legacy_install_dir,
             # 介面語言已經在 __init__ 依系統語言算過一次，這裡沿用同一個值：
             # 兩邊各自偵測會讓同一個畫面上出現兩種語言的文字。
             lang=self.ui_language,
